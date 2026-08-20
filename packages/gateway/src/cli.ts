@@ -39,6 +39,36 @@ switch (command) {
     }
   }
 
+  case 'audit': {
+    const sub = args[0];
+    if (sub === 'verify') {
+      const configPath = args[1] ?? './agentgate.yml';
+      let dbPath = './agentgate.sqlite';
+      try {
+        const parsed = yaml.load(fs.readFileSync(configPath, 'utf-8')) as any;
+        if (parsed?.db_path) dbPath = parsed.db_path;
+      } catch (err) {
+        // use default
+      }
+      import('./storage.js').then(({ AuditStorage }) => {
+        const storage = new AuditStorage(dbPath);
+        const result = storage.verifyChain();
+        storage.close();
+        if (result.valid) {
+          console.log(`✅ Audit chain verified. ${result.count} records intact.`);
+          process.exit(0);
+        } else {
+          console.error(`❌ Audit chain verification failed!`);
+          console.error(`   Error: ${result.error}`);
+          process.exit(1);
+        }
+      });
+      break;
+    }
+    console.error('Unknown audit subcommand. Try: agentgate audit verify');
+    process.exit(1);
+  }
+
   default: {
     console.log(`
 AgentGate — The open-source firewall for AI agents.
@@ -46,6 +76,7 @@ AgentGate — The open-source firewall for AI agents.
 Usage:
   agentgate start [config.yml]     Start the gateway (default: agentgate.yml)
   agentgate validate [policy.yml]  Validate a policy file
+  agentgate audit verify [config]  Verify the tamper-evident audit chain
 `);
     process.exit(0);
   }

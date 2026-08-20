@@ -1,8 +1,9 @@
 import Fastify from 'fastify';
 import { randomBytes } from 'node:crypto';
-import type { AuditStorage } from './storage.js';
-import type { ApprovalManager } from './approval.js';
+import type { AuditStorage } from '../storage.js';
+import type { ApprovalManager } from '../approval.js';
 import type { AuditEvent, Approval } from '@agentgate/protocol';
+import cors from '@fastify/cors';
 
 /** Per-launch local auth token — generated fresh on each start. */
 export let LOCAL_AUTH_TOKEN = '';
@@ -21,6 +22,12 @@ export function buildControlApi(opts: {
   LOCAL_AUTH_TOKEN = randomBytes(32).toString('hex');
 
   const app = Fastify({ logger: false });
+
+  app.register(cors, {
+    origin: ['http://127.0.0.1:5173', 'http://localhost:5173'], // Vite dev server
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type', 'x-agentgate-token'],
+  });
 
   // ── Security Middleware ────────────────────────────────────────────────────
 
@@ -46,6 +53,8 @@ export function buildControlApi(opts: {
         return;
       }
     }
+    
+    reply.header('Referrer-Policy', 'no-referrer');
 
     // 3. Auth token check (skip for SSE stream — token passed as query param).
     const path = request.url.split('?')[0];

@@ -6,3 +6,12 @@ build/
 !.env.example
 *.sqlite
 *.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.log
+logs/
+*token*
+test.policy.yml
+agentgate.sqlite*
+agentgate-demo.yml
+mock-downstream.js

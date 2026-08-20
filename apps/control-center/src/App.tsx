@@ -1,4 +1,4 @@
-import { Routes, Route, NavLink, useLocation } from 'react-router-dom';
+import { Routes, Route, NavLink } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { api } from './api';
 import Overview from './pages/Overview';

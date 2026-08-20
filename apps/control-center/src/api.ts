@@ -12,7 +12,6 @@ function headers(): HeadersInit {
   return {
     'Content-Type': 'application/json',
     'x-agentgate-token': TOKEN,
-    'Host': '127.0.0.1',
   };
 }
 

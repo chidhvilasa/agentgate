@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import yaml from 'js-yaml';
 import { PolicySchema, validatePolicy, type Policy } from './schema.js';
-import { evaluate, type EvaluationInput } from './engine.js';
+import { evaluate, normalizePath, type EvaluationInput } from './engine.js';
 
 /**
  * Loads and validates a policy YAML file.
@@ -34,7 +34,7 @@ export function loadPolicyFile(filePath: string): Policy {
   return PolicySchema.parse(parsed);
 }
 
-export { evaluate, validatePolicy };
+export { evaluate, validatePolicy, normalizePath };
 export type { Policy, EvaluationInput };
 export * from './schema.js';
 export * from './transformation.js';

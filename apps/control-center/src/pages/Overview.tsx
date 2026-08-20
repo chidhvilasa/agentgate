@@ -1,14 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 
-interface Stats {
-  active_agents: number;
-  allowed_24h: number;
-  denied_24h: number;
-  pending_approvals: number;
-  risk_level: string;
-}
-
 function DecisionBadge({ status }: { status: string }) {
   const s = status.toLowerCase();
   const cls =

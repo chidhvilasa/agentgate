@@ -4,9 +4,19 @@
   "scripts": {
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
-    "lint": "pnpm -r run lint"
+    "lint": "pnpm -r run lint",
+    "dev:control": "pnpm --filter @agentgate/control-center dev",
+    "dev:gateway": "pnpm --filter @agentgate/gateway dev",
+    "dev": "pnpm run dev:control & pnpm run dev:gateway"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@types/micromatch": "^4.0.10",
+    "@types/node": "^22.20.1",
+    "better-sqlite3": "^11.10.0",
     "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "micromatch": "^4.0.8"
   }
 }

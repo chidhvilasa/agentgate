@@ -18,9 +18,8 @@ import type { PipelineContext } from '../pipeline.js';
  * AgentGate intercepts tool calls, evaluates policy, and forwards to
  * downstream servers when permitted.
  *
- * Protocol: Both MCP 2026-07-28 (modern stateless) and legacy 2025-era
- * are supported via the official SDK's automatic version negotiation.
- * The era used in each session is preserved in audit events.
+ * Protocol: Legacy 2025-era is supported via the official SDK.
+ * Modern stateless protocol support is deferred to a future milestone.
  */
 export async function startStdioProxy(ctx: PipelineContext): Promise<void> {
   // We proxy to a downstream server — discover its tools first.
@@ -37,9 +36,8 @@ export async function startStdioProxy(ctx: PipelineContext): Promise<void> {
     const discoveryTransport = new StdioClientTransport({
       command: firstServer.command,
       args: firstServer.args ?? [],
-      env: { ...process.env, ...firstServer.env },
+      env: { ...process.env, ...firstServer.env } as Record<string, string>,
     });
-    await discoveryClient.connect(discoveryTransport);
     const { tools } = await discoveryClient.listTools();
     downstreamTools = tools;
     await discoveryClient.close();
@@ -64,10 +62,7 @@ export async function startStdioProxy(ctx: PipelineContext): Promise<void> {
     const rawArgs = (request.params.arguments ?? {}) as Record<string, unknown>;
 
     // Determine MCP era from protocol version negotiated
-    const mcpEra =
-      (extra as { protocolVersion?: string })?.protocolVersion === '2026-07-28'
-        ? ('modern-2026-07-28' as const)
-        : ('legacy-2025' as const);
+    const mcpEra = 'legacy-2025' as const;
 
     // Build agent identity from declared metadata (untrusted)
     const agent = buildAgentIdentity({
