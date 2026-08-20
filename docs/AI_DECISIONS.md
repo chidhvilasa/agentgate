@@ -5,12 +5,12 @@ decisions across AI-agent sessions. Verify entries against the repository.
 
 ## Project State
 
-- Current phase: Milestone 1 Execution
-- Current branch: main
-- Last verified commit: N/A
+- Current phase: Milestone 1 — COMPLETE
+- Current branch: master
+- Last verified commit: 1710605 (feat: Milestone 1 — policy engine, gateway, audit storage, control center, attack demo)
 - Last updated: 2026-08-20
 - Updated by: Antigravity
-- Next action: Implement Shared Contracts (packages/protocol)
+- Next action: Milestone 2 — README, ARCHITECTURE.md, THREAT_MODEL.md, CI workflows, Control Center screenshot, push to GitHub public repo
 
 ## Active Decisions
 
@@ -72,14 +72,14 @@ decisions across AI-agent sessions. Verify entries against the repository.
 
 ## Session Log
 
-### 2026-08-20 — Antigravity - Repository Bootstrap
+### 2026-08-20 — Antigravity - Milestone 1 Implementation
 
-- Prompt objective: Initialize repository and seed decision ledger.
-- Decisions added or changed: ADR-0001, ADR-0002, ADR-0003
-- Implementation completed: Monorepo foundation files created.
-- Files materially changed: `package.json`, `pnpm-workspace.yaml`, `tsconfig.base.json`, `.nvmrc`, `.gitignore`, `docs/AI_DECISIONS.md`.
-- Verification performed: Verified file creation.
+- Prompt objective: Complete Milestone 1 (Policy Engine, Gateway, Storage, Control Center).
+- Decisions added or changed: None
+- Implementation completed: Monorepo setup, shared protocol, policy engine (validation & evaluation), gateway (API, stdio proxy, storage), Control Center React UI, secret exfiltration demo.
+- Files materially changed: Entire `packages/` and `apps/` directories.
+- Verification performed: Ran unit tests (24 passing) and attack demo.
 - Verification result: PASS
-- Known limitations: None yet.
+- Known limitations: Control Center UI is view-only for policies; no replay yet.
 - Unresolved questions: None.
-- Exact next action: Initialize packages/protocol.
+- Exact next action: Milestone 2 — Documentation, CI, and GitHub push.
