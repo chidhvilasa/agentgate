@@ -1,0 +1,38 @@
+# AgentGate Policy — Example
+# Version 1
+#
+# Rules are evaluated in order. First match wins.
+# Default: deny (secure by default).
+version: 1
+
+defaults:
+  decision: deny
+
+rules:
+  # Allow Claude Code to read files inside the project directory
+  - id: allow-project-reads
+    description: Allow the coding agent to read files inside the project root.
+    agents: ["claude-code"]
+    tools: ["read_file", "list_directory"]
+    paths: ["${PROJECT_ROOT}/**"]
+    decision: allow
+
+  # Require human approval before writing any file
+  - id: approve-file-writes
+    description: Require approval before the agent writes any file.
+    tools: ["write_file", "create_directory"]
+    decision: require_approval
+    approval_ttl_seconds: 120
+
+  # Block any network request that contains a detected secret
+  - id: block-secret-exfiltration
+    description: Block network requests that appear to carry secrets or API keys.
+    tools: ["network.*", "fetch", "http_request"]
+    contains_secrets: true
+    decision: deny
+
+  # Block filesystem access outside the project root
+  - id: deny-outside-project
+    description: Deny filesystem access to paths outside the project directory.
+    tools: ["read_file", "write_file", "list_directory", "create_directory"]
+    decision: deny

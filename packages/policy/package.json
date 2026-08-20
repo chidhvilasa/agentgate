@@ -1,0 +1,22 @@
+{
+  "name": "@agentgate/policy",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "zod": "^3.23.8",
+    "js-yaml": "^4.1.0",
+    "micromatch": "^4.0.7"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/micromatch": "^4.0.9",
+    "vitest": "^2.1.4",
+    "typescript": "^5.4.5"
+  }
+}

@@ -1,0 +1,31 @@
+# AgentGate Gateway Configuration
+# Version 1 — Milestone 1
+version: 1
+
+# Ports (loopback only)
+gateway_port: 4000
+control_port: 4001
+
+# Policy file
+policy: ./policies/agentgate.example.yml
+
+# SQLite audit database
+db_path: ./agentgate.sqlite
+
+# Downstream MCP servers
+servers:
+  - id: filesystem-server
+    description: "Official MCP filesystem server"
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    tools:
+      - "read_file"
+      - "write_file"
+      - "list_directory"
+      - "create_directory"
+
+# Audit retention
+retention:
+  max_days: 30
+  max_events: 100000
