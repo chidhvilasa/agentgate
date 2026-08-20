@@ -17,9 +17,9 @@
  */
 const SECRET_PATTERNS: RegExp[] = [
   // Generic API key patterns
-  /(?:api[_-]?key|apikey)\s*[:=]\s*['"]?([a-zA-Z0-9_\-]{16,})/i,
+  /(?:api[_-]?key|apikey)\s*[:=]\s*['"]?([a-zA-Z0-9_-]{16,})/i,
   // Bearer tokens
-  /bearer\s+([a-zA-Z0-9._\-]{16,})/i,
+  /bearer\s+([a-zA-Z0-9._-]{16,})/i,
   // GitHub PATs (classic and fine-grained)
   /gh[pousr]_[a-zA-Z0-9]{36}/,
   /github_pat_[a-zA-Z0-9_]{82}/,

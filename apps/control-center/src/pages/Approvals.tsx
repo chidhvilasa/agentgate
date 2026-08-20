@@ -35,12 +35,14 @@ export default function Approvals({ onCountChange }: ApprovalsProps) {
       const data = await api.approvals() as Record<string, unknown>[];
       setApprovals(data);
       onCountChange?.(data.length);
-    } catch {}
+    } catch {
+      // Ignore — keep showing the last known queue until the next poll.
+    }
     setLoading(false);
   }, [onCountChange]);
 
   useEffect(() => {
-    load();
+    void load();
     const id = setInterval(load, 5000);
     return () => clearInterval(id);
   }, [load]);
@@ -135,7 +137,7 @@ export default function Approvals({ onCountChange }: ApprovalsProps) {
                   id={`deny-${approval.id}`}
                   className="btn-deny"
                   disabled={acting === String(approval.id)}
-                  onClick={() => handleDeny(approval)}
+                  onClick={() => void handleDeny(approval)}
                 >
                   {acting === String(approval.id) ? '…' : '✕ Deny (Safe Default)'}
                 </button>
@@ -144,7 +146,7 @@ export default function Approvals({ onCountChange }: ApprovalsProps) {
                   id={`approve-${approval.id}`}
                   className="btn-approve"
                   disabled={acting === String(approval.id)}
-                  onClick={() => handleApprove(approval)}
+                  onClick={() => void handleApprove(approval)}
                 >
                   ✓ Approve Once
                 </button>

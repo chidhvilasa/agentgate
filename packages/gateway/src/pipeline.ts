@@ -13,7 +13,6 @@ import type { AuditStorage } from './storage.js';
 import type { ApprovalManager } from './approval.js';
 import type { GatewayConfig, DownstreamServer } from './config/registry.js';
 import { resolveServer } from './config/registry.js';
-import { buildAgentIdentity } from './agent-identity.js';
 
 export interface PipelineContext {
   storage: AuditStorage;
@@ -43,9 +42,9 @@ function extractHost(args: Record<string, unknown>): string | undefined {
   for (const key of ['url', 'host', 'endpoint', 'uri']) {
     if (typeof args[key] === 'string') {
       try {
-        return new URL(args[key] as string).hostname;
+        return new URL(args[key]).hostname;
       } catch {
-        return args[key] as string;
+        return args[key];
       }
     }
   }
@@ -98,7 +97,7 @@ export async function runPipeline(opts: {
   rawArgs: Record<string, unknown>;
   mcpEra: 'modern-2026-07-28' | 'legacy-2025';
   jsonrpcId: string | number | null;
-}): Promise<{ event: AuditEvent; result: unknown | null }> {
+}): Promise<{ event: AuditEvent; result: unknown }> {
   const { ctx, agent, toolName, rawArgs, mcpEra, jsonrpcId } = opts;
   const startTime = Date.now();
   const eventId = uuidv4();
@@ -175,7 +174,7 @@ export async function runPipeline(opts: {
     event = ctx.storage.getEvent(eventId)!;
     ctx.emitEvent(event);
 
-    const approval = ctx.approvalManager.create({
+    ctx.approvalManager.create({
       event_id: eventId,
       ttl_seconds: approval_ttl_seconds,
       proposed_action_display: `${toolName}(${JSON.stringify(auditArgs)})`,

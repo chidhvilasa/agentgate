@@ -10,7 +10,9 @@ build/
 *.sqlite-shm
 *.log
 logs/
-*token*
+.agentgate-token
+*.runtime-token
+.agentgate/auth-token
 test.policy.yml
 agentgate.sqlite*
 agentgate-demo.yml

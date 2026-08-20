@@ -3,7 +3,6 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
-  InitializeRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -38,6 +37,7 @@ export async function startStdioProxy(ctx: PipelineContext): Promise<void> {
       args: firstServer.args ?? [],
       env: { ...process.env, ...firstServer.env } as Record<string, string>,
     });
+    await discoveryClient.connect(discoveryTransport);
     const { tools } = await discoveryClient.listTools();
     downstreamTools = tools;
     await discoveryClient.close();
@@ -57,9 +57,9 @@ export async function startStdioProxy(ctx: PipelineContext): Promise<void> {
   }));
 
   // Intercept tool calls
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, _extra) => {
     const toolName = request.params.name;
-    const rawArgs = (request.params.arguments ?? {}) as Record<string, unknown>;
+    const rawArgs = (request.params.arguments ?? {});
 
     // Determine MCP era from protocol version negotiated
     const mcpEra = 'legacy-2025' as const;
@@ -95,8 +95,8 @@ export async function startStdioProxy(ctx: PipelineContext): Promise<void> {
     }
 
     // Return the downstream result
-    if (result && typeof result === 'object' && 'content' in (result as object)) {
-      return result as { content: unknown[] };
+    if (result && typeof result === 'object' && 'content' in (result)) {
+      return result;
     }
     return {
       content: [{ type: 'text', text: JSON.stringify(result) }],

@@ -51,7 +51,11 @@ export function openEventStream(
   const url = `${BASE_URL}/api/events/stream?token=${encodeURIComponent(TOKEN)}`;
   const es = new EventSource(url);
   es.addEventListener('audit_event', (e) => {
-    try { onEvent(JSON.parse(e.data)); } catch {}
+    try {
+      onEvent(JSON.parse(e.data));
+    } catch {
+      // Ignore malformed SSE payloads — the stream will emit the next event.
+    }
   });
   es.onerror = () => onError?.();
   return es;

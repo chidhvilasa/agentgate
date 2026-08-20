@@ -82,7 +82,7 @@ const MIGRATIONS = [
 function canonicalize(obj: unknown): string {
   if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
   if (Array.isArray(obj)) return '[' + obj.map(canonicalize).join(',') + ']';
-  const sorted = Object.keys(obj as object)
+  const sorted = Object.keys(obj)
     .sort()
     .map((k) => JSON.stringify(k) + ':' + canonicalize((obj as Record<string, unknown>)[k]));
   return '{' + sorted.join(',') + '}';
@@ -139,8 +139,7 @@ export class AuditStorage {
 
   private appendLifecycleRecord(
     eventId: string,
-    eventData: AuditEvent,
-    updates?: Partial<Pick<AuditEvent, 'execution_succeeded' | 'execution_error' | 'duration_ms' | 'decision'>>
+    eventData: AuditEvent
   ): { sequence_number: number; previous_event_hash: string | null; event_hash: string } {
     const sequence_number = this.nextSeq++;
     const previous_record_hash = this.lastHash;
@@ -242,7 +241,7 @@ export class AuditStorage {
       if (updatedEventRow) {
         // Fetch the event using the internal row mapping logic, but stub out the hashes since we are only using it to generate the lifecycle payload
         const updatedEvent = this.rowToEvent(updatedEventRow, 0, null, '');
-        this.appendLifecycleRecord(id, updatedEvent, updates);
+        this.appendLifecycleRecord(id, updatedEvent);
       }
     })();
   }
@@ -282,7 +281,7 @@ export class AuditStorage {
         return { valid: false, error: `Hash chain broken at seq ${expectedSeq}. Expected prev: ${expectedHash}, got: ${row.previous_record_hash}`, count: expectedSeq - 1 };
       }
 
-      const eventRow = this.db.prepare('SELECT agent_json, tool_call_json FROM audit_events WHERE id = ?').get(row.event_id as string) as { agent_json: string; tool_call_json: string } | undefined;
+      const eventRow = this.db.prepare('SELECT agent_json, tool_call_json FROM audit_events WHERE id = ?').get(row.event_id) as { agent_json: string; tool_call_json: string } | undefined;
       if (!eventRow) {
          return { valid: false, error: `Missing event data for record seq ${expectedSeq}`, count: expectedSeq - 1 };
       }
@@ -311,7 +310,7 @@ export class AuditStorage {
         return { valid: false, error: `Tampering detected at seq ${expectedSeq}. Computed hash does not match stored record_hash.`, count: expectedSeq - 1 };
       }
 
-      expectedHash = row.record_hash as string;
+      expectedHash = row.record_hash;
       expectedSeq++;
     }
 
@@ -348,7 +347,7 @@ export class AuditStorage {
 
   listPendingApprovals(): Approval[] {
     const rows = this.db.prepare("SELECT * FROM approvals WHERE status = 'PENDING' ORDER BY created_at ASC").all() as Record<string, unknown>[];
-    return rows.map(this.rowToApproval);
+    return rows.map((row) => this.rowToApproval(row));
   }
 
   resolveApproval(id: string, status: ApprovalStatus): void {

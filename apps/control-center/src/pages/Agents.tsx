@@ -13,7 +13,7 @@ export default function Agents() {
       for (const ev of events) {
         const agent = ev.agent as Record<string, unknown> | undefined;
         const sid = String(agent?.session_id ?? '');
-        if (sid && !seen.has(sid)) seen.set(sid, agent!);
+        if (sid && !seen.has(sid)) seen.set(sid, agent);
       }
       setAgents(Array.from(seen.values()));
       setLoading(false);

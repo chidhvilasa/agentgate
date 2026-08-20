@@ -23,7 +23,7 @@ export default function App() {
         setGatewayStatus('disconnected');
       }
     };
-    check();
+    void check();
     const interval = setInterval(check, 10_000);
     return () => clearInterval(interval);
   }, []);
@@ -31,11 +31,13 @@ export default function App() {
   useEffect(() => {
     const load = async () => {
       try {
-        const approvals = await api.approvals() as unknown[];
+        const approvals = await api.approvals();
         setPendingCount(approvals.length);
-      } catch {}
+      } catch {
+        // Ignore — keep showing the last known count until the next poll.
+      }
     };
-    load();
+    void load();
     const interval = setInterval(load, 5_000);
     return () => clearInterval(interval);
   }, []);

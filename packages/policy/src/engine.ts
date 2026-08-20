@@ -1,7 +1,7 @@
 import path from 'node:path';
 import micromatch from 'micromatch';
 import type { Policy, PolicyRule } from './schema.js';
-import type { PolicyDecision, ReasonCode } from '@agentgate/protocol';
+import type { PolicyDecision } from '@agentgate/protocol';
 import { detectSecrets } from './transformation.js';
 
 // ─── Input for Policy Evaluation ─────────────────────────────────────────────

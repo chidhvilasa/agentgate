@@ -1,6 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { v4 as uuidv4 } from 'uuid';
-import type { Approval, ApprovalStatus } from '@agentgate/protocol';
+import type { Approval } from '@agentgate/protocol';
 import type { AuditStorage } from './storage.js';
 
 export type ApprovalEventName = 'created' | 'resolved' | 'expired';

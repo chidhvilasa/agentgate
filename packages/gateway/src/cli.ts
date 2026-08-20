@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { startGateway } from './server.js';
-import { loadPolicyFile, validatePolicy } from '@agentgate/policy';
-import { loadGatewayConfig } from './config/registry.js';
+import { validatePolicy } from '@agentgate/policy';
 import fs from 'node:fs';
 import yaml from 'js-yaml';
 
@@ -37,6 +36,7 @@ switch (command) {
       for (const e of result.errors) console.error(`  - ${e}`);
       process.exit(1);
     }
+    break;
   }
 
   case 'audit': {
@@ -45,28 +45,34 @@ switch (command) {
       const configPath = args[1] ?? './agentgate.yml';
       let dbPath = './agentgate.sqlite';
       try {
-        const parsed = yaml.load(fs.readFileSync(configPath, 'utf-8')) as any;
+        const parsed = yaml.load(fs.readFileSync(configPath, 'utf-8')) as { db_path?: string } | undefined;
         if (parsed?.db_path) dbPath = parsed.db_path;
-      } catch (err) {
+      } catch {
         // use default
       }
-      import('./storage.js').then(({ AuditStorage }) => {
-        const storage = new AuditStorage(dbPath);
-        const result = storage.verifyChain();
-        storage.close();
-        if (result.valid) {
-          console.log(`✅ Audit chain verified. ${result.count} records intact.`);
-          process.exit(0);
-        } else {
-          console.error(`❌ Audit chain verification failed!`);
-          console.error(`   Error: ${result.error}`);
+      import('./storage.js')
+        .then(({ AuditStorage }) => {
+          const storage = new AuditStorage(dbPath);
+          const result = storage.verifyChain();
+          storage.close();
+          if (result.valid) {
+            console.log(`✅ Audit chain verified. ${result.count} records intact.`);
+            process.exit(0);
+          } else {
+            console.error(`❌ Audit chain verification failed!`);
+            console.error(`   Error: ${result.error}`);
+            process.exit(1);
+          }
+        })
+        .catch((err: unknown) => {
+          console.error('[agentgate] Fatal:', err);
           process.exit(1);
-        }
-      });
+        });
       break;
     }
     console.error('Unknown audit subcommand. Try: agentgate audit verify');
     process.exit(1);
+    break;
   }
 
   default: {
