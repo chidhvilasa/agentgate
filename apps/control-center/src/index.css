@@ -343,6 +343,7 @@ input, select, textarea { font: inherit; }
 .badge.transform{ background: rgba(59,130,246,0.12); color: var(--color-transform);border: 1px solid rgba(59,130,246,0.3); }
 .badge.executing{ background: rgba(139,92,246,0.12); color: var(--color-executing);border: 1px solid rgba(139,92,246,0.3); }
 .badge.failed   { background: rgba(239,68,68,0.08); color: #f87171; border: 1px solid rgba(239,68,68,0.2); }
+.badge.neutral  { background: rgba(148,163,184,0.12); color: var(--color-neutral); border: 1px solid rgba(148,163,184,0.3); }
 
 /* ─── Table ───────────────────────────────────────────────────────────────── */
 .data-table {

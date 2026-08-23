@@ -1,11 +1,15 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 
 function DecisionBadge({ status }: { status: string }) {
   const s = status.toLowerCase();
   const cls =
+    s.includes('succeed') ? 'allowed' :
     s.includes('allow') && !s.includes('transform') ? 'allowed' :
-    s.includes('deny') ? 'denied' :
+    // Audit event status is always the literal 'DENIED' (never bare 'DENY'),
+    // so matching only the 'deny' substring never fires — check both forms.
+    s.includes('deny') || s.includes('deni') ? 'denied' :
     s.includes('pending') || s.includes('approval') ? 'pending' :
     s.includes('transform') ? 'transform' :
     s.includes('execut') ? 'executing' :
@@ -14,6 +18,7 @@ function DecisionBadge({ status }: { status: string }) {
 }
 
 export default function Overview() {
+  const navigate = useNavigate();
   const [events, setEvents] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -113,7 +118,7 @@ export default function Overview() {
                 const agent = ev.agent as Record<string, unknown> | undefined;
                 const toolCall = ev.tool_call as Record<string, unknown> | undefined;
                 return (
-                  <tr key={String(ev.id)} onClick={() => (window.location.hash = `/events/${ev.id}`)}>
+                  <tr key={String(ev.id)} onClick={() => navigate(`/events/${ev.id}`)}>
                     <td><span className="tool-name">{String(toolCall?.tool ?? '—')}</span></td>
                     <td><DecisionBadge status={String(ev.status ?? '')} /></td>
                     <td className="text-muted">{String(agent?.declared_name ?? 'unknown')}</td>

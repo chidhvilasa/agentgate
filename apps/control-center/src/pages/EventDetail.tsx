@@ -4,12 +4,16 @@ import { api } from '../api';
 
 function statusClass(status: string) {
   const s = status.toLowerCase();
+  if (s.includes('succeed')) return 'allowed';
   if (s.includes('allow') && !s.includes('transform')) return 'allowed';
-  if (s.includes('deny')) return 'denied';
+  // Covers both the policy decision literal 'DENY' and the audit event
+  // status literal 'DENIED' (the latter never matches a bare 'deny' check).
+  if (s.includes('deny') || s.includes('deni')) return 'denied';
   if (s.includes('pending') || s.includes('approval')) return 'pending';
   if (s.includes('transform')) return 'transform';
   if (s.includes('execut')) return 'executing';
-  return 'failed';
+  if (s.includes('fail') || s.includes('cancel') || s.includes('expir')) return 'failed';
+  return 'neutral';
 }
 
 export default function EventDetail() {
