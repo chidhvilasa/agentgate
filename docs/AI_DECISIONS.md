@@ -238,11 +238,12 @@ decisions across AI-agent sessions. Verify entries against the repository.
   errors, 2 pre-existing warnings), `pnpm run test` (32/32), `node examples/secret-exfiltration/demo.mjs` (attack
   denied, redaction confirmed, chain verified, self-cleaned), `git diff --check` (0 real errors) — all passed
   before touching anything.
-- Graphify verification: executable resolved via `PATH` and directly; `graphify update .` re-run after this
-  session's changes rebuilt the graph to **698 nodes / 831 edges / 48 communities** (up from the 511/721 recorded
-  by the prior pass in `docs/GRAPHIFY_VERIFICATION.md`), and a follow-up `graphify query "How does the Control
-  Center Overview page navigate to event detail?"` correctly surfaced `Overview.tsx`'s new `useNavigate`
-  import/call and `DecisionBadge()` node — the incremental update reflects real code changes, not a stale graph.
+- Graphify verification: executable resolved via `PATH` and directly; `graphify update .` re-run twice in this
+  session — once after the Milestone 2 docs/CI/community files were added (511/721 → **698 nodes / 831 edges / 48
+  communities**), and again after the Control Center bug fixes and remaining ledger/doc edits below (→ **702
+  nodes / 835 edges / 47 communities**). A follow-up `graphify query "How does the Timeline page color a denied
+  event badge?"` after the second update correctly surfaced `Timeline.tsx`'s `statusClass()` node at its new,
+  post-fix line number — the incremental update reflects real code changes, not a stale graph.
   `docs/GRAPHIFY_VERIFICATION.md` updated with the concrete before/after counts (it previously deferred them to
   this entry).
 - Real Control Center visual proof (Phase 7): ran the actual gateway + Control Center against a temporary fixture

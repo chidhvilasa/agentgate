@@ -116,23 +116,35 @@ to match; documented here so a future run does not appear to fail.)
 
 ## Incremental update test
 
-After the Milestone 2 documentation, CI, community-file, and Control Center bug-fix changes in this session
-(including the `Overview.tsx`/`Timeline.tsx`/`EventDetail.tsx` decision-badge fixes described in the session log),
-the graph was refreshed:
+This was run twice in this session, deliberately, to demonstrate the tool tracks real changes rather than being
+run once for show:
+
+**First pass**, after the Milestone 2 documentation and CI/community files were added but before the Control
+Center bugs below were found:
 
 ```text
 $ graphify update .
 Re-extracting code files in . (no LLM needed)...
 [graphify watch] Rebuilt: 698 nodes, 831 edges, 48 communities
+```
+
+**Second pass**, after the `Overview.tsx`/`Timeline.tsx`/`EventDetail.tsx` decision-badge and routing fixes,
+`docs/AI_DECISIONS.md`/`CHANGELOG.md` updates, and the `security.yml` allowlist fix described in the session log:
+
+```text
+$ graphify update .
+Re-extracting code files in . (no LLM needed)...
+[graphify watch] Rebuilt: 702 nodes, 835 edges, 47 communities
 [graphify watch] graph.json, graph.html and GRAPH_REPORT.md updated in graphify-out
 Code graph updated. For doc/paper/image changes run /graphify --update in your AI assistant.
 ```
 
-511 → 698 nodes and 721 → 831 edges, reflecting the new Markdown docs, `.github/` workflow and template files, and
-the modified Control Center source. A follow-up `graphify query "How does the Control Center Overview page
-navigate to event detail?"` correctly returned `Overview.tsx`'s updated import of `react-router-dom`'s
-`useNavigate` and its `DecisionBadge()` node — confirming the incremental update reflects the actual code change
-rather than a stale graph. (See the Milestone 2 session log entry in `docs/AI_DECISIONS.md` for full details.)
+511 → 698 → 702 nodes and 721 → 831 → 835 edges across the two passes, reflecting first the new Markdown docs and
+`.github/` files, then the further Control Center/ledger edits. A follow-up `graphify query "How does the
+Timeline page color a denied event badge?"` after the second pass correctly returned `Timeline.tsx`'s
+`statusClass()` node at its new line number (moved by the fix) alongside `Overview.tsx`'s updated
+`react-router-dom` import — confirming the incremental update reflects the actual code changes rather than a
+stale graph. (See the Milestone 2 session log entry in `docs/AI_DECISIONS.md` for full details.)
 
 ## Hook status
 
