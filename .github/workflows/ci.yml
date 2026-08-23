@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least-privilege by default; individual jobs opt into more if they ever need it.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same branch/PR.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Full suite on Ubuntu across both Node major versions AgentGate supports
+  # (.nvmrc pins 20; 22 is the other actively-supported LTS line). Windows
+  # below runs the same suite once, as a native-module (better-sqlite3)
+  # smoke test, rather than duplicating the full Node matrix cross-platform
+  # — AgentGate is a local developer tool, not a multi-arch service, so the
+  # matrix stays 3 jobs (2 Ubuntu + 1 Windows) instead of 4+.
+  build-test-ubuntu:
+    name: build-test (ubuntu, node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # pnpm/setup installs both pnpm (version read from `packageManager` in
+      # package.json) and Node in one step, and can cache the pnpm store.
+      # Pinned by commit SHA (release v2.0.2, PGP-signed tag) since this is
+      # a third-party action; official actions/* actions below are pinned
+      # by major version tag per this repo's accepted policy.
+      - name: Set up pnpm + Node ${{ matrix.node }}
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
+        with:
+          runtime: node@${{ matrix.node }}
+          cache: true
+          install: false
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Secret-exfiltration attack demo
+        run: node examples/secret-exfiltration/demo.mjs
+
+      - name: Verify no whitespace/hygiene errors
+        run: git diff --check
+
+      - name: Verify the demo left no generated artifacts
+        run: |
+          if [ -n "$(git status --short)" ]; then
+            echo "Unexpected changes after the demo run:"
+            git status --short
+            exit 1
+          fi
+
+  build-test-windows:
+    name: build-test (windows, node 22)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    # Windows GitHub-hosted runners ship Git Bash; running every step through
+    # it keeps this job's commands identical to the Ubuntu job above instead
+    # of maintaining a parallel PowerShell script for the same checks.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm + Node 22
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
+        with:
+          runtime: node@22
+          cache: true
+          install: false
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Secret-exfiltration attack demo
+        run: node examples/secret-exfiltration/demo.mjs
+
+      - name: Verify no whitespace/hygiene errors
+        run: git diff --check
+
+      - name: Verify the demo left no generated artifacts
+        run: |
+          if [ -n "$(git status --short)" ]; then
+            echo "Unexpected changes after the demo run:"
+            git status --short
+            exit 1
+          fi

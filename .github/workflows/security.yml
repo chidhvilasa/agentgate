@@ -1,0 +1,101 @@
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, independent of any push — catches newly-disclosed advisories
+    # in dependencies that haven't changed.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-audit:
+    name: Dependency audit (high+ severity)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
+        with:
+          runtime: node@22
+          cache: true
+          install: false
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # Fails the job on high/critical advisories only — moderate/low findings
+      # are common in transitive dev-only dependencies and would make this
+      # check noisy without adding real signal for a local developer tool.
+      - name: pnpm audit (high severity and above)
+        run: pnpm audit --audit-level=high
+
+  secret-scan:
+    name: Tracked-file secret scan (deterministic, local)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # A small, deterministic, dependency-free scan over tracked files only
+      # (git grep never touches gitignored/untracked content, so generated
+      # SQLite/log/token files are out of scope by construction). No
+      # third-party scanning service or API key required. Every allowed
+      # pattern below is a specific, named, synthetic literal exercised by
+      # packages/policy/tests or examples/secret-exfiltration/demo.mjs (the
+      # AWS-shaped ones are AWS's own well-known public placeholder keys) —
+      # checked for by exact value, not excluded by file path, so a real
+      # credential accidentally added to one of those files would still fail.
+      - name: Scan for likely real credentials
+        run: |
+          set -e
+          PATTERN='AKIA[0-9A-Z]{16}|sk-ant-api[0-9A-Za-z_-]{20,}|sk-[a-zA-Z0-9]{32,}|gh[pousr]_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{60,}|-----BEGIN (RSA|EC|OPENSSH|PRIVATE|DSA) KEY-----'
+          ALLOWED='AKIAIOSFODNN7EXAMPLE|AKIA1234567890ABCDEF|sk-abc123xyz456abc123xyz456abc123xyz456abc|ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890|sk-test1234567890abcdefghijklmnopqrstuvwxyz'
+
+          MATCHES="$(git grep -nEI "$PATTERN" -- . ':(exclude)pnpm-lock.yaml' || true)"
+          REAL="$(printf '%s\n' "$MATCHES" | grep -vE "$ALLOWED" | grep -v '^$' || true)"
+
+          if [ -n "$REAL" ]; then
+            echo "Possible real credential pattern found in tracked files:"
+            echo "$REAL"
+            exit 1
+          fi
+          echo "No credential-shaped strings found outside known placeholders."
+
+  codeql:
+    name: CodeQL (TypeScript/JavaScript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          # Static analysis only — no build, no dependency install, no
+          # secrets required for a JS/TS CodeQL scan.
+          build-mode: none
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:javascript-typescript"
