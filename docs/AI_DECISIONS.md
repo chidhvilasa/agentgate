@@ -223,3 +223,96 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Known limitations: The `no-unsafe-*` typescript-eslint rule family is intentionally off repo-wide (see rationale above) — it is not a substitute for the runtime redaction/policy checks in `packages/policy`, which remain the actual security boundary for untrusted tool-call arguments. Audit tamper-evidence remains local-only, per ADR-0004 (no non-repudiation or tamper-proof claim is made).
 - Unresolved questions: None.
 - Exact next action: Milestone 2 — README, ARCHITECTURE.md, THREAT_MODEL.md, CI workflows, Control Center screenshot, push to GitHub public repo.
+
+### 2026-08-24 — Claude Code — Milestone 2: Documentation, CI, Graphify Verification, Visual Proof, Public Launch
+
+- Prompt objective: complete the remaining Milestone 2 work (a prior partial pass, evidenced by the untracked
+  `README.md`/`docs/*.md`/`.github/` files already present at session start, had produced most of the public
+  documentation and CI workflows but had not committed, screenshotted, verified, or published anything), then
+  publish `chidhvilasa/agentgate` to public GitHub once every gate in the task prompt passed.
+- Starting state audited: HEAD `5070a2b` on `master`; working tree had the previously-drafted Milestone 2 docs,
+  `.github/` (workflows + issue/PR templates), and CI-driven `package.json`/`pnpm-workspace.yaml`/`pnpm-lock.yaml`
+  edits all present but uncommitted; `.claude/` and root `CLAUDE.md` present and untracked as expected;
+  `docs/assets/` existed but was empty (screenshots not yet captured).
+- Baseline re-verified before new work: `pnpm install --frozen-lockfile`, `pnpm run build`, `pnpm run lint` (0
+  errors, 2 pre-existing warnings), `pnpm run test` (32/32), `node examples/secret-exfiltration/demo.mjs` (attack
+  denied, redaction confirmed, chain verified, self-cleaned), `git diff --check` (0 real errors) — all passed
+  before touching anything.
+- Graphify verification: executable resolved via `PATH` and directly; `graphify update .` re-run after this
+  session's changes rebuilt the graph to **698 nodes / 831 edges / 48 communities** (up from the 511/721 recorded
+  by the prior pass in `docs/GRAPHIFY_VERIFICATION.md`), and a follow-up `graphify query "How does the Control
+  Center Overview page navigate to event detail?"` correctly surfaced `Overview.tsx`'s new `useNavigate`
+  import/call and `DecisionBadge()` node — the incremental update reflects real code changes, not a stale graph.
+  `docs/GRAPHIFY_VERIFICATION.md` updated with the concrete before/after counts (it previously deferred them to
+  this entry).
+- Real Control Center visual proof (Phase 7): ran the actual gateway + Control Center against a temporary fixture
+  (real MCP stdio client, real policy file, real SQLite db) issuing one ALLOW (`read_file`), one DENY
+  (`network.request` with a synthetic AWS-shaped key), and one left-pending `REQUIRE_APPROVAL` (`write_file`) call
+  through the real pipeline, then drove a headless Chromium browser (Playwright, installed as a temporary root
+  devDependency for this single run and fully removed afterward — `git diff` on `package.json`/`pnpm-lock.yaml`
+  confirmed byte-for-byte reversion) against the real Vite dev server to capture screenshots. **Found and fixed
+  two genuine, user-facing Control Center bugs in the process** (not something a screenshot alone would have
+  caught without visually reviewing the output):
+  1. `Overview.tsx`'s high-risk-event row `onClick` set `window.location.hash`, which is a no-op under the app's
+     `BrowserRouter` — clicking a row silently did nothing. Fixed to use `useNavigate()`, matching the pattern
+     already correct in `Timeline.tsx`. Verified the fix by scripting the actual click and asserting
+     `page.url()` changed to `/events/:id`.
+  2. The decision-badge color logic in `Overview.tsx`, `Timeline.tsx`, and `EventDetail.tsx` checked
+     `status.includes('deny')`, which never matches the real audit status literal `'DENIED'` (`'denied'` does not
+     contain the substring `'deny'` — no `y` follows `n` in "denied") — **every denied event, including the
+     canonical blocked-secret-exfiltration case, rendered with a neutral gray badge instead of red.**
+     `Timeline.tsx`/`EventDetail.tsx` additionally had no `'succeeded'` case, so a successfully-executed ALLOW
+     call fell through to the same red class used for `FAILED`/`CANCELLED`/`EXPIRED`. Fixed all three files
+     consistently; added a `.badge.neutral` CSS rule for the remaining fallback case, which previously had no
+     color styling of its own. Re-captured all screenshots after the fix and visually confirmed correct
+     green/red/orange coloring.
+  - Final captured assets (synthetic data only, no real tokens/paths/secrets): `docs/assets/control-center-
+    {overview,timeline,approvals,event-detail}.png`. Zero browser console errors and zero failed/4xx+ network
+    requests observed across all four page loads.
+- CI/security workflow verification: `pnpm/setup` commit pin (`84cb39b2...`) confirmed via the GitHub API to be
+  the exact commit tagged `pnpm/setup@v2.0.2`; `actions/checkout@v7` and `github/codeql-action@v4` confirmed as
+  current, existing major-version tags. **Found and fixed a real gap in `security.yml`'s secret scan**: its
+  allowlist covered only the two AWS-shaped placeholder keys, not the `sk-...`/`ghp_...`-shaped synthetic literals
+  in `packages/policy/tests/transformation.test.ts` used to exercise `detectSecrets()` — the scan, as originally
+  written, would have failed CI on its own test fixtures on the very first push. Reproduced the exact job logic
+  locally, confirmed the failure, added the four specific literals to the allowlist by exact value (not by file
+  exclusion), and reconfirmed the scan passes locally.
+- Documentation spot-verified against source (not merely re-read): every `POLICY_REFERENCE.md` match-field name
+  diffed against `packages/policy/src/schema.ts` (exact match); every CLI command in `README.md`/`QUICKSTART.md`
+  (`validate`, `start`, `audit verify`) actually run from a real terminal, including a full `agentgate start`
+  against `examples/agentgate.yml` (real `npx`-fetched `@modelcontextprotocol/server-filesystem` downstream,
+  Control API + token + stdio proxy all came up correctly); `dev:control` script existence confirmed in root
+  `package.json`; grepped all public docs for `non-repudiation`/`tamper-proof`/`blockchain`/`production-ready`/
+  `enterprise-grade` and confirmed every hit is a correctly-framed negation, not a claim; grepped for the modern
+  MCP era string and confirmed every live (non-superseded-ADR) mention is correctly qualified as not-implemented/
+  deferred. One absolute-path privacy issue found and fixed: `docs/GRAPHIFY_VERIFICATION.md` originally recorded
+  the real local Windows path `C:\Users\<realname>\.local\bin\graphify.EXE`; generalized to `%USERPROFILE%\...`.
+- Clean-clone verification (Phase 9): `git clone` of local HEAD (candidate commit `8341098`, after this session's
+  four commits below) into an isolated temp directory. `pnpm install --frozen-lockfile`, `pnpm run build`,
+  `pnpm run lint`, `pnpm run test`, `node examples/secret-exfiltration/demo.mjs` (attack denied, chain verified),
+  `node packages/gateway/dist/cli.js validate policies/agentgate.example.yml`, a full `agentgate start` +
+  `agentgate audit verify` round trip against a freshly generated database — all passed with zero generated
+  artifacts left in `git status --short` afterward. `.claude/`, `CLAUDE.md`, and `graphify-out/` all confirmed
+  absent from the clone (never tracked). Every local file link in `README.md` resolved to an actually-present
+  file. Temp clone directory removed afterward.
+- Commits created on `master` (pre-rename) in this session, in order: `1db7bcc` (core public docs), `c707ed7` (CI
+  + security workflows), `bb713f1` (visuals + community files + Control Center bug fixes), `8341098` (package/repo
+  hygiene + this ledger update). `.claude/` and root `CLAUDE.md` were staged by an incautious `git add -A` and
+  explicitly `git restore --staged` before that commit — confirmed still untracked afterward.
+- Files materially changed beyond the prior partial pass: `apps/control-center/src/pages/{Overview,Timeline,
+  EventDetail}.tsx`, `apps/control-center/src/index.css`, `.github/workflows/security.yml`,
+  `docs/GRAPHIFY_VERIFICATION.md`, `docs/AI_DECISIONS.md`, `CHANGELOG.md`, plus the four new `docs/assets/*.png`.
+- Verification result: PASS (all of the above; see the "GRAPHIFY", "DOCUMENTATION", "CONTROL CENTER VISUAL
+  VERIFICATION", and "CLEAN-CLONE VERIFICATION" sections of this session's final report for the itemized
+  pass/fail per required gate).
+- Known limitations (unchanged from Milestone 1, restated for continuity): audit tamper-evidence is local-only
+  (ADR-0004); downstream results and `execution_error` are not secret-scanned; no retention/rate-limiting
+  enforcement; SSE token is a URL query parameter; only legacy-2025 stdio MCP is supported (ADR-0005). See
+  `docs/THREAT_MODEL.md` for the full, current list — nothing above changes that document's conclusions.
+- Unresolved questions: none blocking; GitHub Actions CI/security workflow results for the actual pushed commit
+  are recorded in this session's final report rather than here, per the instruction not to have the ledger race
+  its own future state — check the Actions tab / `gh run list` against current `HEAD` for the latest status.
+- Exact next action: monitor the first scheduled (weekly) `security.yml` run and any future PRs' CI results;
+  consider implementing the deferred replay endpoint, result-scanning for secrets, and retention enforcement
+  documented as gaps in `docs/THREAT_MODEL.md`, each as its own reviewed change with a fresh ADR only if it
+  changes a durable decision recorded above.
