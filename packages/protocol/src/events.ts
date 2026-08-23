@@ -112,7 +112,14 @@ export interface AuditEvent {
   sequence_number: number;         // Strictly monotonic per-gateway integer
   previous_event_hash: string | null; // SHA-256 of previous canonical payload; null for first event
   event_hash: string;              // SHA-256 of this event's canonical redacted payload
-  canonical_payload_version: '1';  // Schema version for hash canonical form
+  /**
+   * Schema version for this record's hash canonical form. '1' is the
+   * Milestone 1/2 payload shape; '2' (ADR-0009, Milestone 3) adds
+   * result_redacted/result_blocked/result_finding_count/error_redacted to
+   * the hashed payload. verifyChain() dispatches on each record's own
+   * stored version, so a chain spanning the v1->v2 boundary still verifies.
+   */
+  canonical_payload_version: '1' | '2';
   created_at: string;              // ISO 8601 UTC
 
   // ── Agent
@@ -127,15 +134,36 @@ export interface AuditEvent {
 
   // ── Execution Result (populated only after EXECUTING)
   execution_succeeded: boolean | null;
-  execution_error: string | null;   // Redacted error message or null
+  /**
+   * Sanitized error message (see ADR-0009's sanitizeErrorMessage()) or null.
+   * Never the raw downstream/internal error string — see error_redacted.
+   */
+  execution_error: string | null;
   /** Duration in milliseconds from RECEIVED to final terminal state. */
   duration_ms: number | null;
 
   // ── Redaction markers
   /** True if any argument values were redacted before persistence. */
   arguments_redacted: boolean;
-  /** True if the execution result was redacted before persistence. */
+  /**
+   * True if a recognized secret was redacted from the downstream result
+   * before it was forwarded to the upstream client (ADR-0009). Raw results
+   * are never persisted at all (before or after this milestone), so this
+   * does NOT mean "redacted before persistence" — it means "redacted before
+   * being returned to the agent that made the call."
+   */
   result_redacted: boolean;
+  /**
+   * True if the entire downstream result was replaced with a safe
+   * AgentGate error instead of being forwarded, because output_security.mode
+   * is "block" and a secret was detected (or inspection was truncated by a
+   * depth/size limit). Mutually exclusive with result_redacted.
+   */
+  result_blocked: boolean;
+  /** Safe count of output-sanitization findings (redacted/blocked/not_inspected). Never the findings' matched content. */
+  result_finding_count: number;
+  /** True if execution_error's stored value differs from the raw error message because a secret pattern was found and redacted. */
+  error_redacted: boolean;
 }
 
 // ─── Approval ─────────────────────────────────────────────────────────────────

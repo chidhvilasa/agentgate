@@ -6,6 +6,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { sanitizeErrorMessage } from '@agentgate/policy';
 import { buildAgentIdentity } from '../agent-identity.js';
 import { runPipeline } from '../pipeline.js';
 import type { PipelineContext } from '../pipeline.js';
@@ -42,7 +43,9 @@ export async function startStdioProxy(ctx: PipelineContext): Promise<void> {
     downstreamTools = tools;
     await discoveryClient.close();
   } catch (err) {
-    console.error('[agentgate] Warning: could not discover downstream tools:', (err as Error).message);
+    // ADR-0009: never log a raw downstream-adjacent error before sanitization.
+    const sanitized = sanitizeErrorMessage(err, { source: 'downstream' });
+    console.error('[agentgate] Warning: could not discover downstream tools:', sanitized.message);
   }
 
   // ── Build the proxy MCP server ─────────────────────────────────────────────
@@ -87,7 +90,15 @@ export async function startStdioProxy(ctx: PipelineContext): Promise<void> {
     });
 
     if (event.status === 'DENIED' || event.status === 'EXPIRED' || event.status === 'CANCELLED' || event.status === 'FAILED') {
-      const reason = event.decision?.explanation ?? 'Request was blocked by AgentGate policy.';
+      // FAILED means policy allowed the call but downstream execution itself
+      // threw — surface the (already-sanitized, per ADR-0009) execution
+      // error rather than the stale ALLOW decision's explanation, which is
+      // misleading for an execution failure. Every other terminal status
+      // here is a genuine policy outcome, so decision.explanation applies.
+      const reason =
+        event.status === 'FAILED' && event.execution_error
+          ? event.execution_error
+          : (event.decision?.explanation ?? 'Request was blocked by AgentGate policy.');
       return {
         content: [{ type: 'text', text: `[AgentGate] ${reason}` }],
         isError: true,

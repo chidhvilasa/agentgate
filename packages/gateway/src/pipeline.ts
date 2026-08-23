@@ -6,6 +6,7 @@ import {
   loadPolicyFile,
   normalizePath,
   redactArgumentsForAudit,
+  sanitizeErrorMessage,
   type EvaluationInput,
 } from '@agentgate/policy';
 import type { AgentIdentity, AuditEvent, ToolCall } from '@agentgate/protocol';
@@ -13,6 +14,7 @@ import type { AuditStorage } from './storage.js';
 import type { ApprovalManager } from './approval.js';
 import type { GatewayConfig, DownstreamServer } from './config/registry.js';
 import { resolveServer } from './config/registry.js';
+import { sanitizeToolResult } from './output-security.js';
 
 export interface PipelineContext {
   storage: AuditStorage;
@@ -61,9 +63,9 @@ async function executeDownstream(
   server: DownstreamServer,
   toolName: string,
   args: Record<string, unknown>
-): Promise<{ result: unknown; error?: string }> {
+): Promise<{ result: unknown; error?: string; errorRedacted: boolean }> {
   if (server.transport !== 'stdio') {
-    return { result: null, error: 'Only stdio downstream servers are supported in Milestone 1.' };
+    return { result: null, error: 'Only stdio downstream servers are supported in Milestone 1.', errorRedacted: false };
   }
 
   const client = new Client({ name: 'agentgate-proxy', version: '0.1.0' });
@@ -76,9 +78,12 @@ async function executeDownstream(
   try {
     await client.connect(transport);
     const result = await client.callTool({ name: toolName, arguments: args });
-    return { result };
+    return { result, errorRedacted: false };
   } catch (err) {
-    return { result: null, error: (err as Error).message };
+    // ADR-0009: sanitize before this ever reaches the caller — never log or
+    // return the raw error. The downstream process is untrusted input.
+    const sanitized = sanitizeErrorMessage(err, { source: 'downstream' });
+    return { result: null, error: sanitized.message, errorRedacted: sanitized.redacted };
   } finally {
     await client.close();
   }
@@ -144,6 +149,9 @@ export async function runPipeline(opts: {
     duration_ms: null,
     arguments_redacted: argumentsRedacted,
     result_redacted: false,
+    result_blocked: false,
+    result_finding_count: 0,
+    error_redacted: false,
   });
   ctx.emitEvent(event);
 
@@ -206,10 +214,17 @@ export async function runPipeline(opts: {
   // ── 6. Execute ─────────────────────────────────────────────────────────────
   const server = resolveServer(ctx.config, toolName);
   if (!server) {
+    // toolName is agent-controlled input embedded in this message — route it
+    // through the same canonical sanitizer as every other persisted error.
+    const noServerError = sanitizeErrorMessage(
+      `No downstream server configured for tool: ${toolName}`,
+      { source: 'internal' }
+    );
     ctx.storage.updateEventStatus(eventId, 'FAILED', {
       decision,
-      execution_error: `No downstream server configured for tool: ${toolName}`,
+      execution_error: noServerError.message,
       duration_ms: Date.now() - startTime,
+      error_redacted: noServerError.redacted,
     });
     event = ctx.storage.getEvent(eventId)!;
     ctx.emitEvent(event);
@@ -222,16 +237,36 @@ export async function runPipeline(opts: {
 
   // For ALLOW_WITH_TRANSFORM: use redacted args for downstream execution
   const executionArgs = decision.type === 'ALLOW_WITH_TRANSFORM' ? auditArgs : normalizedArgs;
-  const { result, error } = await executeDownstream(server, toolName, executionArgs);
+  const { result, error, errorRedacted } = await executeDownstream(server, toolName, executionArgs);
+
+  // ── 7. Sanitize the downstream result before it ever crosses back to the
+  //        upstream client — the single output-security boundary (ADR-0009).
+  //        executeDownstream() already sanitized `error` at its source.
+  let forwardResult: unknown = null;
+  let resultRedacted = false;
+  let resultBlocked = false;
+  let resultFindingCount = 0;
+
+  if (!error) {
+    const sanitized = sanitizeToolResult(result, ctx.config.output_security);
+    forwardResult = sanitized.result;
+    resultRedacted = sanitized.redacted;
+    resultBlocked = sanitized.blocked;
+    resultFindingCount = sanitized.findingCount;
+  }
 
   const finalStatus = error ? 'FAILED' : 'SUCCEEDED';
   ctx.storage.updateEventStatus(eventId, finalStatus, {
     execution_succeeded: !error,
     execution_error: error ?? null,
     duration_ms: Date.now() - startTime,
+    result_redacted: resultRedacted,
+    result_blocked: resultBlocked,
+    result_finding_count: resultFindingCount,
+    error_redacted: errorRedacted,
   });
 
   event = ctx.storage.getEvent(eventId)!;
   ctx.emitEvent(event);
-  return { event, result: error ? null : result };
+  return { event, result: error ? null : forwardResult };
 }

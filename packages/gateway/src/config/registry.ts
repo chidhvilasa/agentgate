@@ -38,6 +38,37 @@ const DownstreamServerSchema = z.discriminatedUnion('transport', [
   })
 );
 
+// ─── Output Security (ADR-0009) ────────────────────────────────────────────────
+
+/**
+ * Governs sanitization of downstream MCP results before they are forwarded
+ * to the upstream client. See ADR-0009 in docs/AI_DECISIONS.md and
+ * docs/POLICY_REFERENCE.md for the full behavior.
+ *
+ * `opaque_content` currently validates only one literal value
+ * (`allow_uninspected`) — image/audio/blob content is never regex-scanned in
+ * either mode (that would risk corrupting binary payloads), so there is
+ * exactly one implemented behavior today. The field exists so this is an
+ * explicit, self-documenting config value rather than an invisible hardcoded
+ * choice; it deliberately does not offer a mode that doesn't exist yet.
+ */
+const OutputSecuritySchema = z.object({
+  /**
+   * redact: replace recognized secret patterns in inspectable output with
+   *   [REDACTED] and still return the result.
+   * block: replace the entire result with a protocol-valid AgentGate error
+   *   if a secret is detected, or if a depth/size limit prevented full
+   *   inspection of otherwise-inspectable text/structured content.
+   */
+  mode: z.enum(['redact', 'block']).default('redact'),
+  opaque_content: z.literal('allow_uninspected').default('allow_uninspected'),
+  /** Maximum object/array nesting depth actually inspected in structured content. */
+  max_depth: z.number().int().min(1).max(20).default(8),
+  /** Maximum UTF-8 byte length of a single text/string leaf actually scanned. */
+  max_text_bytes: z.number().int().min(1024).max(10_000_000).default(1_000_000),
+});
+export type OutputSecurityConfig = z.infer<typeof OutputSecuritySchema>;
+
 // ─── Gateway Runtime Config ────────────────────────────────────────────────────
 
 const GatewayConfigSchema = z.object({
@@ -65,6 +96,9 @@ const GatewayConfigSchema = z.object({
       max_events: z.number().int().min(0).default(100000),
     })
     .default({}),
+
+  /** Downstream result/error sanitization. See ADR-0009. */
+  output_security: OutputSecuritySchema.default({}),
 });
 
 export type GatewayConfig = z.infer<typeof GatewayConfigSchema>;

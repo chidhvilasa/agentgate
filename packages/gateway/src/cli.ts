@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { startGateway } from './server.js';
-import { validatePolicy } from '@agentgate/policy';
+import { validatePolicy, sanitizeErrorMessage } from '@agentgate/policy';
 import fs from 'node:fs';
 import yaml from 'js-yaml';
 
@@ -10,7 +10,10 @@ switch (command) {
   case 'start': {
     const configPath = args[0] ?? './agentgate.yml';
     startGateway(configPath).catch((err) => {
-      console.error('[agentgate] Fatal:', err.message);
+      // A startup failure here is almost always a bad config/policy path on
+      // the operator's own machine, but route it through the same canonical
+      // sanitizer as every other gateway log line for consistency (ADR-0009).
+      console.error('[agentgate] Fatal:', sanitizeErrorMessage(err, { source: 'internal' }).message);
       process.exit(1);
     });
     break;

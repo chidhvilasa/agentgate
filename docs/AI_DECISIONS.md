@@ -5,16 +5,21 @@ decisions across AI-agent sessions. Verify entries against the repository.
 
 ## Project State
 
-- Current phase: Milestone 2 — Documentation, CI, Graphify verification, visual proof, public launch — COMPLETE
-  (pending final push/CI observation; see 2026-08-24 session log below)
-- Current branch: main (renamed from master immediately before first public push, per ADR-0006)
-- Last verified implementation commit (pre-Milestone-2, still on `master`): 5070a2b
-- Ledger status: Updated after the Milestone 2 candidate commit(s); verify current HEAD with Git — this entry
+- Current phase: Milestone 3 — Bidirectional Secret Safety and Error Sanitization — IN PROGRESS. Milestone 2
+  (Documentation, CI, Graphify verification, visual proof, public launch) is **COMPLETE and publicly verified**:
+  reconciled against live GitHub state at the start of this session, not merely the prior report (see the
+  2026-08-24 Milestone 3 session log below for the exact `gh` evidence).
+- Public repository: https://github.com/chidhvilasa/agentgate (public, default branch `main`).
+- Current branch: main.
+- Last verified implementation commit (Milestone 2, public, CI-green): b48163a — CI run `32660796091` PASS,
+  Security run `32660796111` PASS, both observed live via `gh run list`/`gh run view` at the start of this
+  session, not merely trusted from the prior session's own report.
+- Ledger status: Updated after the Milestone 2 candidate commits; verify current HEAD with Git — this entry
   deliberately does not try to record its own future commit hash (see rule in the session-continuity instructions
   this session operated under).
 - Last updated: 2026-08-24
 - Updated by: Claude Code
-- Next action: see "Exact next action" at the end of the 2026-08-24 session log below.
+- Next action: see "Exact next action" at the end of the 2026-08-24 Milestone 3 session log below.
 
 ## Active Decisions
 
@@ -186,6 +191,111 @@ decisions across AI-agent sessions. Verify entries against the repository.
   - Negative: not exercised in CI, so a regression in Graphify itself would not be caught automatically — acceptable
     for optional tooling.
 - Affected files: `.gitignore` (`graphify-out/` entry), `docs/GRAPHIFY_VERIFICATION.md`, `docs/DEVELOPMENT.md`.
+- Supersedes: NONE
+- Superseded by: NONE
+
+### ADR-0009: Bidirectional Result and Error Secret Safety
+
+- Status: ACCEPTED
+- Date: 2026-08-24
+- Scope: security
+- Decision:
+  1. **Raw downstream results remain non-persistent** — this was already true before Milestone 3 (`executeDownstream()`'s
+     `result` was never written to storage; only `execution_succeeded`/`execution_error` were) and is unchanged.
+     Milestone 3 closes a different, real gap: the raw result was previously forwarded to the upstream MCP client
+     completely unsanitized. Output sanitization now happens once, in `runPipeline()`, immediately after
+     `executeDownstream()` succeeds and before the result crosses back to the upstream client — the single
+     boundary point required by the milestone brief.
+  2. **Default output-security mode is `redact`**: recognized secret patterns in inspectable output are replaced
+     with `[REDACTED]` before the result is returned upstream; the result is still delivered. A `block` mode is
+     also supported: if a detected secret is present in inspectable content, or if configured depth/size limits
+     prevented full inspection of otherwise-inspectable (text/structured) content, the entire result is replaced
+     with a protocol-valid AgentGate error result that reveals no secret. There is no `off` mode — every result
+     passes through the sanitizer; `redact` is the safe default and is not expected to break normal tool use,
+     since only recognized secret-shaped substrings are ever changed.
+  3. **Content variants**: MCP `text` content, `EmbeddedResource` content with a `text` field, `resource_link`
+     string metadata (`uri`/`name`/`description`/`title`), and `structuredContent` (deep, string-leaves-only) are
+     all inspected and eligible for redaction. `image`/`audio` content and `EmbeddedResource` content with a `blob`
+     field are **opaque binary** (base64) and are never regex-scanned or mutated in either mode — running a secret
+     regex over base64 risks corrupting the payload via a spurious match, and there is no bounded, type-aware
+     binary scanner implemented in this milestone. Opaque content is always passed through byte-for-byte and
+     always marked `not_inspected` in audit metadata; it never causes a `block` on its own, in either mode — the
+     product accepts this as a documented, narrow gap rather than either corrupting binary data or blocking every
+     result that happens to include an image or audio clip.
+  4. **Unknown/unrecognized content-block `type` values and any top-level `CallToolResult` field beyond
+     `content`/`structuredContent`/`isError`/`_meta`** are passed through completely unmodified, in both modes,
+     with a `not_inspected` finding — this is future-protocol-evolution-safe and avoids AgentGate silently
+     stripping fields it doesn't understand. `_meta` (top-level and per-content-block) is **never** inspected or
+     modified in either mode — it is protocol/session bookkeeping (progress tokens, task correlation per the
+     installed SDK's `types.ts`), not free-form textual content, and mutating it risks breaking client-side
+     request correlation. This is a deliberate scope boundary, not an oversight.
+  5. **Every downstream exception message is sanitized by one canonical function
+     (`sanitizeErrorMessage()` in `packages/policy/src/output-sanitization.ts`) before it is ever persisted, put on
+     the hash chain, returned by the Control API, pushed over SSE, rendered in the Control Center, or written to a
+     gateway log line.** It redacts recognized secret patterns (reusing `detectSecrets`/`redactSecrets` — no
+     second, divergent pattern list), bounds length, strips/normalizes control characters and newlines so a
+     malicious message cannot forge additional log lines, and never serializes a full error object or its stack
+     trace. Reading a hostile error object's `message` (a getter could throw, loop, or be arbitrarily expensive)
+     is itself wrapped in `try/catch` with a safe fallback: `"Downstream tool execution failed; details were
+     sanitized."` — inspection failing safely is itself part of the contract, not a bug path.
+  6. **Audit metadata** gains three new fields on `AuditEvent` (`result_blocked`, `result_finding_count`,
+     `error_redacted`) alongside the pre-existing `result_redacted` (whose doc-comment previously claimed
+     "redacted before persistence" — corrected, since it now truthfully means "redacted before the result was
+     forwarded upstream," matching what actually happens). None of these fields, and no new audit field added by
+     this ADR, ever stores a raw secret, a raw result, or a finding's matched text — only booleans/counts and safe
+     structural location strings (e.g. `content[0].text`, `structuredContent.output.token`).
+  7. **The new fields are hash-chain protected.** Adding them to the existing `canonical_payload_version: '1'`
+     hash input would silently change what "version 1" means and make every already-verified pre-Milestone-3
+     lifecycle record fail re-verification — unacceptable. Instead, new lifecycle records are written under
+     `canonical_payload_version: '2'`, whose canonical payload is the v1 payload plus the four result/error
+     fields; `verifyChain()` dispatches on each individual record's *own* stored `canonical_payload_version` when
+     recomputing its hash, so a chain that started before this migration and continues after it verifies
+     correctly across the v1→v2 boundary. `AuditStorage.rowToEvent()` previously hardcoded
+     `canonical_payload_version: '1'` on every returned `AuditEvent` regardless of the record's actual stored
+     version — also corrected as part of this change.
+  8. **False positives**: this reuses the same conservative, pattern-based `SECRET_PATTERNS` already used for
+     inbound argument redaction — it is not a general DLP system, does not detect PII, and can both miss secrets
+     that don't match a known format and occasionally redact benign text that happens to match a pattern (e.g. a
+     long non-secret string following the word "token"). This is an accepted, pre-existing, documented trade-off
+     ("prefer false positives over false negatives"), not a new claim.
+- Reason: closes the specific, real gap identified at the start of this milestone — outbound results were
+  forwarded with zero inspection, and persisted error messages were never redacted despite `AuditEvent`'s own
+  doc-comment claiming otherwise. Chosen design follows the milestone brief's recommended principle: minimize
+  persistence (already true), sanitize textual/structured output crossing the upstream boundary, sanitize every
+  persisted error, fail safely (not silently) when strict mode cannot prove a result is clean.
+- Evidence: `packages/policy/src/output-sanitization.ts`, `packages/gateway/src/output-security.ts`,
+  `packages/gateway/src/pipeline.ts`, `packages/gateway/src/storage.ts`, associated test suites, and
+  `examples/downstream-secret-result/demo.mjs`.
+- Alternatives considered:
+  - Audit-only redaction while still forwarding raw results to the upstream client: rejected — this is exactly
+    the status quo the milestone was chartered to fix; it protects the audit log but not the actual agent/user
+    receiving the result, which is the more immediate exposure.
+  - Always redact with no `block` option: rejected — some deployments will want a hard stop rather than a
+    silently-modified result; `block` is offered as an explicit, non-default choice.
+  - Deny the entire result whenever *any* secret pattern is detected, unconditionally (no `redact` option):
+    rejected as the default — overly disruptive for a pattern-matcher with known false positives; offered only as
+    the opt-in `block` mode.
+  - A fully generic DLP/PII engine: rejected — far beyond this milestone's evidence base and this project's
+    stated non-goals; would invite exactly the "generic DLP" over-claim the milestone brief explicitly forbids.
+  - A configurable `opaque_content` handling mode with multiple real behaviors (e.g. a bounded binary scanner):
+    rejected for this milestone — no such scanner is implemented, so offering a config knob with only one real
+    behavior behind it would be misleading complexity. The schema still names the field
+    (`output_security.opaque_content`) but only one literal value (`allow_uninspected`) validates, self-documenting
+    the fixed behavior via Zod rather than silently hardcoding it with no visible config surface at all.
+- Consequences:
+  - Positive: closes the most important documented data-boundary gap from Milestone 2; the canonical
+    error-sanitization function also fixes a previously-inaccurate doc-comment (`execution_error` claimed to be
+    "redacted" and was not).
+  - Negative: `redact` mode can alter tool-result text a downstream server legitimately returned, if that text
+    happens to match a conservative secret pattern — an accepted trade-off, consistent with the existing inbound
+    behavior. Opaque binary content (images/audio/blobs) still passes through completely uninspected in both
+    modes — a documented, narrow gap, not a silent one.
+- Affected files: `packages/policy/src/output-sanitization.ts` (new), `packages/policy/src/index.ts`,
+  `packages/gateway/src/output-security.ts` (new), `packages/gateway/src/pipeline.ts`,
+  `packages/gateway/src/storage.ts`, `packages/gateway/src/transport/stdio.ts`, `packages/gateway/src/cli.ts`,
+  `packages/gateway/src/config/registry.ts`, `packages/protocol/src/events.ts`,
+  `apps/control-center/src/pages/EventDetail.tsx`, `examples/downstream-secret-result/demo.mjs` (new),
+  `examples/agentgate.yml`, associated test files.
 - Supersedes: NONE
 - Superseded by: NONE
 

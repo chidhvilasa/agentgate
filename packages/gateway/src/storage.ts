@@ -75,6 +75,25 @@ const MIGRATIONS = [
     supports_terminate INTEGER NOT NULL DEFAULT 0
   );
   `,
+  // ADR-0009: bidirectional result/error secret safety. This migration MUST
+  // stay appended at the end of MIGRATIONS, never inserted earlier — a
+  // database that already applied migrations 0-4 has schema_version = 5
+  // stored, and the migration runner (see runMigrations()) resumes from
+  // `existing.version`, i.e. array index `currentVersion`. Inserting a new
+  // migration before this point would silently renumber every migration
+  // after it and cause already-upgraded databases to skip this one entirely.
+  // Existing rows get these columns via ALTER TABLE with safe defaults
+  // (0/false) — they genuinely never had output sanitization applied, since
+  // it did not exist yet, so 0/false is an accurate historical record.
+  `
+  ALTER TABLE audit_events ADD COLUMN result_blocked INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE audit_events ADD COLUMN result_finding_count INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE audit_events ADD COLUMN error_redacted INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE audit_lifecycle_records ADD COLUMN result_redacted INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE audit_lifecycle_records ADD COLUMN result_blocked INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE audit_lifecycle_records ADD COLUMN result_finding_count INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE audit_lifecycle_records ADD COLUMN error_redacted INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 // ─── Canonical Payload for Hashing ────────────────────────────────────────────
@@ -137,6 +156,38 @@ export class AuditStorage {
     }
   }
 
+  /**
+   * Builds the canonical hash-input payload for a lifecycle record, dispatched
+   * by canonical_payload_version. See ADR-0009: v2 adds the result/error
+   * sanitization fields to the hash input. A record's OWN stored version is
+   * always used to reconstruct its payload (both when writing a new record
+   * and when re-verifying an old one in verifyChain()), so a chain that began
+   * under v1 and continues under v2 after an upgrade still verifies
+   * correctly — each record proves only its own, contemporaneous shape.
+   */
+  private buildCanonicalPayload(
+    version: '1' | '2',
+    base: {
+      record_id: string;
+      event_id: string;
+      sequence_number: number;
+      previous_record_hash: string | null;
+      created_at: string;
+      status: string;
+      decision_type: string | null;
+      execution_succeeded: number | null;
+      execution_error: string | null;
+      duration_ms: number | null;
+      agent_session_id: string;
+      tool: string;
+      normalized_arguments: unknown;
+    },
+    v2Fields: { result_redacted: number; result_blocked: number; result_finding_count: number; error_redacted: number }
+  ): Record<string, unknown> {
+    if (version === '1') return base;
+    return { ...base, ...v2Fields };
+  }
+
   private appendLifecycleRecord(
     eventId: string,
     eventData: AuditEvent
@@ -151,22 +202,34 @@ export class AuditStorage {
     const execution_succeeded = eventData.execution_succeeded === null ? null : eventData.execution_succeeded ? 1 : 0;
     const execution_error = eventData.execution_error ?? null;
     const duration_ms = eventData.duration_ms ?? null;
+    const result_redacted = eventData.result_redacted ? 1 : 0;
+    const result_blocked = eventData.result_blocked ? 1 : 0;
+    const result_finding_count = eventData.result_finding_count ?? 0;
+    const error_redacted = eventData.error_redacted ? 1 : 0;
 
-    const canonicalPayload = {
-      record_id,
-      event_id: eventId,
-      sequence_number,
-      previous_record_hash,
-      created_at,
-      status,
-      decision_type: eventData.decision?.type ?? null,
-      execution_succeeded,
-      execution_error,
-      duration_ms,
-      agent_session_id: eventData.agent.session_id,
-      tool: eventData.tool_call.tool,
-      normalized_arguments: eventData.tool_call.normalized_arguments,
-    };
+    // All NEW records are written under canonical_payload_version '2' —
+    // only records already persisted before this milestone remain '1'.
+    const canonical_payload_version = '2' as const;
+
+    const canonicalPayload = this.buildCanonicalPayload(
+      canonical_payload_version,
+      {
+        record_id,
+        event_id: eventId,
+        sequence_number,
+        previous_record_hash,
+        created_at,
+        status,
+        decision_type: eventData.decision?.type ?? null,
+        execution_succeeded,
+        execution_error,
+        duration_ms,
+        agent_session_id: eventData.agent.session_id,
+        tool: eventData.tool_call.tool,
+        normalized_arguments: eventData.tool_call.normalized_arguments,
+      },
+      { result_redacted, result_blocked, result_finding_count, error_redacted }
+    );
 
     const record_hash = sha256(canonicalize(canonicalPayload));
     this.lastHash = record_hash;
@@ -175,11 +238,14 @@ export class AuditStorage {
       INSERT INTO audit_lifecycle_records (
         record_id, event_id, sequence_number, previous_record_hash, record_hash,
         canonical_payload_version, created_at, status, decision_json,
-        execution_succeeded, execution_error, duration_ms
-      ) VALUES (?, ?, ?, ?, ?, '1', ?, ?, ?, ?, ?, ?)
+        execution_succeeded, execution_error, duration_ms,
+        result_redacted, result_blocked, result_finding_count, error_redacted
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record_id, eventId, sequence_number, previous_record_hash, record_hash,
-      created_at, status, decision_json, execution_succeeded, execution_error, duration_ms
+      canonical_payload_version, created_at, status, decision_json,
+      execution_succeeded, execution_error, duration_ms,
+      result_redacted, result_blocked, result_finding_count, error_redacted
     );
 
     return { sequence_number, previous_event_hash: previous_record_hash, event_hash: record_hash };
@@ -191,17 +257,22 @@ export class AuditStorage {
       INSERT INTO audit_events (
         id, created_at, agent_json, tool_call_json,
         status, decision_json, execution_succeeded, execution_error,
-        duration_ms, arguments_redacted, result_redacted
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        duration_ms, arguments_redacted, result_redacted,
+        result_blocked, result_finding_count, error_redacted
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       eventData.id, eventData.created_at, JSON.stringify(eventData.agent), JSON.stringify(eventData.tool_call),
       eventData.status, eventData.decision ? JSON.stringify(eventData.decision) : null,
       eventData.execution_succeeded === null ? null : eventData.execution_succeeded ? 1 : 0,
       eventData.execution_error, eventData.duration_ms,
-      eventData.arguments_redacted ? 1 : 0, eventData.result_redacted ? 1 : 0
+      eventData.arguments_redacted ? 1 : 0, eventData.result_redacted ? 1 : 0,
+      eventData.result_blocked ? 1 : 0, eventData.result_finding_count ?? 0, eventData.error_redacted ? 1 : 0
     );
 
-    const event: AuditEvent = { ...eventData, sequence_number: 0, previous_event_hash: null, event_hash: '', canonical_payload_version: '1' };
+    // canonical_payload_version is a placeholder here — appendLifecycleRecord()
+    // below always writes the record under the current version ('2') and this
+    // is overwritten from its actual result before the caller ever sees it.
+    const event: AuditEvent = { ...eventData, sequence_number: 0, previous_event_hash: null, event_hash: '', canonical_payload_version: '2' };
 
     // Append lifecycle record using transaction
     this.db.transaction(() => {
@@ -217,7 +288,19 @@ export class AuditStorage {
   updateEventStatus(
     id: string,
     status: AuditEvent['status'],
-    updates: Partial<Pick<AuditEvent, 'execution_succeeded' | 'execution_error' | 'duration_ms' | 'decision'>>
+    updates: Partial<
+      Pick<
+        AuditEvent,
+        | 'execution_succeeded'
+        | 'execution_error'
+        | 'duration_ms'
+        | 'decision'
+        | 'result_redacted'
+        | 'result_blocked'
+        | 'result_finding_count'
+        | 'error_redacted'
+      >
+    >
   ): void {
     this.db.transaction(() => {
       this.db.prepare(`
@@ -226,7 +309,11 @@ export class AuditStorage {
           execution_succeeded = COALESCE(?, execution_succeeded),
           execution_error = COALESCE(?, execution_error),
           duration_ms = COALESCE(?, duration_ms),
-          decision_json = COALESCE(?, decision_json)
+          decision_json = COALESCE(?, decision_json),
+          result_redacted = COALESCE(?, result_redacted),
+          result_blocked = COALESCE(?, result_blocked),
+          result_finding_count = COALESCE(?, result_finding_count),
+          error_redacted = COALESCE(?, error_redacted)
         WHERE id = ?
       `).run(
         status,
@@ -234,13 +321,19 @@ export class AuditStorage {
         updates.execution_error ?? null,
         updates.duration_ms ?? null,
         updates.decision ? JSON.stringify(updates.decision) : null,
+        updates.result_redacted === undefined ? null : updates.result_redacted ? 1 : 0,
+        updates.result_blocked === undefined ? null : updates.result_blocked ? 1 : 0,
+        updates.result_finding_count === undefined ? null : updates.result_finding_count,
+        updates.error_redacted === undefined ? null : updates.error_redacted ? 1 : 0,
         id
       );
 
       const updatedEventRow = this.db.prepare('SELECT * FROM audit_events WHERE id = ?').get(id) as Record<string, unknown>;
       if (updatedEventRow) {
-        // Fetch the event using the internal row mapping logic, but stub out the hashes since we are only using it to generate the lifecycle payload
-        const updatedEvent = this.rowToEvent(updatedEventRow, 0, null, '');
+        // Fetch the event using the internal row mapping logic, but stub out the hashes/version since we
+        // are only using it to generate the lifecycle payload — appendLifecycleRecord() always writes
+        // its own fresh canonical_payload_version ('2') regardless of what is passed here.
+        const updatedEvent = this.rowToEvent(updatedEventRow, 0, null, '', '2');
         this.appendLifecycleRecord(id, updatedEvent);
       }
     })();
@@ -248,7 +341,7 @@ export class AuditStorage {
 
   listEvents(opts: { limit?: number; offset?: number; status?: string; tool?: string } = {}): AuditEvent[] {
     const { limit = 50, offset = 0, status, tool } = opts;
-    let query = 'SELECT e.*, l.sequence_number, l.previous_record_hash, l.record_hash FROM audit_events e LEFT JOIN (SELECT event_id, MAX(sequence_number) as max_seq FROM audit_lifecycle_records GROUP BY event_id) latest ON e.id = latest.event_id LEFT JOIN audit_lifecycle_records l ON e.id = l.event_id AND latest.max_seq = l.sequence_number';
+    let query = 'SELECT e.*, l.sequence_number, l.previous_record_hash, l.record_hash, l.canonical_payload_version FROM audit_events e LEFT JOIN (SELECT event_id, MAX(sequence_number) as max_seq FROM audit_lifecycle_records GROUP BY event_id) latest ON e.id = latest.event_id LEFT JOIN audit_lifecycle_records l ON e.id = l.event_id AND latest.max_seq = l.sequence_number';
     const params: unknown[] = [];
     const conditions: string[] = [];
     if (status) { conditions.push('e.status = ?'); params.push(status); }
@@ -257,13 +350,19 @@ export class AuditStorage {
     query += ' ORDER BY e.created_at DESC LIMIT ? OFFSET ?';
     params.push(limit, offset);
     const rows = this.db.prepare(query).all(...params) as Record<string, unknown>[];
-    return rows.map(r => this.rowToEvent(r, r.sequence_number as number, r.previous_record_hash as string, r.record_hash as string));
+    return rows.map(r => this.rowToEvent(
+      r, r.sequence_number as number, r.previous_record_hash as string, r.record_hash as string,
+      (r.canonical_payload_version as '1' | '2' | null) ?? '1'
+    ));
   }
 
   getEvent(id: string): AuditEvent | null {
-    const query = 'SELECT e.*, l.sequence_number, l.previous_record_hash, l.record_hash FROM audit_events e LEFT JOIN (SELECT event_id, MAX(sequence_number) as max_seq FROM audit_lifecycle_records GROUP BY event_id) latest ON e.id = latest.event_id LEFT JOIN audit_lifecycle_records l ON e.id = l.event_id AND latest.max_seq = l.sequence_number WHERE e.id = ?';
+    const query = 'SELECT e.*, l.sequence_number, l.previous_record_hash, l.record_hash, l.canonical_payload_version FROM audit_events e LEFT JOIN (SELECT event_id, MAX(sequence_number) as max_seq FROM audit_lifecycle_records GROUP BY event_id) latest ON e.id = latest.event_id LEFT JOIN audit_lifecycle_records l ON e.id = l.event_id AND latest.max_seq = l.sequence_number WHERE e.id = ?';
     const row = this.db.prepare(query).get(id) as Record<string, unknown> | undefined;
-    return row ? this.rowToEvent(row, row.sequence_number as number, row.previous_record_hash as string, row.record_hash as string) : null;
+    return row ? this.rowToEvent(
+      row, row.sequence_number as number, row.previous_record_hash as string, row.record_hash as string,
+      (row.canonical_payload_version as '1' | '2' | null) ?? '1'
+    ) : null;
   }
 
   verifyChain(): { valid: boolean; error?: string; count: number } {
@@ -289,21 +388,34 @@ export class AuditStorage {
       const agent = JSON.parse(eventRow.agent_json);
       const toolCall = JSON.parse(eventRow.tool_call_json);
 
-      const canonicalPayload = {
-        record_id: row.record_id,
-        event_id: row.event_id,
-        sequence_number: row.sequence_number,
-        previous_record_hash: row.previous_record_hash,
-        created_at: row.created_at,
-        status: row.status,
-        decision_type: row.decision_json ? JSON.parse(row.decision_json as string).type : null,
-        execution_succeeded: row.execution_succeeded,
-        execution_error: row.execution_error,
-        duration_ms: row.duration_ms,
-        agent_session_id: agent.session_id,
-        tool: toolCall.tool,
-        normalized_arguments: toolCall.normalized_arguments,
-      };
+      const version = (row.canonical_payload_version as '1' | '2' | undefined) ?? '1';
+      const canonicalPayload = this.buildCanonicalPayload(
+        version,
+        {
+          record_id: row.record_id as string,
+          event_id: row.event_id as string,
+          // row.sequence_number is narrowed to `number` here by the earlier
+          // `if (row.sequence_number !== expectedSeq) return ...` guard —
+          // an explicit cast would be flagged as unnecessary.
+          sequence_number: row.sequence_number,
+          previous_record_hash: row.previous_record_hash as string | null,
+          created_at: row.created_at as string,
+          status: row.status as string,
+          decision_type: row.decision_json ? (JSON.parse(row.decision_json as string) as { type: string }).type : null,
+          execution_succeeded: row.execution_succeeded as number | null,
+          execution_error: row.execution_error as string | null,
+          duration_ms: row.duration_ms as number | null,
+          agent_session_id: agent.session_id,
+          tool: toolCall.tool,
+          normalized_arguments: toolCall.normalized_arguments,
+        },
+        {
+          result_redacted: (row.result_redacted as number | undefined) ?? 0,
+          result_blocked: (row.result_blocked as number | undefined) ?? 0,
+          result_finding_count: (row.result_finding_count as number | undefined) ?? 0,
+          error_redacted: (row.error_redacted as number | undefined) ?? 0,
+        }
+      );
 
       const computedHash = sha256(canonicalize(canonicalPayload));
       if (computedHash !== row.record_hash) {
@@ -382,13 +494,19 @@ export class AuditStorage {
 
   // ─── Row Mappers ─────────────────────────────────────────────────────────────
 
-  private rowToEvent(row: Record<string, unknown>, seq: number, prev: string | null, hash: string): AuditEvent {
+  private rowToEvent(
+    row: Record<string, unknown>,
+    seq: number,
+    prev: string | null,
+    hash: string,
+    canonicalPayloadVersion: '1' | '2' = '1'
+  ): AuditEvent {
     return {
       id: row.id as string,
       sequence_number: seq,
       previous_event_hash: prev,
       event_hash: hash,
-      canonical_payload_version: '1',
+      canonical_payload_version: canonicalPayloadVersion,
       created_at: row.created_at as string,
       agent: JSON.parse(row.agent_json as string),
       tool_call: JSON.parse(row.tool_call_json as string),
@@ -399,6 +517,9 @@ export class AuditStorage {
       duration_ms: row.duration_ms as number | null,
       arguments_redacted: row.arguments_redacted === 1,
       result_redacted: row.result_redacted === 1,
+      result_blocked: row.result_blocked === 1,
+      result_finding_count: (row.result_finding_count as number | null) ?? 0,
+      error_redacted: row.error_redacted === 1,
     };
   }
 

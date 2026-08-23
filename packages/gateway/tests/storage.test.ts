@@ -34,6 +34,9 @@ describe('AuditStorage Lifecycle and Tamper Evidence', () => {
     duration_ms: null,
     arguments_redacted: false,
     result_redacted: false,
+    result_blocked: false,
+    result_finding_count: 0,
+    error_redacted: false,
   });
 
   it('inserts an event and verifies a valid chain', () => {
