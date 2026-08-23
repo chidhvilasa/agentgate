@@ -1,10 +1,15 @@
 {
   "name": "@agentgate/gateway",
   "version": "0.1.0",
+  "private": true,
+  "description": "AgentGate gateway: MCP stdio proxy, policy evaluation pipeline, tamper-evident audit storage, loopback Control API, and CLI.",
+  "license": "Apache-2.0",
   "type": "module",
-  "main": "dist/index.js",
   "bin": {
     "agentgate": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "scripts": {
     "build": "tsc",
@@ -31,6 +36,6 @@
     "@types/uuid": "^10.0.0",
     "tsx": "^4.19.1",
     "typescript": "^5.4.5",
-    "vitest": "^2.1.4"
+    "vitest": "^3.2.7"
   }
 }

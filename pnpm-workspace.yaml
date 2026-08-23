@@ -4,3 +4,10 @@ packages:
 allowBuilds:
   better-sqlite3: true
   esbuild: true
+
+# Force vitest's transitive vite dependency to the patched line — vitest's
+# own declared range (^5.0.0 || ^6.0.0) is satisfiable by an unpatched 5.x,
+# so without this override `pnpm audit` flags GHSA-fx2h-pf6j-xcff even
+# though nothing in this repo actually uses the vulnerable dev-server path.
+overrides:
+  vite: '>=6.4.3'

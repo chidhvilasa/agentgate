@@ -5,13 +5,16 @@ decisions across AI-agent sessions. Verify entries against the repository.
 
 ## Project State
 
-- Current phase: Milestone 1 Verification — COMPLETE
-- Current branch: master
-- Last verified implementation commit: da77bc2
-- Ledger status: Updated after implementation commit; verify current HEAD with Git
-- Last updated: 2026-08-21
-- Updated by: Antigravity
-- Next action: Milestone 2 — README, ARCHITECTURE.md, THREAT_MODEL.md, CI workflows, Control Center screenshot, push to GitHub public repo
+- Current phase: Milestone 2 — Documentation, CI, Graphify verification, visual proof, public launch — COMPLETE
+  (pending final push/CI observation; see 2026-08-24 session log below)
+- Current branch: main (renamed from master immediately before first public push, per ADR-0006)
+- Last verified implementation commit (pre-Milestone-2, still on `master`): 5070a2b
+- Ledger status: Updated after the Milestone 2 candidate commit(s); verify current HEAD with Git — this entry
+  deliberately does not try to record its own future commit hash (see rule in the session-continuity instructions
+  this session operated under).
+- Last updated: 2026-08-24
+- Updated by: Claude Code
+- Next action: see "Exact next action" at the end of the 2026-08-24 session log below.
 
 ## Active Decisions
 
@@ -103,6 +106,87 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Affected files:
   - `packages/gateway/src/transport/stdio.ts`
 - Supersedes: ADR-0002
+- Superseded by: NONE
+
+### ADR-0006: Public Repository Launch and Default Branch Rename to `main`
+
+- Status: ACCEPTED
+- Date: 2026-08-24
+- Scope: product / repository
+- Decision: Publish this repository publicly as `chidhvilasa/agentgate` on GitHub, renaming the local default
+  branch from `master` to `main` immediately before the first push (not before, to avoid an unnecessary rename if
+  a publication gate had failed).
+- Reason: User-authorized Milestone 2 objective; `main` is the conventional default branch name expected by GitHub
+  Actions triggers already written into `.github/workflows/*.yml` (`push: branches: [main]`).
+- Evidence: Explicit user authorization in the Milestone 2 task prompt, conditional on every publication gate
+  passing first.
+- Alternatives considered:
+  - Keep `master`: rejected — user explicitly authorized the rename and workflows already target `main`.
+- Consequences:
+  - Positive: matches GitHub's current default convention and the workflows already written against it.
+  - Negative: none identified; no external clone of this repository existed before this rename (first publication).
+- Affected files: local branch ref only; `.github/workflows/*.yml` already assumed `main`.
+- Supersedes: NONE
+- Superseded by: NONE
+
+### ADR-0007: CI Platform Matrix and Security Scanning Workflow
+
+- Status: ACCEPTED
+- Date: 2026-08-24
+- Scope: engineering / security
+- Decision: `ci.yml` runs the full build/lint/test/demo/hygiene suite on Ubuntu across Node 20 and 22, plus a single
+  Windows job (Node 22) as a native-module (`better-sqlite3`) smoke test, rather than a full cross-product matrix.
+  `security.yml` runs `pnpm audit --audit-level=high`, a deterministic dependency-free `git grep` secret scan over
+  tracked files (allowlisting specific named synthetic test literals, not whole files or directories), and CodeQL
+  for JavaScript/TypeScript — on pull requests, pushes to `main`, and a weekly schedule.
+- Reason: AgentGate is a local developer tool, not a multi-arch service; a 3-job matrix (2×Ubuntu + 1×Windows)
+  catches the real cross-platform risk (native SQLite bindings) without the cost of a full 2×2 matrix. The secret
+  scan intentionally allowlists exact known-synthetic values (not file paths) so a real credential accidentally
+  added to a test file would still fail the scan.
+- Evidence: Both action versions/pins verified against the GitHub API at authoring time (`pnpm/setup` commit
+  `84cb39b2...` confirmed to be the exact commit tagged `v2.0.2`; `actions/checkout@v7` and
+  `github/codeql-action@v4` confirmed as current major-version tags). The secret-scan allowlist gap (missing the
+  `sk-...`/`ghp_...`-shaped literals in `packages/policy/tests`, which would have failed the job on its own test
+  fixtures) was caught and fixed in this session before the first push — see session log.
+- Alternatives considered:
+  - Full Node×OS matrix: rejected as unnecessary cost for a local-first tool.
+  - Third-party secret-scanning service/action: rejected in favor of a small, auditable, dependency-free script
+    with no external API key requirement.
+- Consequences:
+  - Positive: fast, cheap CI; native-module Windows compatibility is actually exercised, not assumed.
+  - Negative: Windows only runs on Node 22, not 20 — acceptable since the Ubuntu jobs cover both Node majors.
+- Affected files: `.github/workflows/ci.yml`, `.github/workflows/security.yml`.
+- Supersedes: NONE
+- Superseded by: NONE
+
+### ADR-0008: Graphify as Optional Local Developer Tooling
+
+- Status: ACCEPTED
+- Date: 2026-08-24
+- Scope: engineering
+- Decision: Adopt [Graphify](https://github.com/safishamsi/graphify) as an optional, local-only developer
+  productivity tool for codebase navigation. It is never a runtime or build dependency of AgentGate. Its generated
+  output (`graphify-out/`) is gitignored and regenerated on demand; the pre-existing local Claude Code skill
+  integration (`.claude/`, root `CLAUDE.md`) remains untracked, per this session's explicit instructions, rather
+  than being adopted into the repository.
+- Reason: Genuinely verified functional against this codebase in Milestone 2 (graph build, four targeted queries,
+  a `path` trace, and an incremental `update` after real source changes all produced accurate, source-verified
+  results) — see `docs/GRAPHIFY_VERIFICATION.md` for the full evidence. Adopting it as documented-but-optional
+  tooling (in `docs/DEVELOPMENT.md`) gives contributors a faster way to orient in the codebase without adding any
+  dependency, secret, or CI requirement.
+- Evidence: `docs/GRAPHIFY_VERIFICATION.md`.
+- Alternatives considered:
+  - Committing `graphify-out/` for reproducibility: rejected — it is fully regenerable in seconds with no API key,
+    and committing a generated graph risks drifting from source between regenerations.
+  - Adopting the `.claude/`/root `CLAUDE.md` skill installation into the repo: rejected — it is this developer's
+    personal local tool installation, not an AgentGate project artifact; a future ADR could revisit this if the
+    project wants to ship first-class Graphify onboarding.
+- Consequences:
+  - Positive: zero cost/risk to the build; documented as an explicit optional workflow in `docs/DEVELOPMENT.md`.
+  - Negative: not exercised in CI, so a regression in Graphify itself would not be caught automatically — acceptable
+    for optional tooling.
+- Affected files: `.gitignore` (`graphify-out/` entry), `docs/GRAPHIFY_VERIFICATION.md`, `docs/DEVELOPMENT.md`.
+- Supersedes: NONE
 - Superseded by: NONE
 
 ## Superseded Decisions

@@ -17,3 +17,7 @@ test.policy.yml
 agentgate.sqlite*
 agentgate-demo.yml
 mock-downstream.js
+
+# Local Graphify knowledge-graph output (derived, regenerate with
+# `graphify update .`). See docs/GRAPHIFY_VERIFICATION.md.
+graphify-out/
