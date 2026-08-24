@@ -967,3 +967,62 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Exact next action: Phase 6 — re-index with Graphify (`graphify update .`), run the specified path/query
   checks proving the replay execution-path separation and the Control Center → API path, and update
   `docs/GRAPHIFY_VERIFICATION.md` with a new dated section.
+
+### 2026-08-24 — Safe Replay Completion, Phase 6 (Graphify re-index and verification)
+
+- Prompt objective: re-index with Graphify after all implementation/docs/UI changes, run queries covering the
+  replay API→service→policy-engine→replay-storage path and the Control Center→API path (including at least one
+  path query aimed at proving no-execution separation from the downstream transport/execution path), verify
+  every finding against source before acting on it, and update `docs/GRAPHIFY_VERIFICATION.md` accordingly, per
+  Phase 6 of the governing prompt.
+- Continuity check: re-read ADR-0010 and the Phase 1–5 session-log entries above before starting; confirmed
+  local HEAD was `b274103` (Phase 5 screenshot + ledger entry) with a clean tree before making any change.
+- Decisions added or changed: none — no new or superseded ADR needed.
+- Implementation completed: `graphify update .` rebuilt the graph to 903 nodes / 1135 edges / 54 communities
+  (up from 813/987/54 at the end of Milestone 3). One orientation query ("how does the Safe Replay API route
+  reach the policy engine") returned a correctly scoped, directly useful result set. Four `path` queries were
+  run, every result checked against real source before being trusted:
+  1. `control.ts` → `evaluateHistoricalEvent()`: 1 hop, accurate (the route directly calls this function).
+  2. `EventDetail.tsx` → `control.ts`: no path (directed or undirected) — consistent with the pre-existing
+     Milestone 3 finding that Control Center and the gateway communicate only over HTTP, never a static edge.
+  3. `replay.ts` → `executeDownstream()` and `replay.ts` → `ApprovalManager`: **both reported a misleading
+     2-hop "path"** (via `replay.ts --imports_from--> pipeline.ts --contains--> executeDownstream()`, and
+     similarly for `ApprovalManager`). Verified against source (`grep -n "^import"
+     packages/gateway/src/replay.ts`) that `replay.ts`'s only relative import is `extractPrimaryPath,
+     extractCommand, extractHost` from `./pipeline.js` — never either symbol. Root cause: Graphify's
+     `imports_from`/`contains` edges are file-level, not per-named-export, so any file that imports *anything*
+     from a file that also *contains* an unrelated symbol produces a technically-connected but semantically
+     misleading path. **No code or claim was changed based on this graph result** — it was checked against
+     source first and found to be a graph-granularity limitation, not evidence against the no-execution
+     invariant, which continues to rest on the dedicated `replay-no-execution.test.ts` structural test.
+  4. `replay.ts` → `evaluate()` (undirected): **no path found**, despite `replay.ts` genuinely importing
+     `evaluate` from `@agentgate/policy`. Sanity-checked against `pipeline.ts`, which imports `evaluate` the
+     identical way and also shows no path — confirming a general limitation (cross-workspace-package imports,
+     resolved by package name rather than relative path, are not resolved into graph edges at all), not a
+     `replay.ts`-specific gap or a regression.
+  - `docs/GRAPHIFY_VERIFICATION.md` updated with a new "Milestone 4 incremental update" section documenting all
+    of the above (exact commands, exact outputs, exact verification steps, and an explicit "net assessment"
+    stating that Graphify's path queries alone cannot prove or disprove the no-execution invariant — that proof
+    remains the dedicated test suite), and the "Conclusion" section's running node/edge counts and limitations
+    list updated to include both newly-confirmed limitations.
+  - `graphify-out/` remains gitignored and was not staged or committed; confirmed via `git status --short`
+    before and after this phase.
+- Files materially changed: `docs/GRAPHIFY_VERIFICATION.md`. No source, test, or other doc file changed in this
+  phase.
+- Commands actually executed and their actual results: `graphify update .` (903 nodes / 1135 edges / 54
+  communities); `graphify query "how does the Safe Replay API route reach the policy engine"`; four `graphify
+  path` invocations (listed above); `grep -n "^import" packages/gateway/src/replay.ts` and
+  `packages/gateway/src/pipeline.ts` (used to verify/refute the path-query results against real source, not
+  assumed). Committed as `51c603f docs: record Milestone 4 Graphify re-index and query verification`.
+- Verification result: PASS for the Phase 6 requirement to run the specified queries and verify findings against
+  source before changing code/docs — every finding was checked, two were found to be graph limitations (not
+  code defects) and documented as such, and no code or unverified claim was changed as a result of a graph
+  query alone.
+- Known limitations / follow-up risk: none new beyond what is now documented in
+  `docs/GRAPHIFY_VERIFICATION.md` itself (file-level edge granularity; no cross-workspace-package import
+  resolution; no static frontend/backend edge). Full/clean-clone verification gates (Phase 7) and final
+  commits/push/CI observation (Phase 8) have not started.
+- Unresolved questions: none blocking.
+- Exact next action: Phase 7 — full local verification gates (frozen install, build, lint, complete test suite,
+  all three demos, audit/replay chain verification CLI, exact CI secret scan, `git diff --check`), then
+  clean-clone verification in a fresh temp directory at the final candidate commit.
