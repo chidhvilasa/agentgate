@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
-import type { AuditEvent, Approval, ApprovalStatus } from '@agentgate/protocol';
+import type { AuditEvent, Approval, ApprovalStatus, ReplayEvaluation } from '@agentgate/protocol';
 
 // ─── Schema Migrations ────────────────────────────────────────────────────────
 
@@ -94,6 +94,38 @@ const MIGRATIONS = [
   ALTER TABLE audit_lifecycle_records ADD COLUMN result_finding_count INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE audit_lifecycle_records ADD COLUMN error_redacted INTEGER NOT NULL DEFAULT 0;
   `,
+  // ADR-0010: Safe Replay lineage. A separate, single-table append-only
+  // chain (own sequence_number/hash chain, independent of the audit chain)
+  // — replay evaluations have no mutable "current state" to project, unlike
+  // a live tool call's lifecycle, so the two-table audit_events/
+  // audit_lifecycle_records pattern is not reused here. MUST stay appended
+  // at the end of MIGRATIONS — see the ADR-0009 migration above for why.
+  `
+  CREATE TABLE IF NOT EXISTS replay_evaluations (
+    id TEXT PRIMARY KEY,
+    source_event_id TEXT NOT NULL REFERENCES audit_events(id),
+    sequence_number INTEGER NOT NULL UNIQUE,
+    previous_replay_hash TEXT,
+    replay_hash TEXT NOT NULL,
+    canonical_payload_version TEXT NOT NULL DEFAULT '1',
+    evaluated_at TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    original_decision_type TEXT,
+    original_rule_id TEXT,
+    original_reason_code TEXT,
+    current_decision_type TEXT NOT NULL,
+    current_rule_id TEXT,
+    current_reason_code TEXT NOT NULL,
+    current_explanation TEXT NOT NULL,
+    current_transformations_json TEXT NOT NULL,
+    decision_changed INTEGER NOT NULL,
+    matched_rule_changed INTEGER NOT NULL,
+    reason_code_changed INTEGER NOT NULL,
+    source_arguments_redacted INTEGER NOT NULL,
+    limitations_json TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_replay_source_event ON replay_evaluations(source_event_id);
+  `,
 ];
 
 // ─── Canonical Payload for Hashing ────────────────────────────────────────────
@@ -117,6 +149,8 @@ export class AuditStorage {
   private db: Database.Database;
   private nextSeq: number;
   private lastHash: string | null;
+  private nextReplaySeq: number;
+  private lastReplayHash: string | null;
 
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
@@ -131,6 +165,14 @@ export class AuditStorage {
 
     this.nextSeq = last ? last.sequence_number + 1 : 1;
     this.lastHash = last?.record_hash ?? null;
+
+    // Resume the independent replay-evaluation chain (ADR-0010)
+    const lastReplay = this.db
+      .prepare('SELECT sequence_number, replay_hash FROM replay_evaluations ORDER BY sequence_number DESC LIMIT 1')
+      .get() as { sequence_number: number; replay_hash: string } | undefined;
+
+    this.nextReplaySeq = lastReplay ? lastReplay.sequence_number + 1 : 1;
+    this.lastReplayHash = lastReplay?.replay_hash ?? null;
   }
 
   private runMigrations(): void {
@@ -429,6 +471,191 @@ export class AuditStorage {
     return { valid: true, count: records.length };
   }
 
+  // ─── Safe Replay Lineage (ADR-0010) ────────────────────────────────────────
+  //
+  // A separate, single-table append-only chain — replay evaluations have no
+  // mutable "current state" to project, unlike a live tool call's lifecycle,
+  // so the audit chain's two-table pattern is not reused here. Never writes
+  // to audit_events/audit_lifecycle_records; never mutates a source event.
+
+  /**
+   * Appends one immutable replay evaluation. `data` must already be the
+   * result of a pure policy re-evaluation (see replay.ts) — this method only
+   * persists and hash-chains it; it performs no evaluation itself.
+   */
+  insertReplayEvaluation(
+    data: Omit<ReplayEvaluation, 'id' | 'sequence_number' | 'previous_replay_hash' | 'replay_hash' | 'canonical_payload_version'>
+  ): ReplayEvaluation {
+    const id = uuidv4();
+    const sequence_number = this.nextReplaySeq++;
+    const previous_replay_hash = this.lastReplayHash;
+    const canonical_payload_version = '1' as const;
+
+    const canonicalPayload = {
+      id,
+      source_event_id: data.source_event_id,
+      sequence_number,
+      previous_replay_hash,
+      evaluated_at: data.evaluated_at,
+      policy_digest: data.policy_digest,
+      original_decision_type: data.original_decision_type,
+      original_rule_id: data.original_rule_id,
+      original_reason_code: data.original_reason_code,
+      current_decision_type: data.current_decision_type,
+      current_rule_id: data.current_rule_id,
+      current_reason_code: data.current_reason_code,
+      current_explanation: data.current_explanation,
+      current_transformations: data.current_transformations,
+      decision_changed: data.decision_changed,
+      matched_rule_changed: data.matched_rule_changed,
+      reason_code_changed: data.reason_code_changed,
+      source_arguments_redacted: data.source_arguments_redacted,
+      limitations: data.limitations,
+    };
+
+    const replay_hash = sha256(canonicalize(canonicalPayload));
+    this.lastReplayHash = replay_hash;
+
+    this.db
+      .prepare(
+        `INSERT INTO replay_evaluations (
+          id, source_event_id, sequence_number, previous_replay_hash, replay_hash,
+          canonical_payload_version, evaluated_at, policy_digest,
+          original_decision_type, original_rule_id, original_reason_code,
+          current_decision_type, current_rule_id, current_reason_code,
+          current_explanation, current_transformations_json,
+          decision_changed, matched_rule_changed, reason_code_changed,
+          source_arguments_redacted, limitations_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        data.source_event_id,
+        sequence_number,
+        previous_replay_hash,
+        replay_hash,
+        canonical_payload_version,
+        data.evaluated_at,
+        data.policy_digest,
+        data.original_decision_type,
+        data.original_rule_id,
+        data.original_reason_code,
+        data.current_decision_type,
+        data.current_rule_id,
+        data.current_reason_code,
+        data.current_explanation,
+        JSON.stringify(data.current_transformations),
+        data.decision_changed ? 1 : 0,
+        data.matched_rule_changed ? 1 : 0,
+        data.reason_code_changed ? 1 : 0,
+        data.source_arguments_redacted ? 1 : 0,
+        JSON.stringify(data.limitations)
+      );
+
+    return {
+      ...data,
+      id,
+      sequence_number,
+      previous_replay_hash,
+      replay_hash,
+      canonical_payload_version,
+    };
+  }
+
+  getReplayEvaluation(id: string): ReplayEvaluation | null {
+    const row = this.db.prepare('SELECT * FROM replay_evaluations WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? this.rowToReplayEvaluation(row) : null;
+  }
+
+  listReplayEvaluationsForEvent(sourceEventId: string): ReplayEvaluation[] {
+    const rows = this.db
+      .prepare('SELECT * FROM replay_evaluations WHERE source_event_id = ? ORDER BY sequence_number ASC')
+      .all(sourceEventId) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToReplayEvaluation(r));
+  }
+
+  /**
+   * Independently re-walks the replay chain, exactly mirroring verifyChain()'s
+   * approach for the audit chain — recomputes each record's hash from its own
+   * stored data and the stored previous_replay_hash, failing on the first
+   * mismatch or sequence gap. Called by `agentgate audit verify`.
+   */
+  verifyReplayChain(): { valid: boolean; error?: string; count: number } {
+    const records = this.db
+      .prepare('SELECT * FROM replay_evaluations ORDER BY sequence_number ASC')
+      .all() as Record<string, unknown>[];
+    if (records.length === 0) return { valid: true, count: 0 };
+
+    let expectedHash: string | null = null;
+    let expectedSeq = 1;
+
+    for (const row of records) {
+      if (row.sequence_number !== expectedSeq) {
+        return { valid: false, error: `Replay sequence gap at expected seq ${expectedSeq}, found ${row.sequence_number}`, count: expectedSeq - 1 };
+      }
+      if (row.previous_replay_hash !== expectedHash) {
+        return { valid: false, error: `Replay hash chain broken at seq ${expectedSeq}. Expected prev: ${expectedHash}, got: ${row.previous_replay_hash}`, count: expectedSeq - 1 };
+      }
+
+      const canonicalPayload = {
+        id: row.id,
+        source_event_id: row.source_event_id,
+        sequence_number: row.sequence_number,
+        previous_replay_hash: row.previous_replay_hash,
+        evaluated_at: row.evaluated_at,
+        policy_digest: row.policy_digest,
+        original_decision_type: row.original_decision_type,
+        original_rule_id: row.original_rule_id,
+        original_reason_code: row.original_reason_code,
+        current_decision_type: row.current_decision_type,
+        current_rule_id: row.current_rule_id,
+        current_reason_code: row.current_reason_code,
+        current_explanation: row.current_explanation,
+        current_transformations: JSON.parse(row.current_transformations_json as string),
+        decision_changed: row.decision_changed === 1,
+        matched_rule_changed: row.matched_rule_changed === 1,
+        reason_code_changed: row.reason_code_changed === 1,
+        source_arguments_redacted: row.source_arguments_redacted === 1,
+        limitations: JSON.parse(row.limitations_json as string),
+      };
+
+      const computedHash = sha256(canonicalize(canonicalPayload));
+      if (computedHash !== row.replay_hash) {
+        return { valid: false, error: `Tampering detected in replay chain at seq ${expectedSeq}. Computed hash does not match stored replay_hash.`, count: expectedSeq - 1 };
+      }
+
+      expectedHash = row.replay_hash;
+      expectedSeq++;
+    }
+
+    return { valid: true, count: records.length };
+  }
+
+  private rowToReplayEvaluation(row: Record<string, unknown>): ReplayEvaluation {
+    return {
+      id: row.id as string,
+      source_event_id: row.source_event_id as string,
+      sequence_number: row.sequence_number as number,
+      previous_replay_hash: row.previous_replay_hash as string | null,
+      replay_hash: row.replay_hash as string,
+      canonical_payload_version: (row.canonical_payload_version as '1' | undefined) ?? '1',
+      evaluated_at: row.evaluated_at as string,
+      policy_digest: row.policy_digest as string,
+      original_decision_type: row.original_decision_type as string | null,
+      original_rule_id: row.original_rule_id as string | null,
+      original_reason_code: row.original_reason_code as string | null,
+      current_decision_type: row.current_decision_type as string,
+      current_rule_id: row.current_rule_id as string | null,
+      current_reason_code: row.current_reason_code as string,
+      current_explanation: row.current_explanation as string,
+      current_transformations: JSON.parse(row.current_transformations_json as string) as string[],
+      decision_changed: row.decision_changed === 1,
+      matched_rule_changed: row.matched_rule_changed === 1,
+      reason_code_changed: row.reason_code_changed === 1,
+      source_arguments_redacted: row.source_arguments_redacted === 1,
+      limitations: JSON.parse(row.limitations_json as string) as string[],
+    };
+  }
 
   // ─── Approvals ──────────────────────────────────────────────────────────────
 

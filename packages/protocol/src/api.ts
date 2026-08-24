@@ -77,20 +77,62 @@ export interface DenyResponse {
   message: string;
 }
 
-// ─── Replay ───────────────────────────────────────────────────────────────────
+// ─── Safe Replay (ADR-0010) ─────────────────────────────────────────────────
+//
+// Replay is policy re-evaluation only. There is no execution mode and no
+// dry_run/execute toggle of any kind — `executed` below is the TypeScript
+// literal type `false`, not `boolean`, so a future change that tried to widen
+// it would fail to type-check every consumer, not just silently pass through
+// an execution request. See ADR-0010 in docs/AI_DECISIONS.md.
 
-export interface ReplayRequest {
-  event_id: string;
-  /** Always dry-run by default. Must explicitly set to false to execute. */
-  dry_run?: boolean;
+/**
+ * Empty on the wire today. `contract_version` exists so a future breaking
+ * change to the request shape can be introduced without an ambiguous empty
+ * body meaning two different things. The server rejects any other field
+ * (e.g. `dry_run`, `execute`) rather than silently ignoring it.
+ */
+export interface ReplayEvaluationRequest {
+  contract_version?: 1;
 }
 
-export interface ReplayResponse {
-  event_id: string;
-  dry_run: boolean;
-  would_decision: string;
+export interface ReplayDecisionSummary {
+  decision_type: string | null;
+  matched_rule_id: string | null;
+  reason_code: string | null;
+}
+
+export interface ReplayCurrentDecisionSummary extends ReplayDecisionSummary {
+  decision_type: string;
+  reason_code: string;
   explanation: string;
+  transformations: string[];
 }
+
+export interface ReplayEvaluationResponse {
+  replay_id: string;
+  source_event_id: string;
+  evaluated_at: string;
+  /** Always 'policy_only' — see ADR-0010. There is no other mode. */
+  mode: 'policy_only';
+  /** Always the literal false. Replay never executes a tool call. */
+  executed: false;
+  /** True if the source event's arguments were redacted before persistence — see `limitations`. */
+  source_arguments_redacted: boolean;
+  /** Safe digest of the policy used for this evaluation — never raw policy file bytes. */
+  policy_digest: string;
+  original: ReplayDecisionSummary;
+  current: ReplayCurrentDecisionSummary;
+  decision_changed: boolean;
+  matched_rule_changed: boolean;
+  reason_code_changed: boolean;
+  /** Short, safe, human-readable summary — e.g. "Policy decision unchanged." Never implies tool re-execution. */
+  comparison: string;
+  /** Always populated when relevant (e.g. redacted arguments, missing original decision). Never empty by omission. */
+  limitations: string[];
+}
+
+/** One row of `GET /api/events/:id/replays` — same shape as a single evaluation response, minus nothing. */
+export type ReplayEvaluationSummary = ReplayEvaluationResponse;
 
 // ─── SSE Push Events ─────────────────────────────────────────────────────────
 

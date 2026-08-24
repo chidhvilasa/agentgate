@@ -301,6 +301,111 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Supersedes: NONE
 - Superseded by: NONE
 
+### ADR-0010: Safe Replay Is Policy Re-evaluation, Never Tool Re-execution
+
+- Status: ACCEPTED
+- Date: 2026-08-24
+- Scope: product / security
+- Decision:
+  1. **Replay means policy re-evaluation only, permanently, for this feature.** There is no execution mode, no
+     `dry_run` boolean, and no input of any kind that flips replay into re-running the original tool call. The
+     response contract's `executed` field is the TypeScript literal type `false` — not a `boolean` the server
+     happens to always set to `false` today, but a type the compiler itself will not let a future change quietly
+     widen without every consumer's type-checking breaking first.
+  2. **Replay is structurally, not just behaviorally, incapable of execution.** The replay service
+     (`packages/gateway/src/replay.ts`) never imports `executeDownstream()`, never imports `runPipeline()`, never
+     imports `StdioClientTransport`/`Client` from the MCP SDK, and never imports `ApprovalManager`. It depends on
+     exactly two things: the pure `evaluate()` function from `@agentgate/policy` (the same function
+     `runPipeline()` itself calls — one rule matcher, not a second copy) and a handful of tiny, already-existing
+     pure argument-extraction helpers exported from `pipeline.ts` for reuse. A future refactor cannot
+     accidentally make replay executable by flipping a flag, because there is no flag and no code path to a
+     downstream connection to flip it into.
+  3. **Replay uses only the stored, already-redacted `normalized_arguments`** — the same representation
+     `pipeline.ts` itself persists, never a reconstructed or re-fetched original. This is a hard architectural
+     constraint, not a policy choice: AgentGate never stores raw arguments in the first place (unchanged since
+     Milestone 1), so there is nothing else replay could use. `source_arguments_redacted` in the response is
+     `true` whenever the source event's `arguments_redacted` flag was `true`, and a specific limitation string is
+     always included in that case: a `contains_secrets: true` rule that matched the *original* arguments will
+     generally **not** match the stored `[REDACTED]` placeholder text, so a policy that hasn't changed at all can
+     still show `decision_changed: true` on replay purely because of this representational gap — this is called
+     out explicitly, not left for the user to discover.
+  4. **Replay uses the current policy file, not a reconstructed historical one.** AgentGate does not snapshot
+     policy files per-event; adding that is out of scope for this milestone and would be its own ADR if pursued.
+     Replay's entire value proposition — "would this decision be different today" — depends on evaluating against
+     the *current* policy; this is documented as the defining behavior, not hidden as a limitation.
+  5. **The source `AuditEvent`/lifecycle rows are never written to during replay.** Replay only ever calls
+     `AuditStorage.getEvent()` (a read) against the audit tables and `AuditStorage.insertReplayEvaluation()`
+     (a write) against a **new, separate, append-only** `replay_evaluations` table — it never calls
+     `insertEvent()`/`updateEventStatus()`/`appendLifecycleRecord()`. A replay evaluation is immutable lineage
+     *about* a source event, never a mutation *of* it.
+  6. **Replay evaluations are themselves append-only and hash-chained**, in their own sequence independent of the
+     audit chain (own `sequence_number`/`previous_replay_hash`/`replay_hash` columns, own
+     `canonical_payload_version`), verified by a new `AuditStorage.verifyReplayChain()` that `agentgate audit
+     verify` and the CLI's `replay` command both call. No raw arguments, raw results, or raw secrets are ever
+     included in a replay evaluation's hashed or stored fields — only decision types, rule IDs, reason codes, a
+     policy digest, and bounded limitation strings.
+  7. **`REQUIRE_APPROVAL` and `ALLOW_WITH_TRANSFORM` are reported hypothetically, never enacted.** Replaying an
+     event whose current hypothetical decision is `REQUIRE_APPROVAL` reports that fact in the comparison; it does
+     not create a real `Approval` row, does not notify the Control Center's approval queue, and does not consume
+     any TTL. Replaying into a hypothetical `ALLOW_WITH_TRANSFORM` reports which transformations *would* apply;
+     nothing is sent to any downstream server, because nothing is sent to any downstream server, full stop.
+  8. **A missing or malformed current policy file fails closed.** `evaluateHistoricalEvent()` reuses
+     `loadPolicyFile()`, which already throws a structured error on a missing/invalid policy; the replay API
+     endpoint and CLI both surface this as an explicit failure (409/non-zero exit), never as a silent
+     default-allow or a stale cached policy.
+  9. **A source event with no recorded original decision, or a legacy/malformed `tool_call` shape, is rejected**
+     with an explicit "unsupported historical event" error (API: 409; CLI: non-zero exit) rather than guessed at.
+  10. **No claim of deterministic reproduction is made anywhere** — in code comments, API responses, CLI output,
+      the Control Center UI, or documentation. The product wording is: *"Safe Replay compares a historical event
+      with the current policy. It never executes the tool."* Nothing stronger.
+- Reason: closes a real, previously-stubbed product gap (`ReplayRequest`/`ReplayResponse` existed in
+  `packages/protocol/src/api.ts` with a `dry_run?: boolean` field and a comment reading *"Must explicitly set to
+  false to execute"* — misleading and unimplemented, and a disabled Control Center button read *"coming in
+  Milestone 2"*) while explicitly not reintroducing the risk that stub implied. Policy-drift analysis, incident
+  review, and rule-change validation are genuinely useful without ever touching a downstream server, given that
+  AgentGate already has everything replay needs (the pure policy engine, the stored redacted representation) on
+  hand.
+- Evidence: `packages/gateway/src/replay.ts`, `packages/gateway/src/storage.ts` (`replay_evaluations` table,
+  `insertReplayEvaluation`/`verifyReplayChain`), `packages/gateway/src/api/control.ts`
+  (`POST /api/events/:id/replay`), `packages/gateway/src/cli.ts` (`agentgate replay`), associated test suites
+  (including dependency-injection-based no-execution-invariant tests against a fixture downstream server's call
+  counter), `examples/policy-drift-replay/demo.mjs`.
+- Alternatives considered:
+  - Actual tool re-execution from stored arguments: rejected — arguments are redacted/incomplete by design, and
+    execution has real side effects on a real system; replaying an event is not something a user should be able
+    to trigger by accident while reviewing history.
+  - Persist raw arguments to make replay faithful: rejected — directly violates the project's data-minimization
+    model (ADR redaction guarantees exist specifically so raw secrets never reach disk); "more faithful replay"
+    is not worth reintroducing the exact exposure the rest of the system exists to prevent.
+  - Accept `dry_run: false` with a human approval step to actually execute: deferred entirely, not part of Safe
+    Replay — a genuinely different feature (live re-execution with fresh human authorization) that would need its
+    own threat model, its own ADR, and is explicitly out of this milestone's authorized scope.
+  - Do not persist replay evaluations at all (compute and return, never store): considered, but rejected in favor
+    of immutable, verifiable evidence — a security/incident-review tool is more useful, not less, when its own
+    findings are themselves tamper-evident and auditable. The storage model is kept deliberately minimal (one
+    small table, no raw data) to keep this affordable.
+  - Extend the existing two-table `audit_events`/`audit_lifecycle_records` design to also carry replay rows:
+    rejected — replay evaluations have no mutable "current state" projection to maintain (unlike a live tool
+    call's RECEIVED→...→terminal lifecycle); a single append-only table with its own hash chain is simpler and
+    does not risk conflating "what an agent did" with "what evaluating history against today's policy would
+    conclude."
+- Consequences:
+  - Positive: a real, immediately useful feature (policy-drift analysis, incident review, rule-change validation)
+    with a genuinely zero-execution-risk architecture, backed by structural (not just behavioral) guarantees.
+  - Negative: replay results can show `decision_changed: true` for reasons unrelated to an actual policy change
+    (redacted-argument representational drift) — mitigated by always surfacing this in `limitations`, never
+    silently. No historical-policy-snapshot support means replay always compares against "policy as of right
+    now," which is the intended behavior but is a real limit on precisely reconstructing "what would this event's
+    decision have been at some specific past moment."
+- Affected files: `packages/protocol/src/api.ts`, `packages/protocol/src/events.ts`,
+  `packages/gateway/src/replay.ts` (new), `packages/gateway/src/pipeline.ts`, `packages/gateway/src/storage.ts`,
+  `packages/gateway/src/api/control.ts`, `packages/gateway/src/cli.ts`, `packages/policy/src/*` (policy digest
+  helper), `apps/control-center/src/pages/EventDetail.tsx`, `apps/control-center/src/api.ts`,
+  `packages/gateway/tests/fixtures/fixture-downstream-server.mjs`, `examples/policy-drift-replay/demo.mjs` (new),
+  associated test files.
+- Supersedes: NONE
+- Superseded by: NONE
+
 ## Superseded Decisions
 
 

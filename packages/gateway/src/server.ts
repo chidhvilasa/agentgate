@@ -37,6 +37,7 @@ export async function startGateway(configPath: string): Promise<void> {
     version: '0.1.0',
     gatewayPort: config.gateway_port,
     dbPath: config.db_path,
+    policyPath: config.policy,
     onEvent: (handler) => subscribers.push(handler),
   });
 

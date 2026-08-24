@@ -188,3 +188,44 @@ export interface Approval {
   resolved_at: string | null;
   resolved_by: 'human' | null;
 }
+
+// ─── Safe Replay Lineage (ADR-0010) ─────────────────────────────────────────
+//
+// A replay evaluation is immutable lineage ABOUT a source AuditEvent — never
+// a mutation OF it. Replay never executes a tool; see ADR-0010 in
+// docs/AI_DECISIONS.md and packages/gateway/src/replay.ts.
+
+/**
+ * A single, append-only, hash-chained record of one policy re-evaluation of
+ * a historical event against the current policy. Its own sequence/hash chain
+ * is independent of the audit event chain (own sequence_number starting at
+ * 1) — see AuditStorage.verifyReplayChain(). Never contains raw arguments,
+ * raw results, or raw secrets — only decision types, rule IDs, reason codes,
+ * a policy digest, and bounded limitation strings.
+ */
+export interface ReplayEvaluation {
+  id: string;
+  source_event_id: string;
+  sequence_number: number;
+  previous_replay_hash: string | null;
+  replay_hash: string;
+  canonical_payload_version: '1';
+  evaluated_at: string;
+  /** Safe digest of the policy used for this evaluation — never raw policy file bytes. */
+  policy_digest: string;
+  original_decision_type: string | null;
+  original_rule_id: string | null;
+  original_reason_code: string | null;
+  current_decision_type: string;
+  current_rule_id: string | null;
+  current_reason_code: string;
+  current_explanation: string;
+  current_transformations: string[];
+  decision_changed: boolean;
+  matched_rule_changed: boolean;
+  reason_code_changed: boolean;
+  /** True if the source event's arguments were redacted before persistence. */
+  source_arguments_redacted: boolean;
+  /** Always populated when relevant (e.g. redacted arguments, missing original decision). */
+  limitations: string[];
+}

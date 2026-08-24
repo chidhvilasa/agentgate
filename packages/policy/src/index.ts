@@ -39,3 +39,4 @@ export type { Policy, EvaluationInput };
 export * from './schema.js';
 export * from './transformation.js';
 export * from './output-sanitization.js';
+export * from './digest.js';

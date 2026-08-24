@@ -24,7 +24,7 @@ export interface PipelineContext {
 }
 
 /** Extracts the primary path from tool arguments (heuristic). */
-function extractPrimaryPath(args: Record<string, unknown>): string | undefined {
+export function extractPrimaryPath(args: Record<string, unknown>): string | undefined {
   for (const key of ['path', 'file', 'filepath', 'file_path', 'directory', 'dir']) {
     if (typeof args[key] === 'string') return args[key];
   }
@@ -32,7 +32,7 @@ function extractPrimaryPath(args: Record<string, unknown>): string | undefined {
 }
 
 /** Extracts command from tool arguments. */
-function extractCommand(args: Record<string, unknown>): string | undefined {
+export function extractCommand(args: Record<string, unknown>): string | undefined {
   for (const key of ['command', 'cmd', 'shell', 'exec']) {
     if (typeof args[key] === 'string') return args[key];
   }
@@ -40,7 +40,7 @@ function extractCommand(args: Record<string, unknown>): string | undefined {
 }
 
 /** Extracts host/URL from tool arguments. */
-function extractHost(args: Record<string, unknown>): string | undefined {
+export function extractHost(args: Record<string, unknown>): string | undefined {
   for (const key of ['url', 'host', 'endpoint', 'uri']) {
     if (typeof args[key] === 'string') {
       try {
