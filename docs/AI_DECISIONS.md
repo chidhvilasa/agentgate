@@ -764,3 +764,61 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Exact next action: Phase 3 — build `examples/policy-drift-replay/demo.mjs`, a deterministic, offline,
   CI-safe demo proving a real historical audited request replayed under a changed policy shows the correct
   decision drift, with the downstream fixture's call counter confirmed unchanged throughout.
+
+### 2026-08-24 — Safe Replay Completion, Phase 3 (deterministic policy-drift demo)
+
+- Prompt objective: build `examples/policy-drift-replay/demo.mjs` — a deterministic, offline, CI-safe demo
+  proving Safe Replay's decision-drift behavior against a real historical audited event, through both the
+  Control API and the CLI, with an executable downstream call-counter proof.
+- Continuity check: re-read ADR-0010 and the Phase 1/Phase 2 session-log entries above before starting;
+  confirmed local HEAD was `9472cbc` (Phase 2 UI + ledger entry) with a clean tree before making any change.
+- Decisions added or changed: none — no new or superseded ADR needed.
+- Implementation completed: `examples/policy-drift-replay/demo.mjs`, modeled directly on the existing
+  `secret-exfiltration`/`downstream-secret-result` demo pattern (mkdtemp'd temp dir, `assertInsideTempDir`/
+  `safeRemoveFile` safety gates, `try/finally` cleanup, `process.exitCode` never `process.exit()`), against
+  `packages/gateway/dist` (production-built). Reuses the existing
+  `packages/gateway/tests/fixtures/fixture-downstream-server.mjs` fixture directly (rather than writing a
+  second, demo-only mock downstream server) for its `FIXTURE_CALL_COUNT_FILE` call-counter proof — this file
+  lives inside the repo tree, so no CJS-absolute-path module-resolution workaround was needed the way the two
+  older demos need for their temp-directory-generated mock servers. Flow: start a real gateway + the fixture
+  downstream under policy A (a rule `echo-rule` that ALLOWs `echo`); make one real, audited `echo` call whose
+  arguments carry the synthetic AWS-shaped placeholder (exercising inbound argument redaction on the historical
+  record at the same time, for free); record the downstream counter (1); overwrite the *same* policy file so
+  the *same* rule id now DENIES `echo` (isolating a pure decision-type drift from a matched-rule-id drift);
+  replay the historical event via `POST /api/events/:id/replay` (captured the per-launch auth token by piping
+  the gateway child process's stderr and parsing the "Auth token:" line it already prints on startup) and
+  assert `executed:false`, `mode:'policy_only'`, ALLOW→DENY, `decision_changed:true`,
+  `matched_rule_changed:false`, no secret in the response, and the downstream counter still 1; replay the same
+  event again via `agentgate replay <id> <config> --json` (a separate CLI subprocess) and assert the same
+  drift independently, no secret in stdout, counter still 1; assert no approval exists; assert the source audit
+  event is byte-identical (JSON-stringified comparison) before and after both replays; verify both the audit
+  chain and the replay lineage chain via `agentgate audit verify` (message content + exit code) and
+  independently via a direct `storage.verifyReplayChain()` call; confirm exactly two replay evaluations were
+  persisted (one per replay path).
+  - Also updated `.github/workflows/ci.yml` (both the Ubuntu build-test matrix job and the Windows job),
+    `CONTRIBUTING.md`'s pre-PR local gate command list, and `.github/pull_request_template.md`'s required-
+    commands checklist to run this third demo alongside the two pre-existing ones, matching the pattern
+    established when the second demo was added in Milestone 3.
+- Files materially changed: `examples/policy-drift-replay/demo.mjs` (new), `.github/workflows/ci.yml`,
+  `CONTRIBUTING.md`, `.github/pull_request_template.md`.
+- Commands actually executed and their actual results: `node examples/policy-drift-replay/demo.mjs` — all 24
+  in-demo assertions PASS, exit code 0, `git status --short` clean after the run (no residue); re-ran a second
+  time with the same result (determinism check). `pnpm run lint` (0 errors, same 2 pre-existing unrelated
+  warnings). `pnpm run test` — 154 tests, unchanged (this phase added a demo, not tests), zero regressions. All
+  three demos (`secret-exfiltration`, `downstream-secret-result`, `policy-drift-replay`) run back-to-back —
+  all exit 0. `git diff --check` (clean). The exact CI tracked-file secret-scan pattern from `security.yml` run
+  manually against the staged new file: `No credential-shaped strings found outside known placeholders.`
+  Committed as `a5fc13a feat(examples): add deterministic policy-drift Safe Replay demo` and
+  `93093e6 ci: run the policy-drift Safe Replay demo in CI and contributor gates`.
+- Verification result: PASS for every Phase 3 item — a real historical event, replayed under a genuinely
+  changed policy, through both the API and the CLI, with the executable counter proof, the no-approval
+  assertion, the source-immutability assertion, and both chain-verification checks, all passing.
+- Known limitations / follow-up risk: this demo has not yet been run inside GitHub Actions itself (only
+  locally) — that happens as part of Phase 8's push/CI-observation step, where a genuine platform difference
+  (e.g. Windows stdio/process timing) could still surface. Documentation (Phase 4), browser verification/
+  screenshot (Phase 5), and Graphify re-indexing (Phase 6) have not started.
+- Unresolved questions: none blocking.
+- Exact next action: Phase 4 — update README.md, docs/ARCHITECTURE.md, docs/THREAT_MODEL.md,
+  docs/POLICY_REFERENCE.md (if relevant), docs/VERIFICATION.md, docs/DEVELOPMENT.md, docs/TROUBLESHOOTING.md,
+  and CHANGELOG.md to document Safe Replay truthfully and remove stale "coming in Milestone 2"/"replay is
+  unsupported" claims.
