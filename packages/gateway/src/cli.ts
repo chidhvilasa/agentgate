@@ -38,6 +38,12 @@ function reportFatal(err: unknown): void {
   process.exitCode = 1;
 }
 
+/** Resolves a relative path against the config file's own directory — matches loadGatewayConfig()'s resolution (see config/registry.ts) so `agentgate audit verify`/`replay` behave the same regardless of the caller's cwd. `:memory:` is SQLite's special sentinel, never resolved as a path. */
+function resolveRelativeToConfig(configPath: string, value: string): string {
+  if (value === ':memory:' || path.isAbsolute(value)) return value;
+  return path.resolve(path.dirname(path.resolve(configPath)), value);
+}
+
 function resolveDbPath(configPath: string): string {
   let dbPath = './agentgate.sqlite';
   try {
@@ -46,7 +52,7 @@ function resolveDbPath(configPath: string): string {
   } catch {
     // use default
   }
-  return dbPath;
+  return resolveRelativeToConfig(configPath, dbPath);
 }
 
 const args = rawArgs;
@@ -531,10 +537,12 @@ See docs/QUICKSTART.md for a full walkthrough.
 
 /** Resolves a policy file path given a gateway config path, mirroring loadGatewayConfig's own policy field lookup. */
 function resolvePolicyPath(configPath: string): string {
+  let policyPath = './agentgate.policy.yml';
   try {
     const parsed = yaml.load(fs.readFileSync(configPath, 'utf-8')) as { policy?: string } | undefined;
-    return parsed?.policy ?? './agentgate.policy.yml';
+    if (parsed?.policy) policyPath = parsed.policy;
   } catch {
-    return './agentgate.policy.yml';
+    // use default
   }
+  return resolveRelativeToConfig(configPath, policyPath);
 }

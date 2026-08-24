@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import fs from 'node:fs';
+import path from 'node:path';
 import yaml from 'js-yaml';
 
 // ─── Downstream Server Definition ─────────────────────────────────────────────
@@ -129,7 +130,30 @@ export function loadGatewayConfig(filePath: string): GatewayConfig {
     throw new Error(`Config file "${filePath}" is invalid:\n${errors}`);
   }
 
-  return result.data;
+  // Milestone 5 fix: `policy`/`db_path` are resolved relative to the config
+  // file's own directory, not the process's current working directory.
+  // Before this fix, a relative `policy: ./agentgate.policy.yml` only
+  // worked if the gateway happened to be launched from that exact
+  // directory — `agentgate start some/other/dir/agentgate.yml` from
+  // anywhere else silently looked for the policy file next to wherever the
+  // command was actually run from and failed with a confusing "file not
+  // found". `packages/gateway/src/onboarding/{configValidate,doctor}.ts`
+  // already assumed this (safer) behavior when locating the policy file to
+  // check — this fix makes the real runtime match what they already
+  // promised, instead of the other way around. `:memory:` is SQLite's own
+  // special in-memory-database sentinel, never a real file path, and is
+  // deliberately left untouched.
+  const configDir = path.dirname(path.resolve(filePath));
+  const resolved = {
+    ...result.data,
+    policy: path.isAbsolute(result.data.policy) ? result.data.policy : path.resolve(configDir, result.data.policy),
+    db_path:
+      result.data.db_path === ':memory:' || path.isAbsolute(result.data.db_path)
+        ? result.data.db_path
+        : path.resolve(configDir, result.data.db_path),
+  };
+
+  return resolved;
 }
 
 /**
