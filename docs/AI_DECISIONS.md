@@ -899,3 +899,71 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Exact next action: Phase 5 — real browser verification against a running gateway + Control Center (historical
   event + a changed current policy), capturing `docs/assets/control-center-safe-replay.png` to resolve the
   broken image reference introduced in this phase.
+
+### 2026-08-24 — Safe Replay Completion, Phase 5 (browser verification and screenshot)
+
+- Prompt objective: verify Safe Replay end-to-end in a real browser against a real gateway and real Control
+  Center, and capture `docs/assets/control-center-safe-replay.png` to resolve the broken image reference from
+  Phase 4, per Phase 5 of the governing prompt.
+- Continuity check: re-read ADR-0010 and the Phase 1–4 session-log entries above before starting; confirmed
+  local HEAD was `22189c2` (Phase 4 docs + ledger entry) with a clean tree before making any change.
+- Decisions added or changed: none — no new or superseded ADR needed.
+- Implementation completed: added `playwright` as a temporary root devDependency (`pnpm add -D -w playwright`;
+  `npx playwright install chromium`), wrote `.tmp-capture-safe-replay.mjs` in the repo root (deleted before this
+  phase's commit, never staged), mirroring the established temp-script pattern from the Milestone 3 browser
+  verification. The script: starts a real gateway (`packages/gateway/dist/cli.js`, production-built) and the
+  real fixture downstream server under a policy that allows `echo`; makes one real, audited `echo` call over a
+  real MCP client connection; rewrites the same policy rule to deny `echo` (the drift); starts a real Vite dev
+  server for `apps/control-center`; launches headless Chromium (Playwright), injects the auth token into
+  `localStorage` via `context.addInitScript()`, navigates to the real Event Detail page for the historical
+  event, clicks "Run Safe Replay," and asserts the rendered result is `CHANGED`.
+  - **Two real environment issues found and fixed while building this script** (both specific to this Windows
+    machine, not code defects): (1) Vite's default `--host` value (`localhost`) resolved to IPv6 `::1` only,
+    so a plain `fetch('http://127.0.0.1:5173/')` readiness check timed out even though the server was actually
+    up — fixed by passing `--host 127.0.0.1` explicitly to Vite, consistent with the loopback-only pattern used
+    throughout this project. (2) `.main-content`'s CSS is a fixed-height flex column with `overflow-y: auto`;
+    when the Event Detail page's total card content exceeds that fixed height, the flex layout shrinks
+    individual `.card` elements (clipped by each card's own `overflow: hidden`) instead of truly scrolling —
+    a genuine, pre-existing layout quirk of the Control Center's CSS, unrelated to Safe Replay's own
+    functionality (confirmed separately: 0 console errors, 0 failed/4xx+ requests, correct `CHANGED` result, and
+    the downstream counter check all passed before this was even discovered). Diagnosed via direct
+    `getBoundingClientRect()`/computed-style/parent-chain inspection in the page (not guessed at), then
+    neutralized *only for the screenshot capture* with a temporary injected style
+    (`.main-content { height: auto !important; overflow: visible !important; }`) so the captured image shows the
+    card's true, complete content — this is a screenshot-capture workaround, not a change to any shipped file,
+    and the underlying layout quirk is not otherwise in scope for this milestone (recorded here as a real,
+    known, pre-existing UI limitation, not silently worked around and forgotten).
+  - Verified in the browser: Event Detail loads; the Safe Replay card renders and works end to end; the
+    `CHANGED` result and ALLOW→DENY decision trace render correctly; the "No tool execution occurred" banner is
+    prominent; zero browser console errors; zero failed/4xx+ network requests; the downstream fixture's call
+    counter is unchanged (still `1`) after the browser-triggered replay — the same executable no-execution
+    evidence used in the automated tests and the CLI/API demo, now also proven through the real UI.
+  - Captured `docs/assets/control-center-safe-replay.png` — inspected visually before committing; contains only
+    synthetic data (no auth token, local username, file path, secret, or unrelated window content).
+  - Cleanup: deleted `.tmp-capture-safe-replay.mjs`; `pnpm remove -w playwright`; confirmed `git diff --stat`
+    on `package.json`/`pnpm-lock.yaml` showed no output at all (byte-for-byte reversion) before committing.
+- Files materially changed: `docs/assets/control-center-safe-replay.png` (new, binary). No source, test, or
+  config file changed in this phase — `package.json`/`pnpm-lock.yaml` were touched transiently during the
+  verification run and confirmed fully reverted before commit.
+- Commands actually executed and their actual results: `pnpm run build` (clean, post-Playwright-removal),
+  `pnpm run lint` (0 errors, same 2 pre-existing unrelated warnings), `pnpm run test` (154 tests, unchanged, zero
+  regressions), all three demos re-run back-to-back (all exit 0), `git diff --check` (clean). Committed as
+  `e3800cc docs: add Safe Replay screenshot from real browser verification`.
+- Verification result: PASS for every Phase 5 item — Event Detail loads, the Safe Replay card works end to end
+  in a real browser, the changed-decision trace renders correctly, the no-execution message is prominent, no
+  console/network errors, the fixture counter is confirmed unchanged after a browser-triggered replay, and a
+  sanitized screenshot is captured and committed.
+- Known limitations / follow-up risk: the `.main-content` fixed-height-flex-column layout quirk discovered above
+  is real and pre-existing (not introduced by Safe Replay) — it can clip a card's visible content when total
+  page content is tall enough relative to the viewport, though the DOM content itself remains fully correct and
+  accessible (confirmed by re-querying the full page text via component tests and the raw DOM inspection above);
+  this was not otherwise in this milestone's authorized scope to fix and is recorded here as a follow-up
+  candidate, not silently absorbed into this phase's work. Redacted-source-argument and safe-error UI states
+  were not separately re-verified in the browser (only the changed-decision success state was) — those are
+  already covered by the Phase 2 component tests, which do exercise real rendering logic, just not a real
+  browser DOM. Graphify re-indexing (Phase 6) and full/clean-clone verification gates (Phase 7) have not
+  started.
+- Unresolved questions: none blocking.
+- Exact next action: Phase 6 — re-index with Graphify (`graphify update .`), run the specified path/query
+  checks proving the replay execution-path separation and the Control Center → API path, and update
+  `docs/GRAPHIFY_VERIFICATION.md` with a new dated section.
