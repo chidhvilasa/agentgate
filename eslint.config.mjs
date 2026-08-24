@@ -22,8 +22,18 @@ export default tseslint.config(
   // ── Type-aware TypeScript linting for every workspace package ───────────
   // `project` (rather than `projectService`) is used explicitly because
   // the gateway/policy `tests/` directories live outside their package's
-  // build `include`, and control-center splits app/node tsconfigs — an
+  // build `include`, and control-center splits app/node/test tsconfigs — an
   // explicit project list resolves every source file unambiguously.
+  // control-center's tsconfig.test.json is intentionally separate from
+  // tsconfig.app.json (rather than widening tsconfig.app.json's `include`):
+  // importing `vitest` pulls in `@types/node`'s ambient globals, and once
+  // pulled into the SAME TypeScript program as App.tsx, that silently
+  // changed which global `setInterval` overload App.tsx resolved to (Node's
+  // stricter one vs. DOM's loose `Function`-typed one), producing incorrect
+  // `no-misused-promises` errors on unrelated, unchanged production code.
+  // Test files (and only test files) are type-checked under their own
+  // program instead — same pattern as gateway/policy's `tests/` +
+  // `tsconfig.eslint.json`, and likewise never part of `tsc -b`'s build.
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
@@ -35,6 +45,7 @@ export default tseslint.config(
           './packages/gateway/tsconfig.eslint.json',
           './apps/control-center/tsconfig.app.json',
           './apps/control-center/tsconfig.node.json',
+          './apps/control-center/tsconfig.test.json',
         ],
         tsconfigRootDir: import.meta.dirname,
       },

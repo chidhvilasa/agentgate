@@ -100,6 +100,56 @@ export default function EventDetail() {
         </div>
       </div>
 
+      {(status === 'SUCCEEDED' || status === 'FAILED') && (
+        <div className="card">
+          <div className="card-header">
+            <span className="card-title">Result Security</span>
+            {event.result_blocked ? (
+              <span className="badge denied" style={{ fontSize: 10 }}>BLOCKED</span>
+            ) : event.result_redacted ? (
+              <span className="badge pending" style={{ fontSize: 10 }}>REDACTED</span>
+            ) : (
+              <span className="badge neutral" style={{ fontSize: 10 }}>NOT REDACTED</span>
+            )}
+          </div>
+          <div className="card-body">
+            {event.result_blocked ? (
+              <div style={{ fontSize: 12, marginBottom: 10, color: 'var(--color-denied)' }}>
+                ⚠ The downstream result appeared to contain a secret (or could not be fully inspected within
+                configured limits) and was replaced with a safe error before reaching the agent. The raw result
+                was never persisted.
+              </div>
+            ) : event.result_redacted ? (
+              <div style={{ fontSize: 12, marginBottom: 10, color: 'var(--color-pending)' }}>
+                ⚠ A recognized secret pattern was found in the downstream result and redacted before it was
+                returned to the agent. The raw result was never persisted.
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, marginBottom: 10, color: 'var(--text-muted)' }}>
+                No supported secret pattern detected in the downstream result.
+              </div>
+            )}
+            <div className="detail-row">
+              <div className="detail-label">Findings</div>
+              <div className="detail-value mono">{String(event.result_finding_count ?? 0)}</div>
+            </div>
+            {event.execution_error != null && (
+              <div className="detail-row">
+                <div className="detail-label">Error sanitized</div>
+                <div className="detail-value">
+                  {event.error_redacted ? 'Yes — a secret pattern was found and redacted' : 'No secret pattern detected'}
+                </div>
+              </div>
+            )}
+            <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text-muted)', padding: '8px 12px', background: 'var(--bg-base)', borderRadius: 6 }}>
+              Image, audio, and embedded binary (blob) content in this result, if any, is never scanned for
+              secrets in either output-security mode — this reflects AgentGate's pattern-based detector, not a
+              general data-loss-prevention system. See the README's Output security section.
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="card">
         <div className="card-header">
           <span className="card-title">Tamper-Evidence Chain</span>
