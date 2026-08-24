@@ -1,6 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { runSmokeTest } from '../src/onboarding/smokeTest.js';
 
 describe('agentgate smoke-test (Milestone 5) — local, offline, self-cleaning', () => {
@@ -34,5 +35,31 @@ describe('agentgate smoke-test (Milestone 5) — local, offline, self-cleaning',
     const report = await runSmokeTest();
     const serialized = JSON.stringify(report);
     expect(serialized).not.toContain('AKIAIOSFODNN7EXAMPLE');
+  });
+
+  it('still cleans up its temp directory when an injected internal failure throws mid-run', async () => {
+    const before = new Set(fs.readdirSync(os.tmpdir()));
+    let capturedTmpDir: string | null = null;
+    const realWriteFileSync = fs.writeFileSync;
+    const spy = vi.spyOn(fs, 'writeFileSync').mockImplementation((file, ...rest) => {
+      // Let the first write (the policy file, inside the fresh tmpDir) through
+      // so we can capture which directory this run is using, then force a
+      // real, unhandled exception on it — simulating e.g. a disk error mid-run
+      // — and confirm the try/finally cleanup still fires despite the throw.
+      const filePath = String(file);
+      if (filePath.endsWith('policy.yml')) {
+        capturedTmpDir = path.dirname(filePath);
+        throw new Error('injected failure: simulated disk error writing policy.yml');
+      }
+      return realWriteFileSync(file, ...(rest as Parameters<typeof realWriteFileSync>).slice(0));
+    });
+
+    await expect(runSmokeTest()).rejects.toThrow('injected failure');
+    spy.mockRestore();
+
+    expect(capturedTmpDir).not.toBeNull();
+    expect(fs.existsSync(capturedTmpDir!)).toBe(false);
+    const after = fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('agentgate-smoke-test-') && !before.has(f));
+    expect(after).toEqual([]);
   });
 });
