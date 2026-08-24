@@ -66,6 +66,9 @@ jobs:
       - name: Policy-drift Safe Replay demo (ADR-0010)
         run: node examples/policy-drift-replay/demo.mjs
 
+      - name: Packed-package install verification (Milestone 5)
+        run: node scripts/verify-packed-install.mjs
+
       - name: Verify no whitespace/hygiene errors
         run: git diff --check
 
@@ -118,6 +121,9 @@ jobs:
 
       - name: Policy-drift Safe Replay demo (ADR-0010)
         run: node examples/policy-drift-replay/demo.mjs
+
+      - name: Packed-package install verification (Milestone 5)
+        run: node scripts/verify-packed-install.mjs
 
       - name: Verify no whitespace/hygiene errors
         run: git diff --check

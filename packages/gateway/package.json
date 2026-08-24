@@ -8,11 +8,14 @@
   "bin": {
     "agentgate": "dist/cli.js"
   },
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-assets.mjs",
     "dev": "tsx watch src/cli.ts",
     "start": "node dist/cli.js start",
     "test": "vitest run",
