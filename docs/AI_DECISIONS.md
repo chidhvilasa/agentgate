@@ -406,6 +406,105 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Supersedes: NONE
 - Superseded by: NONE
 
+### ADR-0011: Zero-Friction Onboarding Without New Trust or Execution Surfaces
+
+- Status: ACCEPTED
+- Date: 2026-08-25
+- Scope: product / security
+- Decision:
+  1. **Five new CLI commands — `init`, `config validate`, `doctor`, `integrate`, `smoke-test` — add adoption
+     convenience without adding any new trust, execution, or network surface.** None of them can execute a
+     downstream MCP server, open an external network connection, or weaken a default. `agentgate start` remains
+     the only command that ever executes anything.
+  2. **`agentgate init` is deterministic and non-interactive only, in this milestone.** A real interactive
+     wizard (TTY prompts, live overwrite confirmation) was scoped out as not worth the added surface/complexity
+     for a first pass; instead, `init` refuses to overwrite an existing file without an explicit `--force` flag,
+     which is a strictly safer default than a prompt a script could accidentally answer wrong. This is a
+     deliberate, stated scope reduction, not an oversight — a future milestone could add real interactivity
+     behind its own ADR if there is a demonstrated need.
+  3. **`agentgate config validate` reuses the exact same loaders as `agentgate start`** (`loadGatewayConfig`,
+     `loadPolicyFile`) rather than a second, hand-written validator — a parallel implementation that could
+     silently drift from what actually runs is a worse outcome than not having a `validate` command at all.
+  4. **`agentgate doctor` is read-only by construction, not just by convention.** The hardest case was the audit
+     chain check: `AuditStorage`'s constructor unconditionally runs pending migrations on open, which is itself
+     a write. A new export, `readSchemaVersionReadOnly()` (`packages/gateway/src/storage.ts`), opens the SQLite
+     file with `better-sqlite3`'s `readonly: true` OS-level flag to check the schema version *before* deciding
+     whether it is safe to open via `AuditStorage` at all — doctor only constructs a live `AuditStorage` (to
+     reuse the real `verifyChain()`/`verifyReplayChain()`, rather than a second verification implementation)
+     when the schema is already fully current, at which point the migration loop is a guaranteed no-op. A
+     behind-schema database is reported as a `WARN` with a remediation ("run `agentgate start` once"), never
+     silently migrated by doctor itself.
+  5. **`agentgate integrate`'s default behavior only ever prints a snippet or writes a brand-new, explicitly
+     named file.** Direct mutation of a real client config file is reachable only through an explicit `--apply
+     <path>` opt-in, which always creates a timestamped backup before writing, writes atomically (temp file +
+     rename), preserves every unrelated top-level key and every unrelated `mcpServers` entry already present,
+     and supports `--dry-run` to preview the exact resulting file with zero writes. No code path in this
+     milestone ever touches a *real* user's live Claude Code/Antigravity config outside of a test fixture.
+  6. **Client support is limited to what was actually verified against current authoritative documentation in
+     this session**, not assumed from general MCP convention: `claude-code` against
+     `https://code.claude.com/docs/en/mcp` (fetched and read this session — `.mcp.json`, top-level `mcpServers`
+     object, `{command, args, env}` per entry) and `antigravity` against
+     `https://antigravity.google/docs/ide/mcp/` (also fetched and read this session — `.agents/mcp_config.json`
+     workspace-scoped or `~/.gemini/config/mcp_config.json` global, `{command, args, env, cwd, disabled}` per
+     entry). A third option, `generic`, is explicitly and permanently labeled unverified in its own output — it
+     exists so a user of an unlisted client still gets a starting point, without AgentGate ever implying it
+     verified something it did not.
+  7. **`agentgate smoke-test` uses a new, dedicated, plain-JavaScript fixture downstream server**
+     (`src/onboarding/smokeFixtureServer.mjs`), not the existing test-only fixture
+     (`packages/gateway/tests/fixtures/fixture-downstream-server.mjs`), because the smoke test must also work
+     from an *installed* package, where `tests/` is never shipped (see the Milestone 5 packaging findings). It
+     is deliberately plain JavaScript rather than compiled TypeScript specifically so it works identically
+     whether AgentGate is being run from a fresh source checkout (before any build) or from dist — mirroring
+     why the pre-existing test fixture is also plain `.mjs`. A new build step,
+     `packages/gateway/scripts/copy-assets.mjs`, copies this one file into `dist/onboarding/` as part of
+     `pnpm run build`, since `tsc` does not touch non-`.ts` files in `src/`.
+  8. **Publishable packages gained a `"files": ["dist"]` field**, and a new script
+     (`scripts/verify-packed-install.mjs`) proves — with a real `pnpm pack` and a real `npm install` into an
+     isolated temp consumer, not an assumption — that installing all three tarballs together in one `npm
+     install` command works end-to-end, including running the installed `agentgate smoke-test`. Installing the
+     gateway tarball *alone* was confirmed (before this fix) to fail with a real `npm error 404` for
+     `@agentgate/policy`/`@agentgate/protocol`, since `pnpm pack` rewrites `workspace:*` to a bare semver that
+     was never published to any registry. This remains a real, documented limitation of the packed-install path
+     (see docs/DEVELOPMENT.md) — it is not the same as `npm install agentgate` working from the public registry,
+     which is not offered or claimed in this milestone.
+- Reason: the milestone's objective is a new developer reaching a verified, working result in minutes, without
+  AgentGate's security posture becoming a casualty of that convenience. Every decision above was chosen by
+  asking "does this add a way to execute something, contact the network, or silently mutate a file the user
+  didn't ask to change" and rejecting the option if the answer was yes.
+- Evidence: `packages/gateway/src/onboarding/{init,configValidate,doctor,integrate,smokeTest}.ts`,
+  `packages/gateway/src/onboarding/smokeFixtureServer.mjs`, `packages/gateway/scripts/copy-assets.mjs`,
+  `scripts/verify-packed-install.mjs`, associated test files, and the dated Milestone 5 session log entries
+  below for the exact commands run and their results.
+- Alternatives considered:
+  - A real interactive `init` wizard (readline-based TTY prompts): deferred — see point 2 above.
+  - Reimplementing config/policy validation logic specifically for `config validate` (e.g. to produce prettier
+    error messages): rejected — directly risks the exact drift the milestone's own instructions warned against.
+  - Letting `agentgate doctor` auto-apply pending database migrations when it finds one: rejected — diagnostics
+    tools that quietly change state stop being trustworthy diagnostics; `doctor` reports and remediates, `start`
+    (already migrating on open, unchanged) applies.
+  - Defaulting `integrate` to writing directly into a client's real config file: rejected outright as the
+    default — too easy to corrupt a file the user didn't expect touched; kept as an explicit, backed-up,
+    previewable opt-in only.
+  - Inventing a plausible-looking Antigravity config format from general MCP convention, without checking:
+    rejected — the milestone's own instructions require this, and doing so would have meant either accidentally
+    guessing right (indistinguishable from real verification, i.e. lucky) or shipping a config recipe that does
+    not actually work for a real user, either of which is worse than fetching the current docs, which was
+    inexpensive to do.
+- Consequences:
+  - Positive: a genuinely useful onboarding path exists, backed by executable proof (packed-install script,
+    doctor's real chain verification, smoke-test's real allow/deny/redaction assertions) rather than
+    documentation claims alone.
+  - Negative: `init` has no interactive mode yet (a real, if minor, UX gap for a user who wants guided prompts);
+    the packed-install path still requires the user to run `pnpm pack` themselves from a source checkout (no
+    public registry publication); the verified client-integration matrix is intentionally small (two verified
+    clients plus one labeled-generic recipe) and will need revisiting as MCP client landscape changes.
+- Affected files: `packages/gateway/src/cli.ts`, `packages/gateway/src/onboarding/*` (new),
+  `packages/gateway/src/storage.ts`, `packages/gateway/scripts/copy-assets.mjs` (new),
+  `scripts/verify-packed-install.mjs` (new), `packages/{gateway,policy,protocol}/package.json`,
+  `.github/workflows/ci.yml`, associated test files, `docs/*.md`.
+- Supersedes: NONE
+- Superseded by: NONE
+
 ## Superseded Decisions
 
 
@@ -1149,3 +1248,106 @@ decisions across AI-agent sessions. Verify entries against the repository.
   the local Windows pass as sufficient on its own.
 - Unresolved questions: none blocking.
 - Exact next action: none — produce the final required report for this milestone.
+
+### 2026-08-25 — Milestone 5, Phase 1 (installability audit and packaging repair)
+
+- Prompt objective: determine, by actually testing rather than assuming, how a clean user can run AgentGate
+  today; repair the smallest maintainable packaging gap found; add automated packed-install coverage.
+- Continuity check: confirmed local and remote HEAD both `a6402d5` (Milestone 4 checkpoint) with a clean
+  `git status --short` (only `.claude/`/`CLAUDE.md` untracked) and both known CI/Security runs green before
+  starting; read `docs/AI_DECISIONS.md` in full including every ADR; re-read `cli.ts`, `config/registry.ts`,
+  `packages/policy/src/index.ts`, `server.ts`, `storage.ts`, package manifests, `.github/workflows/*.yml`,
+  README/DEVELOPMENT/TROUBLESHOOTING; ran and recorded frozen install, build, lint, full test suite (154 tests
+  at that point), and all three existing demos — all passed before any change.
+- Findings (verified with real commands, not assumed):
+  - All three publishable packages are `"private": true` (so `npm publish` is blocked outright — expected,
+    unchanged in this milestone), have `"bin": {"agentgate": "dist/cli.js"}` with a correct shebang, and build
+    cleanly, but had no `"files"` field and no `.npmignore` — `pnpm pack` therefore included `src/`, `tests/`,
+    and `tsconfig*.json` in every tarball (gateway tarball: 69KB before, including `.test.ts` files).
+  - `npm install <packed-gateway-tarball>` **alone** into a clean temp consumer fails with a real, reproduced
+    `npm error 404 Not Found - GET .../@agentgate%2fpolicy` — `pnpm pack` rewrites the `workspace:*` protocol to
+    a bare `"0.1.0"` semver in the packed `package.json`, which npm then tries (and fails) to resolve from the
+    real registry, since these packages have never been published there.
+  - Installing all three tarballs **together** in one `npm install a.tgz b.tgz c.tgz` command *does* work —
+    confirmed by then running the installed CLI's help text and `agentgate validate` against a real file from
+    that clean consumer, both behaving correctly.
+- Implementation completed: added `"files": ["dist"]` to `packages/{gateway,policy,protocol}/package.json`
+  (gateway tarball shrank to ~51KB, `src`/`tests` no longer present); new `scripts/verify-packed-install.mjs` —
+  packs all three packages, inspects the gateway tarball's contents (asserts `src`/`tests` absent, `dist/cli.js`
+  and the smoke-test fixture present — the fixture assertion was added after Phase 6 below, since Phase 1 was
+  revisited once that command existed), installs all three tarballs together into a fresh temp consumer, and
+  runs the installed CLI's help output, `--version`, and (after Phase 6) `smoke-test` — 9 real assertions.
+  Wired into both CI jobs as a new "Packed-package install verification" step.
+- Files materially changed: `packages/{gateway,policy,protocol}/package.json`,
+  `scripts/verify-packed-install.mjs` (new), `.github/workflows/ci.yml`.
+- Commands actually executed and their actual results: `pnpm pack` for all three packages (before and after the
+  fix, tarball sizes compared directly); `npm install` of the gateway tarball alone (reproduced the 404
+  failure); `npm install` of all three tarballs together (succeeded; installed CLI's help/`--version`/
+  `smoke-test` all verified working from the clean consumer); `node scripts/verify-packed-install.mjs` — all 9
+  checks PASS. Committed as `8d0a8f0 fix(packaging): trim publishable tarballs and prove packed install works`.
+- Verification result: PASS — the installability audit was performed with real commands against real temp
+  directories, the one real gap found (tarball bloat) was fixed, and the packed-install method now has
+  automated, CI-wired evidence rather than a documentation claim alone.
+- Known limitations / follow-up risk: packed install still requires the user to run `pnpm pack` themselves from
+  a source checkout — there is no public npm registry publication in this milestone, and none is claimed.
+  Installing the gateway tarball in isolation (without its two workspace siblings) remains unsupported and is
+  documented as such, not silently papered over.
+- Unresolved questions: none blocking.
+- Exact next action: Phase 2 — implement `agentgate init`.
+
+### 2026-08-25 — Milestone 5, Phases 2-6 (onboarding CLI: init, config validate, doctor, integrate, smoke-test)
+
+- Prompt objective: implement `agentgate init`, `agentgate config validate`, `agentgate doctor`, `agentgate
+  integrate <client>`, and `agentgate smoke-test`, each meeting the detailed safety requirements in the
+  governing prompt, with automated test coverage.
+- Continuity check: re-read ADR-0011 (drafted alongside this work, see above) and the Phase 1 session-log entry
+  before starting; confirmed local HEAD was `8d0a8f0` with a clean tree.
+- Decisions added or changed: added ADR-0011 (Zero-Friction Onboarding Without New Trust or Execution Surfaces)
+  — see above for the full decision record; not repeated here.
+- Implementation completed (full detail in ADR-0011 above; commands/results below):
+  - `packages/gateway/src/onboarding/init.ts`: deterministic, non-interactive project scaffolding.
+  - `packages/gateway/src/onboarding/configValidate.ts`: reuses `loadGatewayConfig`/`loadPolicyFile` directly.
+  - `packages/gateway/src/onboarding/doctor.ts`: 12 read-only checks; a new `packages/gateway/src/storage.ts`
+    export, `readSchemaVersionReadOnly()` (opened with `better-sqlite3`'s `readonly: true`), lets it check
+    whether a database is already fully migrated before ever deciding it's safe to open via `AuditStorage`
+    (whose constructor otherwise applies pending migrations unconditionally on open).
+  - `packages/gateway/src/onboarding/smokeTest.ts` + `smokeFixtureServer.mjs` (new, plain JS) +
+    `packages/gateway/scripts/copy-assets.mjs` (new postbuild step): a real allow/deny/redaction/chain-
+    verification smoke test using a fixture that ships with the compiled package.
+  - `packages/gateway/src/onboarding/integrate.ts`: `claude-code` and `antigravity` support, each verified
+    against a real, fetched, current documentation page this session (`https://code.claude.com/docs/en/mcp` and
+    `https://antigravity.google/docs/ide/mcp/` respectively — both read via WebFetch, not assumed from prior
+    knowledge); a third `generic` option explicitly labeled unverified. Default print-only behavior; an explicit
+    `--apply` opt-in with backup/atomic-write/unrelated-entry-preservation/`--dry-run`.
+  - `packages/gateway/src/cli.ts`: five new subcommands, `--version`, per-command `--help`, and shared arg-
+    parsing helpers (`extractValueFlag`, `quotePath`, `reportFatal`).
+  - **Real bug found and fixed while building this**: the smoke-test fixture was initially written as
+    TypeScript (`smokeFixtureServer.ts`), which failed at runtime with `Cannot find module
+    ".../smokeFixtureServer.js"` when tests ran directly against `src/` (vitest never compiles it) — fixed by
+    rewriting it as plain `.mjs` (matching the pre-existing test-only fixture's own approach) plus the new
+    `copy-assets.mjs` postbuild step so it also ships in `dist/` for an installed package. A second issue found
+    while writing doctor's no-execution test: `vi.spyOn()` cannot patch a named ESM export ("Module namespace is
+    not configurable in ESM") — replaced with the same structural import-statement guardrail pattern already
+    used by `replay-no-execution.test.ts`.
+- Files materially changed: `packages/gateway/src/cli.ts`, `packages/gateway/src/storage.ts`,
+  `packages/gateway/src/onboarding/*` (new), `packages/gateway/scripts/copy-assets.mjs` (new), five new test
+  files under `packages/gateway/tests/onboarding-*.test.ts`, `docs/AI_DECISIONS.md` (ADR-0011).
+- Commands actually executed and their actual results: `pnpm run build` (clean), `pnpm run lint` (0 errors,
+  same 2 pre-existing unrelated warnings), `pnpm run test` — **204 tests total** (52 policy + 16 control-center
+  + 136 gateway [86 pre-existing + 50 new]), zero regressions; all three pre-existing demos re-run and passing;
+  every new command manually exercised end-to-end against a real temp project directory (including a directory
+  name containing spaces and Japanese characters), including `init` twice (refusal then `--force` overwrite),
+  `config validate` (human + `--json`), `doctor` (including `--client-config`), `integrate` for all three
+  clients, and `--apply`'s dry-run/real/backup/unrelated-key-preservation behavior — all matched expected
+  output. Committed as `4b2d705 feat(cli): add init, config validate, doctor, integrate, and smoke-test`.
+- Verification result: PASS for every Phase 2-6 requirement exercised above — real, working commands with real
+  test coverage and real manual verification, not a stub or a documentation-only claim.
+- Known limitations / follow-up risk: `init` has no interactive mode (see ADR-0011 point 2); the client-
+  integration matrix is intentionally small; `doctor`'s port-availability check can race with another process
+  binding the same port between the check and a later `agentgate start` (inherent to any such check, stated
+  plainly rather than implied otherwise). Phase 7 (lifecycle hardening + Control Center clipping fix), Phase 8
+  (documentation), Phase 9 (screenshots), Phase 10 (Graphify), Phase 11 (CI matrix), Phase 12 (full/clean-room
+  verification), and Phase 13 (final commits/push/CI) have not started.
+- Unresolved questions: none blocking.
+- Exact next action: Phase 7 — startup/lifecycle hardening review and the Control Center `.main-content`
+  clipping fix.
