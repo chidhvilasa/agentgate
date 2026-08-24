@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import EventDetail from './EventDetail.js';
 import { api } from '../api.js';
@@ -7,7 +7,7 @@ import { api } from '../api.js';
 // Real network calls are never made in tests — the api module is mocked so
 // these tests exercise only the component's rendering of AuditEvent-shaped
 // data, matching real @agentgate/protocol fields (ADR-0009).
-vi.mock('../api.js', () => ({ api: { event: vi.fn() } }));
+vi.mock('../api.js', () => ({ api: { event: vi.fn(), replay: vi.fn() } }));
 
 // Synthetic-only — this string must never appear in rendered output; it
 // stands in for what a real un-redacted secret would look like if the
@@ -133,5 +133,158 @@ describe('EventDetail — Result Security card', () => {
     renderEventDetail();
     expect(await screen.findByText('Tamper-Evidence Chain')).toBeInTheDocument();
     expect(screen.getByText('deadbeef')).toBeInTheDocument();
+  });
+});
+
+// Synthetic-only — must never appear in the rendered card unless the mocked
+// replay response itself includes it (i.e. the component must not fabricate
+// or leak anything beyond what the API returned).
+const REPLAY_SECRET_STANDIN = 'sk-should-never-render-in-the-replay-card-abcdefgh';
+
+function baseReplayResult(overrides: Record<string, unknown> = {}) {
+  return {
+    replay_id: 'replay-1',
+    source_event_id: 'evt-1',
+    evaluated_at: '2026-01-02T00:00:00.000Z',
+    mode: 'policy_only',
+    executed: false,
+    source_arguments_redacted: false,
+    policy_digest: 'abc1234567890def',
+    original: { decision_type: 'ALLOW', matched_rule_id: 'allow-reads', reason_code: 'POLICY_ALLOW' },
+    current: {
+      decision_type: 'ALLOW',
+      matched_rule_id: 'allow-reads',
+      reason_code: 'POLICY_ALLOW',
+      explanation: 'Allowed by rule "allow-reads".',
+      transformations: [],
+    },
+    decision_changed: false,
+    matched_rule_changed: false,
+    reason_code_changed: false,
+    comparison: 'Policy decision unchanged.',
+    limitations: ['Safe Replay never executes the tool — this is a policy comparison only.'],
+    ...overrides,
+  };
+}
+
+describe('EventDetail — Safe Replay card (ADR-0010)', () => {
+  afterEach(() => {
+    cleanup();
+    vi.mocked(api.event).mockReset();
+    vi.mocked(api.replay).mockReset();
+  });
+
+  it('shows the no-execution card before any replay is run, with no execution control anywhere', async () => {
+    vi.mocked(api.event).mockResolvedValue(baseEvent());
+    renderEventDetail();
+    expect(await screen.findByText('Safe Replay')).toBeInTheDocument();
+    expect(screen.getByText('NO TOOL EXECUTION')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /run safe replay/i })).toBeInTheDocument();
+    // No control anywhere on the page can execute or approve the historical call.
+    expect(screen.queryByText(/dry_run/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /execute/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /approve and run/i })).not.toBeInTheDocument();
+  });
+
+  it('runs a replay and shows an unchanged decision', async () => {
+    vi.mocked(api.event).mockResolvedValue(baseEvent());
+    vi.mocked(api.replay).mockResolvedValue(baseReplayResult());
+    renderEventDetail();
+    fireEvent.click(await screen.findByRole('button', { name: /run safe replay/i }));
+
+    expect(await screen.findByText('UNCHANGED')).toBeInTheDocument();
+    expect(screen.getByText('Policy decision unchanged.')).toBeInTheDocument();
+    expect(screen.getByText(/No tool execution occurred/)).toBeInTheDocument();
+    expect(screen.getByText('replay-1')).toBeInTheDocument();
+    expect(api.replay).toHaveBeenCalledTimes(1);
+    expect(api.replay).toHaveBeenCalledWith('evt-1');
+  });
+
+  it('runs a replay and shows a changed decision', async () => {
+    vi.mocked(api.event).mockResolvedValue(baseEvent());
+    vi.mocked(api.replay).mockResolvedValue(
+      baseReplayResult({
+        current: {
+          decision_type: 'DENY',
+          matched_rule_id: 'deny-reads',
+          reason_code: 'POLICY_DENY',
+          explanation: 'Denied by rule "deny-reads".',
+          transformations: [],
+        },
+        decision_changed: true,
+        matched_rule_changed: true,
+        comparison: 'Policy decision changed from ALLOW to DENY.',
+      })
+    );
+    renderEventDetail();
+    fireEvent.click(await screen.findByRole('button', { name: /run safe replay/i }));
+
+    expect(await screen.findByText('CHANGED')).toBeInTheDocument();
+    expect(screen.getByText('Policy decision changed from ALLOW to DENY.')).toBeInTheDocument();
+  });
+
+  it('shows a warning when the source arguments were redacted', async () => {
+    vi.mocked(api.event).mockResolvedValue(baseEvent());
+    vi.mocked(api.replay).mockResolvedValue(baseReplayResult({ source_arguments_redacted: true }));
+    renderEventDetail();
+    fireEvent.click(await screen.findByRole('button', { name: /run safe replay/i }));
+
+    expect(await screen.findByText(/original arguments were redacted before storage/)).toBeInTheDocument();
+  });
+
+  it('does not show the redaction warning when the source arguments were not redacted', async () => {
+    vi.mocked(api.event).mockResolvedValue(baseEvent());
+    vi.mocked(api.replay).mockResolvedValue(baseReplayResult({ source_arguments_redacted: false }));
+    renderEventDetail();
+    fireEvent.click(await screen.findByRole('button', { name: /run safe replay/i }));
+
+    await screen.findByText('UNCHANGED');
+    expect(screen.queryByText(/original arguments were redacted before storage/)).not.toBeInTheDocument();
+  });
+
+  it('shows a safe error message and allows retry when replay fails', async () => {
+    vi.mocked(api.event).mockResolvedValue(baseEvent());
+    vi.mocked(api.replay)
+      .mockRejectedValueOnce(new Error('Event not found.'))
+      .mockResolvedValueOnce(baseReplayResult());
+    renderEventDetail();
+    fireEvent.click(await screen.findByRole('button', { name: /run safe replay/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Event not found.');
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+
+    expect(await screen.findByText('UNCHANGED')).toBeInTheDocument();
+    expect(api.replay).toHaveBeenCalledTimes(2);
+  });
+
+  it('prevents a double-submit from issuing two requests', async () => {
+    vi.mocked(api.event).mockResolvedValue(baseEvent());
+    let resolveReplay: (value: unknown) => void = () => {};
+    vi.mocked(api.replay).mockReturnValue(
+      new Promise((resolve) => {
+        resolveReplay = resolve;
+      })
+    );
+    renderEventDetail();
+    const button = await screen.findByRole('button', { name: /run safe replay/i });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    resolveReplay(baseReplayResult());
+    await screen.findByText('UNCHANGED');
+    expect(api.replay).toHaveBeenCalledTimes(1);
+  });
+
+  it('never renders a value that was not present in the replay response', async () => {
+    vi.mocked(api.event).mockResolvedValue(
+      baseEvent({ tool_call: { tool: 'fetch_data', raw_arguments: { note: REPLAY_SECRET_STANDIN }, normalized_arguments: {}, mcp_era: 'legacy-2025', jsonrpc_id: null } })
+    );
+    vi.mocked(api.replay).mockResolvedValue(baseReplayResult());
+    renderEventDetail();
+    fireEvent.click(await screen.findByRole('button', { name: /run safe replay/i }));
+
+    await waitFor(() => expect(screen.getByText('UNCHANGED')).toBeInTheDocument());
+    expect(document.body.textContent).not.toContain(REPLAY_SECRET_STANDIN);
   });
 });

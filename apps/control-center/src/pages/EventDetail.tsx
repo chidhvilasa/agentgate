@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import type { ReplayEvaluationResponse } from '@agentgate/protocol';
 
 function statusClass(status: string) {
   const s = status.toLowerCase();
@@ -14,6 +15,185 @@ function statusClass(status: string) {
   if (s.includes('execut')) return 'executing';
   if (s.includes('fail') || s.includes('cancel') || s.includes('expir')) return 'failed';
   return 'neutral';
+}
+
+type ReplayState = 'idle' | 'loading' | 'success' | 'error';
+
+/**
+ * Safe Replay card (ADR-0010). Re-evaluates this event's saved, already-
+ * redacted request against the *current* policy. There is no execute/run
+ * control anywhere in this component, and none is possible: the API it
+ * calls has no execution-mode parameter to pass.
+ */
+function SafeReplayCard({ eventId }: { eventId: string }) {
+  const [state, setState] = useState<ReplayState>('idle');
+  const [result, setResult] = useState<ReplayEvaluationResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // A ref (not just React state) guards against a rapid double-click firing
+  // two requests before the first re-render lands — state updates batch
+  // asynchronously, but this check is synchronous.
+  const inFlightRef = useRef(false);
+
+  const runReplay = () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setState('loading');
+    setError(null);
+    api
+      .replay(eventId)
+      .then((r) => {
+        setResult(r);
+        setState('success');
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : 'Safe Replay could not be evaluated.');
+        setState('error');
+      })
+      .finally(() => {
+        inFlightRef.current = false;
+      });
+  };
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <span className="card-title">Safe Replay</span>
+        <span className="badge allowed" style={{ fontSize: 10 }}>NO TOOL EXECUTION</span>
+      </div>
+      <div className="card-body">
+        <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
+          Safe Replay re-evaluates this event's saved, already-redacted request against the{' '}
+          <strong>current</strong> policy. It never contacts, executes, or discovers any downstream
+          MCP server, and never creates or resolves an approval — this is a policy comparison only.
+        </div>
+
+        {state === 'idle' && (
+          <button className="btn btn-primary" onClick={runReplay}>
+            ▶ Run Safe Replay
+          </button>
+        )}
+
+        {state === 'loading' && (
+          <button className="btn btn-primary" disabled aria-busy="true">
+            Evaluating…
+          </button>
+        )}
+
+        {state === 'error' && (
+          <div>
+            <div role="alert" style={{ fontSize: 12, marginBottom: 10, color: 'var(--color-denied)' }}>
+              ⚠ {error}
+            </div>
+            <button className="btn btn-ghost" onClick={runReplay}>
+              ↻ Retry
+            </button>
+          </div>
+        )}
+
+        {state === 'success' && result && (
+          <div aria-live="polite">
+            <div
+              style={{
+                fontSize: 12,
+                marginBottom: 12,
+                padding: '8px 12px',
+                borderRadius: 6,
+                background: 'var(--bg-base)',
+                color: 'var(--text-secondary)',
+              }}
+            >
+              ✅ No tool execution occurred. Nothing was sent to the downstream server.
+            </div>
+
+            {result.source_arguments_redacted && (
+              <div style={{ fontSize: 12, marginBottom: 10, color: 'var(--color-pending)' }}>
+                ⚠ This event's original arguments were redacted before storage. A rule that matched a
+                raw secret value at the time may no longer match the stored [REDACTED] placeholder —
+                that can look like a policy change here even when the policy itself is unchanged.
+              </div>
+            )}
+
+            <div className="detail-row">
+              <div className="detail-label">Original decision</div>
+              <div className="detail-value">
+                <span className={`badge ${statusClass(result.original.decision_type ?? '')}`}>
+                  {result.original.decision_type ?? 'none recorded'}
+                </span>
+              </div>
+            </div>
+            <div className="detail-row">
+              <div className="detail-label">Current decision</div>
+              <div className="detail-value">
+                <span className={`badge ${statusClass(result.current.decision_type)}`}>
+                  {result.current.decision_type}
+                </span>
+              </div>
+            </div>
+            <div className="detail-row">
+              <div className="detail-label">Original matched rule</div>
+              <div className="detail-value mono">{result.original.matched_rule_id ?? 'none — default applied'}</div>
+            </div>
+            <div className="detail-row">
+              <div className="detail-label">Current matched rule</div>
+              <div className="detail-value mono">{result.current.matched_rule_id ?? 'none — default applied'}</div>
+            </div>
+            <div className="detail-row">
+              <div className="detail-label">Original reason</div>
+              <div className="detail-value mono">{result.original.reason_code ?? '—'}</div>
+            </div>
+            <div className="detail-row">
+              <div className="detail-label">Current reason</div>
+              <div className="detail-value mono">{result.current.reason_code}</div>
+            </div>
+            <div className="detail-row">
+              <div className="detail-label">Current explanation</div>
+              <div className="detail-value">{result.current.explanation}</div>
+            </div>
+
+            <div style={{ marginTop: 12, marginBottom: 12 }}>
+              <span className={`badge ${result.decision_changed ? 'denied' : 'allowed'}`}>
+                {result.decision_changed ? 'CHANGED' : 'UNCHANGED'}
+              </span>{' '}
+              <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{result.comparison}</span>
+            </div>
+
+            {result.limitations.length > 0 && (
+              <div
+                style={{
+                  fontSize: 11,
+                  color: 'var(--text-muted)',
+                  padding: '8px 12px',
+                  background: 'var(--bg-base)',
+                  borderRadius: 6,
+                  marginBottom: 12,
+                }}
+              >
+                <div style={{ marginBottom: 4, fontWeight: 600 }}>Limitations</div>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {result.limitations.map((limitation, i) => (
+                    <li key={i}>{limitation}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="detail-row">
+              <div className="detail-label">Evaluated at</div>
+              <div className="detail-value mono">{result.evaluated_at}</div>
+            </div>
+            <div className="detail-row">
+              <div className="detail-label">Replay ID</div>
+              <div className="detail-value mono">{result.replay_id}</div>
+            </div>
+
+            <button className="btn btn-ghost mt-16" onClick={runReplay}>
+              ↻ Re-run Safe Replay
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function EventDetail() {
@@ -164,19 +344,7 @@ export default function EventDetail() {
         </div>
       </div>
 
-      <div className="card">
-        <div className="card-header">
-          <span className="card-title">Replay</span>
-        </div>
-        <div className="card-body">
-          <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
-            Replay evaluates this tool call against the current policy without executing it (dry-run only in Milestone 1).
-          </div>
-          <button className="btn btn-ghost" disabled>
-            ▶ Dry-run Replay (coming in Milestone 2)
-          </button>
-        </div>
-      </div>
+      <SafeReplayCard eventId={String(event.id)} />
     </>
   );
 }

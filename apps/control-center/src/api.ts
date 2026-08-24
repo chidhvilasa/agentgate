@@ -5,6 +5,8 @@
  * (injected at launch time) or from localStorage as a fallback for dev.
  */
 
+import type { ReplayEvaluationResponse, ReplayEvaluationSummary } from '@agentgate/protocol';
+
 const BASE_URL = import.meta.env.VITE_CONTROL_URL ?? 'http://127.0.0.1:4001';
 const TOKEN = import.meta.env.VITE_AGENTGATE_TOKEN ?? localStorage.getItem('agentgate_token') ?? '';
 
@@ -31,6 +33,30 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   return res.json();
 }
 
+/**
+ * Like `post()`, but surfaces the server's own safe, human-readable `error`
+ * message (e.g. "Event not found.", a sanitized policy-load failure) instead
+ * of a bare status code — used by Safe Replay so the UI can show *why* a
+ * replay could not be evaluated rather than only that it failed (ADR-0010).
+ * The server never includes raw arguments or secrets in these messages.
+ */
+async function postForResult<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: 'POST',
+    headers: headers(),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data: unknown = await res.json().catch(() => null);
+  if (!res.ok) {
+    const message =
+      data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
+        ? data.error
+        : `POST ${path} → ${res.status}`;
+    throw new Error(message);
+  }
+  return data as T;
+}
+
 export const api = {
   health: () => get<{ status: string; uptime_seconds: number; active_agents: number }>('/api/health'),
   events: (params?: Record<string, string>) => {
@@ -41,6 +67,15 @@ export const api = {
   approvals: () => get<unknown[]>('/api/approvals'),
   approve: (id: string, eventId: string) => post(`/api/approvals/${id}/approve`, { event_id: eventId }),
   deny: (id: string) => post(`/api/approvals/${id}/deny`),
+  /**
+   * Safe Replay (ADR-0010): re-evaluates a historical event's stored,
+   * already-redacted request against the *current* policy. Never executes
+   * the tool, never contacts a downstream server, never creates or resolves
+   * an approval. There is no execution-mode parameter — this function takes
+   * no arguments beyond the event id, by design.
+   */
+  replay: (eventId: string) => postForResult<ReplayEvaluationResponse>(`/api/events/${eventId}/replay`),
+  replays: (eventId: string) => get<ReplayEvaluationSummary[]>(`/api/events/${eventId}/replays`),
 };
 
 /** Opens an SSE connection to the event stream. */
