@@ -822,3 +822,80 @@ decisions across AI-agent sessions. Verify entries against the repository.
   docs/POLICY_REFERENCE.md (if relevant), docs/VERIFICATION.md, docs/DEVELOPMENT.md, docs/TROUBLESHOOTING.md,
   and CHANGELOG.md to document Safe Replay truthfully and remove stale "coming in Milestone 2"/"replay is
   unsupported" claims.
+
+### 2026-08-24 — Safe Replay Completion, Phase 4 (documentation)
+
+- Prompt objective: update every relevant doc to describe Safe Replay truthfully — what it is, what it is not,
+  its API/CLI/UI/demo usage, its limitations — and remove every stale "coming in Milestone 2"/unimplemented-
+  replay claim, per Phase 4 of the governing prompt.
+- Continuity check: re-read ADR-0010 and the Phase 1–3 session-log entries above before starting; confirmed
+  local HEAD was `1c27793` (Phase 3 demo + CI wiring + ledger entry) with a clean tree before making any change.
+- Decisions added or changed: none — no new or superseded ADR needed; this phase documents ADR-0010, it does not
+  extend or reinterpret it.
+- Implementation completed (documentation only, no functional code changed):
+  - `README.md`: new "Safe Replay" section (what it is/is not, example CLI JSON output, a screenshot reference
+    to `docs/assets/control-center-safe-replay.png` — not yet captured; that happens in Phase 5 — and a demo
+    pointer), a new Core features bullet, an updated CLI command table, an updated Control Center feature list,
+    and a corrected total test count (154 — the prior "86 tests" figure was already stale before this milestone,
+    since it never counted `apps/control-center`'s tests at all).
+  - `docs/THREAT_MODEL.md`: replaced the old "Unsafe replay" (deferred/unimplemented) section with a full "Safe
+    Replay (ADR-0010)" section covering exactly the six threats the governing prompt named: replay endpoint
+    abuse, execution-flag smuggling, forged/unauthorized event IDs, policy-replacement/time-of-check confusion,
+    redacted-input ambiguity, source/replay-chain mutation/deletion/reordering, and sensitive-data leakage via
+    the UI/API/CLI/logs/errors — each paired with its actual implemented mitigation and a pointer to the test
+    file that proves it, not a promise of a future one. Updated the "Mitigations implemented/deferred" summaries
+    and removed the stale "No replay endpoint implemented yet" line.
+  - `docs/ARCHITECTURE.md`: new Safe Replay service row in the Components table; a new node in the system
+    diagram with explicit dashed "no import path" edges to the downstream server and the approval manager
+    (visualizing the structural isolation, not just describing it in prose); a new "Safe Replay (ADR-0010)"
+    section with a sequence diagram (Control Center/CLI → Control API → `replay.ts` → Policy Engine → Audit
+    Storage) and the `replay_evaluations` table's ER diagram; two new Failure modes bullets (malformed policy at
+    replay time fails closed, unlike the live pipeline path; unsupported historical events are rejected, not
+    guessed at).
+  - `docs/POLICY_REFERENCE.md`: corrected the CLI section, which previously and now-inaccurately implied
+    `validate` was the only implemented policy-inspection command.
+  - `docs/VERIFICATION.md`: new "Milestone 4 Verification — Safe Replay and Policy-Drift Analysis" section, in
+    the same per-claim/evidence-table format as the existing Milestone 1 and Milestone 3 sections, naming an
+    exact test file/case or reproducible command for every claim.
+  - `docs/DEVELOPMENT.md`: renamed "Using the attack demos safely" to "Using the demos safely" (the new demo
+    proves policy-drift detection, not a blocked attack); a new "Using Safe Replay locally" walkthrough (finding
+    an event id via a verified-working `node -e` one-liner, editing policy without a gateway restart, what
+    `source_arguments_redacted` means for interpreting results, replay-lineage growth semantics — replaying the
+    same event repeatedly is expected, not an error); updated release-gate commands to include the third demo;
+    corrected the `pnpm run test` description (previously said only `packages/policy` and `packages/gateway`,
+    omitting `apps/control-center`, already stale before this milestone).
+  - `docs/TROUBLESHOOTING.md`: updated the `agentgate audit verify` entry to describe the two independent chains
+    it now checks (audit + replay lineage, either can fail independently of the other); two new entries
+    ("decision changed but I didn't touch the policy" — covering both the redacted-argument and current-vs-
+    historical-policy causes — and "No event found / unsupported historical event").
+  - `CHANGELOG.md`: new Milestone 4 `[Unreleased]` section (Added/Fixed/Changed/Known limitations), placed
+    ahead of the existing Milestone 3 entry, documenting everything shipped across Phases 1–3. The Milestone 3
+    entry's own historical "a working replay endpoint... remain deferred" limitations line was deliberately left
+    unedited — changelog entries are dated, point-in-time statements, not living documents, matching how ADR
+    history is preserved rather than silently rewritten.
+- Files materially changed: `README.md`, `docs/ARCHITECTURE.md`, `docs/THREAT_MODEL.md`,
+  `docs/POLICY_REFERENCE.md`, `docs/VERIFICATION.md`, `docs/DEVELOPMENT.md`, `docs/TROUBLESHOOTING.md`,
+  `CHANGELOG.md`. No source/test files changed in this phase.
+- Commands actually executed and their actual results: verified the `node -e` one-liner documented in
+  `docs/DEVELOPMENT.md`'s new Safe Replay section actually runs against the real compiled `dist/storage.js`
+  before committing it to docs (`node -e "const {AuditStorage}=require('./packages/gateway/dist/storage.js'); ..."`
+  → correctly printed `[]` against a fresh in-memory database). `pnpm run build` (clean), `pnpm run lint` (0
+  errors, same 2 pre-existing unrelated warnings), `pnpm run test` (154 tests, unchanged — doc-only phase, zero
+  regressions), all three demos re-run back-to-back (all exit 0), `git diff --check` (clean). The exact CI
+  tracked-file secret-scan pattern from `security.yml` run manually against the staged diff:
+  `No credential-shaped strings found outside known placeholders.` Committed as `ea5bb68 docs: document Safe
+  Replay across README, architecture, threat model, and dev docs`.
+- Verification result: PASS for every Phase 4 item — every required doc updated with truthful content, every
+  named stale claim removed (confirmed by a targeted grep sweep across README/docs/CHANGELOG for "coming in
+  Milestone 2"/"replay is unsupported"/"Dry-run Replay" turning up only historical ledger references and the
+  CHANGELOG's own description of what was *removed*, never a live stale claim).
+- Known limitations / follow-up risk: the README's Safe Replay section and the Control Center feature list both
+  reference `docs/assets/control-center-safe-replay.png`, which does not exist on disk yet — it is captured in
+  Phase 5 (browser verification). Until that commit, the image reference in the rendered README is a broken
+  link; this is a known, temporary, single-phase gap, not an oversight, and is called out explicitly here so it
+  is not mistaken for a completed step. Graphify re-indexing (Phase 6) and full/clean-clone verification gates
+  (Phase 7) have not started.
+- Unresolved questions: none blocking.
+- Exact next action: Phase 5 — real browser verification against a running gateway + Control Center (historical
+  event + a changed current policy), capturing `docs/assets/control-center-safe-replay.png` to resolve the
+  broken image reference introduced in this phase.
