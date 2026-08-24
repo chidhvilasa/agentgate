@@ -18,7 +18,8 @@ where the two disagree, the code is correct and this file is stale; please file 
 | **Control API** | Loopback-only Fastify REST + SSE API behind a per-launch random token. | `packages/gateway/src/api/control.ts` |
 | **Control Center** | React/Vite SPA consuming the Control API. | `apps/control-center/src/**` |
 | **Protocol package** | Shared TypeScript types for events, decisions, and the Control API contract, including the Safe Replay request/response contract — the only cross-package dependency all three consumers share. | `packages/protocol/src/{events,api}.ts` |
-| **CLI** | `agentgate start`/`validate`/`audit verify`/`replay`. | `packages/gateway/src/cli.ts` |
+| **CLI** | `agentgate start`/`validate`/`audit verify`/`replay`/`init`/`config validate`/`doctor`/`integrate`/`smoke-test`. | `packages/gateway/src/cli.ts` |
+| **Onboarding CLI modules** (Milestone 5) | Pure, testable logic behind the five onboarding commands — project scaffolding, config/policy validation (reusing the production loaders), read-only diagnostics, client-integration snippet generation, and a self-contained smoke test. | `packages/gateway/src/onboarding/{init,configValidate,doctor,integrate,smokeTest}.ts` |
 
 ## System diagram
 
@@ -416,6 +417,34 @@ in browser history/logs, since it must be a query parameter).
 - **Historical event with no recorded decision or a legacy/malformed shape** (ADR-0010): rejected with
   `ReplayUnsupportedEventError` (`409` / non-zero exit) rather than guessed at — see
   [Safe Replay](#safe-replay-adr-0010) above.
+
+## Onboarding CLI (Milestone 5)
+
+Five commands — `init`, `config validate`, `doctor`, `integrate`, `smoke-test` — add adoption convenience without
+adding any new execution or trust surface. `agentgate start` remains the only command that ever executes anything.
+
+- **`config validate` and `doctor` never duplicate validation logic.** Both call `loadGatewayConfig()`/
+  `loadPolicyFile()` directly (`packages/gateway/src/onboarding/configValidate.ts`) — the same functions
+  `agentgate start` itself calls.
+- **`doctor` is read-only by construction for its hardest case, the audit chain.** `AuditStorage`'s constructor
+  applies any pending schema migration unconditionally on open — a write. `doctor` therefore first calls
+  `readSchemaVersionReadOnly()` (`packages/gateway/src/storage.ts`), which opens the database file with
+  `better-sqlite3`'s `readonly: true` OS-level flag purely to read `schema_version`. Only when that confirms the
+  schema is already fully current (so the migration loop inside `AuditStorage`'s constructor is guaranteed to be
+  a no-op) does `doctor` construct a live `AuditStorage`, to reuse the real `verifyChain()`/`verifyReplayChain()`
+  rather than a second hand-rolled verifier. A behind-schema database is reported as `WARN`, never silently
+  migrated by `doctor` itself.
+- **`smoke-test` uses its own fixture, not the test suite's.** `packages/gateway/src/onboarding/
+  smokeFixtureServer.mjs` is deliberately plain JavaScript (not compiled TypeScript) so it works identically
+  whether AgentGate is running from `src/` (Vitest, no build required) or from `dist/` (an installed package —
+  `tests/` is never shipped). `packages/gateway/scripts/copy-assets.mjs`, wired into `pnpm run build` as `tsc &&
+  node scripts/copy-assets.mjs`, is the one place non-TypeScript runtime assets are copied into `dist/`, since
+  `tsc` itself does not touch non-`.ts` files under `src/`.
+- **`integrate`'s default behavior only ever prints a snippet or writes a new, explicitly-named file.** Direct
+  mutation of a real client config file requires an explicit `--apply <path>` opt-in
+  (`packages/gateway/src/onboarding/integrate.ts`, `applyIntegration()`), which always backs up the original,
+  writes atomically (temp file + rename), and merges into (rather than replaces) the existing JSON, preserving
+  every unrelated top-level key and every unrelated `mcpServers` entry.
 
 ## Extension points
 

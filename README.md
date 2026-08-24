@@ -40,17 +40,27 @@ Run it yourself: `node examples/secret-exfiltration/demo.mjs` (see [Demo and ver
 ## Project status
 
 **Early development / research-quality MVP.** AgentGate implements a real policy engine, a real MCP stdio proxy, a
-real tamper-evident audit store, a real Control Center UI, and a real Safe Replay policy-drift analyzer — all
-covered by executable tests and three end-to-end demos, two attack demos (inbound and outbound) and one
-policy-drift demo (see [`docs/VERIFICATION.md`](docs/VERIFICATION.md)). It is **not** production-hardened: there
-is no authentication beyond a per-launch local token, no multi-user support, and MCP protocol support is
-currently **legacy 2025-era stdio only** (see [Supported integrations](#supported-integrations)). Read
-[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before relying on it for anything sensitive.
+real tamper-evident audit store, a real Control Center UI, a real Safe Replay policy-drift analyzer, and a real
+onboarding CLI (`init`/`config validate`/`doctor`/`integrate`/`smoke-test`) — all covered by executable tests
+(206 as of this milestone) and end-to-end demos/scripts (see [`docs/VERIFICATION.md`](docs/VERIFICATION.md)). It
+is **not** production-hardened: there is no authentication beyond a per-launch local token, no multi-user
+support, and MCP protocol support is currently **legacy 2025-era stdio only** (see
+[Supported integrations](#supported-integrations)). Read [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before
+relying on it for anything sensitive.
+
+**Platform/runtime support matrix** — backed by CI, not just claimed:
+
+| Platform | Node | Coverage |
+|---|---|---|
+| Ubuntu (Linux) | 20, 22 | Full CI: build, lint, full test suite, all demos, packed-install verification |
+| Windows | 22 | Full CI, same steps — native `better-sqlite3` smoke test; 2 POSIX-only lifecycle tests skip here (see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)) |
+| macOS | — | **Not covered by CI in this milestone** — untested by this project; likely to work (no macOS-specific code paths exist) but unverified, stated plainly rather than implied |
 
 ## Five-minute quickstart
 
-Requires Node.js 20+ and [pnpm](https://pnpm.io) (see `.nvmrc` / `packageManager` in `package.json`). Everything
-below is repository-local — no published npm package is required.
+Requires Node.js 20+ and [pnpm](https://pnpm.io) (see `.nvmrc` / `packageManager` in `package.json`). Every
+command below was actually run in a clean environment as part of verifying this milestone — see
+[`docs/VERIFICATION.md`](docs/VERIFICATION.md) for the exact evidence.
 
 ```sh
 git clone https://github.com/chidhvilasa/agentgate.git
@@ -58,17 +68,38 @@ cd agentgate
 pnpm install --frozen-lockfile
 pnpm run build
 
-# Validate the example policy
-node packages/gateway/dist/cli.js validate policies/agentgate.example.yml
+# Prove AgentGate itself works, right now, with no setup — fully local and offline
+node packages/gateway/dist/cli.js smoke-test
 
-# Start the gateway (proxies to the official MCP filesystem server over stdio)
-node packages/gateway/dist/cli.js start examples/agentgate.yml
+# Generate a safe, deny-by-default starter project (never overwrites without --force)
+node packages/gateway/dist/cli.js init my-agentgate-project
+
+# Check the generated config before starting anything
+node packages/gateway/dist/cli.js config validate my-agentgate-project/agentgate.yml
+node packages/gateway/dist/cli.js doctor my-agentgate-project/agentgate.yml
+
+# Edit my-agentgate-project/agentgate.yml's downstream server entry, then:
+node packages/gateway/dist/cli.js start my-agentgate-project/agentgate.yml
 ```
 
+![agentgate init generating a deny-by-default project](docs/assets/cli-init.png)
+![agentgate doctor reporting a clean, ready-to-start project](docs/assets/cli-doctor.png)
+![agentgate smoke-test proving allow, deny, and secret redaction all work, fully offline](docs/assets/cli-smoke-test.png)
+
 The gateway prints a local Control Center URL and a one-time auth token to stderr on startup. Open the URL, paste
-the token in when prompted, and point your MCP client (e.g. Claude Code) at the gateway's stdio command instead of
-the downstream server directly. See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for the full walkthrough, including
-running the Control Center in dev mode.
+the token in when prompted. To connect a supported MCP client instead of using the Control Center alone, generate a
+config snippet: `node packages/gateway/dist/cli.js integrate claude-code my-agentgate-project/agentgate.yml` (see
+[Client integrations](#client-integrations) below). See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for the full
+walkthrough, including running the Control Center in dev mode and installing from packed tarballs instead of
+building from source.
+
+**Uninstalling / removing generated files:** `my-agentgate-project/` (or wherever you ran `init`) contains only
+`agentgate.yml`, `agentgate.policy.yml`, and — once you've started the gateway at least once —
+`agentgate.sqlite`/`agentgate.sqlite-wal`/`agentgate.sqlite-shm`; delete the directory to remove everything. If you
+generated a client integration snippet with `--apply`, remove the `"agentgate"` entry it added to your client's MCP
+config (each `integrate` run prints the exact removal instructions for that client), and delete any
+`.backup-<timestamp>` file it created if you no longer want it. Nothing AgentGate installs lives outside the
+directory you pointed it at.
 
 ## How AgentGate fits
 
@@ -141,17 +172,77 @@ Full field reference, matching semantics, and worked examples: [`docs/POLICY_REF
 ## CLI
 
 ```sh
+# Getting started
+agentgate init [directory] [--force]        # Generate a deny-by-default config + policy
+agentgate config validate [config.yml]      # Validate a config and its policy before starting
+agentgate doctor [config.yml]               # Read-only diagnostics — never executes, never mutates
+agentgate integrate <client> [config.yml]   # Generate an MCP client integration snippet
+agentgate smoke-test                        # Harmless, offline, built-in proof AgentGate works
+
+# Running
 agentgate start [config.yml]          # Start the gateway (default: ./agentgate.yml)
-agentgate validate [policy.yml]       # Validate a policy file (default: ./agentgate.policy.yml)
+agentgate validate [policy.yml]       # Validate a policy file only (see also: config validate)
 agentgate audit verify [config]       # Independently re-verify the tamper-evident audit chain and replay lineage
 agentgate replay <event-id> [config]  # Safe Replay: re-evaluate a historical event against the current policy.
                                        # Policy re-evaluation only — never executes the tool. Add --json for
                                        # machine-readable output.
+
+agentgate --version                   # Print the installed version
+agentgate <command> --help            # Print detailed usage for any command
 ```
 
 `agentgate` is `packages/gateway/dist/cli.js` after `pnpm run build` (not yet published to npm — see
-[Project status](#project-status)). Run it as `node packages/gateway/dist/cli.js <command>` from the repo root, or
-via the workspace bin from inside `packages/gateway`.
+[Project status](#project-status) and [Installation](#installation) below). Run it as
+`node packages/gateway/dist/cli.js <command>` from the repo root, via the workspace bin from inside
+`packages/gateway`, or as `agentgate` directly once installed from packed tarballs (see below).
+
+## Installation
+
+Two installation methods are actually verified — proven with a real, automated, CI-enforced check
+(`scripts/verify-packed-install.mjs`), not assumed:
+
+1. **From source** (recommended; always works): `git clone` + `pnpm install --frozen-lockfile` +
+   `pnpm run build`, as in the quickstart above. `agentgate` is then `packages/gateway/dist/cli.js`.
+2. **From packed tarballs**, without cloning the whole repo into your project:
+   ```sh
+   git clone https://github.com/chidhvilasa/agentgate.git && cd agentgate
+   pnpm install --frozen-lockfile && pnpm run build
+   for pkg in protocol policy gateway; do (cd packages/$pkg && pnpm pack --pack-destination /tmp/agentgate-pkgs); done
+   mkdir my-consumer && cd my-consumer && npm init -y
+   npm install /tmp/agentgate-pkgs/agentgate-protocol-*.tgz /tmp/agentgate-pkgs/agentgate-policy-*.tgz /tmp/agentgate-pkgs/agentgate-gateway-*.tgz
+   ./node_modules/.bin/agentgate smoke-test
+   ```
+   **All three tarballs must be installed together in one `npm install` command.** Installing the gateway
+   tarball alone fails with a real `404` — `pnpm pack` rewrites its `workspace:*` dependencies on
+   `@agentgate/policy`/`@agentgate/protocol` to a bare version number that has never been published to any
+   registry; installing all three together lets npm resolve the sibling packages from the other tarballs given
+   in the same command. This is **not** the same as `npm install agentgate` from the public npm registry, which
+   this project does not publish to or claim.
+
+Not yet supported: a published npm package, a Homebrew/system package, or a standalone binary. See
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md#installability) for the full audit.
+
+## Client integrations
+
+| Client | Config format verified against | Status |
+|---|---|---|
+| [Claude Code](https://code.claude.com/docs/en/mcp) | `.mcp.json` project file / `claude mcp add-json`, `mcpServers.<name> = {command, args, env}` | **Supported** — `agentgate integrate claude-code` |
+| [Google Antigravity](https://antigravity.google/docs/ide/mcp/) | `.agents/mcp_config.json` (workspace) or `~/.gemini/config/mcp_config.json` (global), `mcpServers.<name> = {command, args, env, cwd, disabled}` | **Supported** — `agentgate integrate antigravity` |
+| Any other MCP client with local stdio server support | Not verified against a specific product | **Generic recipe only** — `agentgate integrate generic`, explicitly labeled unverified in its own output |
+
+```sh
+agentgate integrate claude-code my-agentgate-project/agentgate.yml
+```
+
+![agentgate integrate printing a Claude Code MCP config snippet with source citation](docs/assets/cli-integrate.png)
+
+prints a ready-to-use JSON snippet, where to put it, and how to remove it — see the [Getting Started](#five-minute-quickstart)
+walkthrough above for a screenshot. By default `integrate` only ever **prints** the snippet or writes it to a
+**new**, explicitly-named file (`--out`); it never touches a real client config file unless you pass the explicit
+`--apply <path>` opt-in, which always creates a timestamped backup first, writes atomically, and preserves every
+unrelated entry already in that file (`--dry-run` previews the result with zero writes). No integration ever
+embeds an auth token — the Control API token is generated fresh per launch and only ever printed to the gateway's
+own stderr.
 
 ## Control Center
 
@@ -288,7 +379,9 @@ Component responsibilities, system and sequence diagrams, the audit data model, 
 node examples/secret-exfiltration/demo.mjs       # inbound attack demo: secret in tool-call arguments (self-cleaning)
 node examples/downstream-secret-result/demo.mjs  # outbound demo: secret in a downstream result AND error (self-cleaning)
 node examples/policy-drift-replay/demo.mjs       # Safe Replay demo: policy drift, no execution (self-cleaning)
-pnpm run test                                    # unit/integration tests (policy + gateway + control-center) — 154 tests
+node scripts/verify-packed-install.mjs           # packed-tarball install verification (self-cleaning)
+node packages/gateway/dist/cli.js smoke-test     # built-in harmless proof AgentGate works (self-cleaning)
+pnpm run test                                    # unit/integration tests (policy + gateway + control-center) — 206 tests
 pnpm run lint                                    # type-aware lint gate across the whole workspace
 ```
 

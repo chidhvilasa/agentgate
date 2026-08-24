@@ -234,6 +234,12 @@ $ node packages/gateway/dist/cli.js validate policies/agentgate.example.yml
 See [`policies/agentgate.example.yml`](../policies/agentgate.example.yml) in full — it is the policy exercised by
 `node examples/secret-exfiltration/demo.mjs` and by every gateway integration test.
 
+**The smallest possible starting point:** `agentgate init` (see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md#onboarding-cli))
+generates a policy with exactly one rule — an `allow` for a single harmless tool name — under a `deny` default.
+It is deliberately narrower than the example above: a starting point meant to be edited and widened
+deliberately, not a template for a real deployment. See `packages/gateway/src/onboarding/init.ts`'s
+`buildPolicyTemplate()` for its exact, current contents.
+
 **Require approval only for destructive shell commands, allow everything else read-only:**
 
 ```yaml

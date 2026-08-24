@@ -21,6 +21,8 @@ pnpm run test
 node examples/secret-exfiltration/demo.mjs
 node examples/downstream-secret-result/demo.mjs
 node examples/policy-drift-replay/demo.mjs
+node scripts/verify-packed-install.mjs
+node packages/gateway/dist/cli.js smoke-test
 git diff --check
 ```
 

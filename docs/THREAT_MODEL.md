@@ -332,6 +332,51 @@ without bound, or exhausts the approval queue.
 approval creation. A determined local process could grow the SQLite file without bound or flood the approval
 queue.
 
+## Onboarding CLI (Milestone 5)
+
+**Threat: `agentgate init` overwrites a file the user didn't intend to lose.** **Mitigation implemented:** `init`
+refuses to overwrite an existing `agentgate.yml`/`agentgate.policy.yml` unless the caller passes an explicit
+`--force` flag; every write is atomic (temp file + rename), so a failure mid-write cannot leave a corrupted
+half-written file in either case.
+
+**Threat: `agentgate doctor` (a "just diagnose my setup" command) silently executes or mutates something.**
+**Mitigation implemented:** `doctor` never imports `node:child_process` at all (a structural guardrail test
+mirrors the one used for Safe Replay's no-execution invariant — see `packages/gateway/tests/
+onboarding-doctor.test.ts`); its downstream-command check only performs a `PATH`/file-existence lookup, never a
+spawn. Its audit-chain check never opens an existing database via `AuditStorage` unless a prior, strictly
+read-only (`better-sqlite3`'s OS-level `readonly: true`) check has already confirmed the schema is fully
+migrated — otherwise `AuditStorage`'s constructor would apply a pending migration as a side effect of what is
+supposed to be a read-only diagnostic. A behind-schema database is reported as `WARN` with a remediation, never
+silently migrated.
+
+**Threat: `agentgate integrate --apply` corrupts or silently overwrites a real MCP client configuration file.**
+**Mitigation implemented:** the default `integrate` behavior never touches an existing file — it only prints a
+snippet or writes a brand-new, explicitly-named one (`--out`, which itself refuses to overwrite an existing
+file). The optional `--apply <path>` opt-in always creates a timestamped backup of the target file before
+writing, writes atomically, and merges the new entry into the existing JSON structure — preserving every
+unrelated top-level key and every unrelated `mcpServers` entry already present — rather than replacing the file
+wholesale. `--dry-run` computes and shows the exact result with zero writes. A target file that isn't valid JSON,
+or whose top level isn't a JSON object, is refused outright rather than risked.
+
+**Threat: a fabricated or unverifiable MCP client integration format leads a user to write a config their client
+doesn't actually understand.** **Mitigation implemented:** the two "verified" clients (`claude-code`,
+`antigravity`) were checked against each product's own current, fetched documentation this milestone
+(`https://code.claude.com/docs/en/mcp`, `https://antigravity.google/docs/ide/mcp/`) before being implemented —
+not assumed from general MCP convention. A third option, `generic`, is permanently and explicitly labeled
+unverified in its own printed output, never silently presented as equivalent to a checked client.
+
+**Threat: sensitive data leaks through onboarding output** (a generated config, a doctor report, an integration
+snippet, a smoke-test log). **Mitigation implemented:** none of these commands has an auth token to leak in the
+first place — the Control API token is generated fresh per launch and only ever printed to the gateway's own
+stderr by `agentgate start`, never referenced by any onboarding command. Generated configs and policies contain
+no credentials. `doctor`'s error messages are routed through the same `sanitizeErrorMessage()` used everywhere
+else in the project (ADR-0009).
+
+**Deferred / limitations:** `init` has no interactive mode in this milestone (non-interactive/deterministic
+only — see [ADR-0011](AI_DECISIONS.md)); the verified client-integration matrix is intentionally small.
+`doctor`'s port-availability check is inherently a point-in-time probe — another process could bind the same
+port between the check and a later `agentgate start`, same as any such check in any tool.
+
 ## Mitigations implemented (summary)
 
 - Default-deny policy evaluation; first-match, deterministic rule order.
@@ -353,6 +398,12 @@ queue.
   executable fixture-counter test); rejects any execution-like or unknown request field rather than ignoring
   it; always surfaces the redacted-argument and current-policy-not-historical-snapshot limitations explicitly;
   its own evaluations are append-only and hash-chained, independently verified alongside the audit chain.
+- **Onboarding CLI** (ADR-0011, this milestone): `init` never overwrites without `--force` and writes
+  atomically; `doctor` is structurally incapable of executing a downstream server and never mutates a database
+  it hasn't first confirmed (via a strictly read-only check) is safe to open; `integrate`'s default behavior
+  never touches a real file, and its explicit `--apply` opt-in always backs up, writes atomically, and
+  preserves unrelated content; only documentation-verified client integration formats are presented as
+  supported, with an unverified option explicitly labeled as such.
 
 ## Mitigations deferred (summary)
 

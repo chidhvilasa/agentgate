@@ -208,6 +208,60 @@ node packages/gateway/dist/cli.js replay <event-id> examples/agentgate.yml --jso
   the same test file undetected. Never weaken `SECRET_PATTERNS` itself, disable a passing secret-detection test,
   or add a blanket suppression to make a new test pass.
 
+## Installability
+
+Verified this milestone with real, automated checks — see `scripts/verify-packed-install.mjs`:
+
+- All three publishable packages (`@agentgate/protocol`, `@agentgate/policy`, `@agentgate/gateway`) are
+  `"private": true`, so `npm publish` is blocked outright — no accidental publication is possible, and none has
+  happened. There is no published npm package; do not write documentation implying `npm install agentgate` or
+  `npx agentgate` work — they do not.
+- Each package now has a `"files": ["dist"]` field, so `pnpm pack` produces a tarball containing only compiled
+  output (no `src/`, `tests/`, or `tsconfig*.json`).
+- Installing the **gateway tarball alone** into an external project fails with a real `npm error 404` for
+  `@agentgate/policy`/`@agentgate/protocol` — `pnpm pack` rewrites their `workspace:*` dependency protocol to a
+  bare semver that has never been published anywhere. This is a genuine, verified limitation, not a
+  hypothetical one.
+- Installing **all three tarballs together** in one `npm install a.tgz b.tgz c.tgz` command works — npm
+  resolves each workspace sibling from the other tarball given in the same command. `scripts/
+  verify-packed-install.mjs` proves this end-to-end (pack, install into a fresh temp consumer, run the
+  installed CLI's help/`--version`/`smoke-test`) and runs in both CI jobs.
+- The Control Center is **not** bundled into the gateway package at all — it is a separate Vite app
+  (`apps/control-center`) with its own `pnpm run build`/`pnpm run dev:control`. An installed
+  `@agentgate/gateway` package gives you the CLI and backend only; `agentgate doctor`'s `control_center` check
+  reports this explicitly (`SKIP` outside a source checkout, `PASS`/`WARN` based on build status inside one).
+
+## Onboarding CLI
+
+`agentgate init`, `config validate`, `doctor`, `integrate`, and `smoke-test` are documented in detail in the
+[README](../README.md#five-minute-quickstart) and [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md). A few
+implementation notes for contributors:
+
+- `config validate` and `doctor` both call the exact same `loadGatewayConfig()`/`loadPolicyFile()` production
+  loaders `agentgate start` uses (`packages/gateway/src/onboarding/configValidate.ts`) — never add a second,
+  parallel validation implementation for either command; extend the shared loaders instead if a new check is
+  needed.
+- `doctor`'s audit-chain check never opens an existing database via `AuditStorage` unless
+  `readSchemaVersionReadOnly()` (`packages/gateway/src/storage.ts`, opened with `better-sqlite3`'s
+  `readonly: true`) has already confirmed the schema is fully migrated — `AuditStorage`'s constructor applies
+  any pending migration unconditionally on open, which would otherwise make a supposedly read-only diagnostic
+  command silently write to the user's database.
+- `smoke-test`'s fixture downstream server (`packages/gateway/src/onboarding/smokeFixtureServer.mjs`) is
+  deliberately plain JavaScript, not compiled TypeScript, and copied into `dist/onboarding/` by a small postbuild
+  step (`packages/gateway/scripts/copy-assets.mjs`, wired into `pnpm run build` as `tsc && node
+  scripts/copy-assets.mjs`) — this is what lets `agentgate smoke-test` work identically whether AgentGate is
+  running from `src/` (tests, via Vitest) or from an installed package (only `dist/` ships). If you add another
+  non-TypeScript runtime asset under `src/`, add it to `ASSETS` in that script too, or it will silently be
+  missing from both the compiled output and any packed tarball.
+- `integrate`'s default behavior only ever prints or writes a **new** file; its `--apply` opt-in
+  (`packages/gateway/src/onboarding/integrate.ts`, `applyIntegration()`) always backs up the target file first,
+  writes atomically, and merges rather than replaces — test any change to it against a temp fixture file, never
+  against a real client config.
+- **Rebuilding after removing/renaming a file under `src/`**: `tsc` does not delete stale output for a source
+  file that no longer exists — if you rename or remove a `.ts`/asset file, delete the corresponding stale file
+  under `dist/` yourself before your next `pnpm run build`, or it will linger (harmless for correctness, since
+  nothing references it, but confusing to find later).
+
 ## Release gates
 
 Before any change is considered done:
@@ -220,6 +274,8 @@ pnpm run test
 node examples/secret-exfiltration/demo.mjs
 node examples/downstream-secret-result/demo.mjs
 node examples/policy-drift-replay/demo.mjs
+node scripts/verify-packed-install.mjs
+node packages/gateway/dist/cli.js smoke-test
 git diff --check
 ```
 

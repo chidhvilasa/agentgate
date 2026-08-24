@@ -4,6 +4,64 @@ All notable changes to this project are documented in this file. Format loosely 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). AgentGate has not yet published a versioned release or
 npm package — see [Project status](README.md#project-status).
 
+## [Unreleased] — Milestone 5: Zero-friction adoption, diagnostics, and release readiness
+
+### Added
+- **`agentgate init [directory] [--force]`**: deterministic, non-interactive generation of a deny-by-default
+  gateway config and starter policy. Never overwrites without `--force`; writes atomically; embeds no token or
+  secret; the starter policy permits exactly one narrow tool, never a wildcard.
+- **`agentgate config validate [config.yml] [--json]`**: validates a gateway config and its referenced policy
+  using the exact same production loaders `agentgate start` uses.
+- **`agentgate doctor [config.yml] [--client-config <path>] [--json]`**: read-only diagnostics (Node/platform
+  version, config/policy validity, database writability and — only when already fully migrated — audit/replay
+  chain verification, downstream command resolution without execution, port availability, Control Center build
+  status, stale-artifact detection, optional client-integration-fixture validation). Never executes a
+  downstream server, never opens a network connection, never modifies configuration or the database.
+- **`agentgate integrate <client> [config.yml] [--out|--apply] [--dry-run]`**: generates an MCP client
+  integration snippet. `claude-code` and `antigravity` are supported, each verified against fetched, current
+  official documentation this milestone; `generic` is an explicitly unverified fallback recipe for other
+  clients. Default behavior only prints or writes a new file; `--apply` is an explicit opt-in that always backs
+  up, writes atomically, and preserves unrelated content, with `--dry-run` for a zero-write preview.
+- **`agentgate smoke-test [--json]`**: local, offline, harmless proof the policy engine and audit trail work —
+  one real allow, one real deny, one redaction case, chain verification, and an on-disk secret-absence check —
+  using a new built-in fixture server that ships with the compiled package. Fully self-cleaning.
+- **`agentgate --version`** and per-command `--help` for every command, new and existing.
+- **Graceful shutdown**: the gateway now handles SIGINT/SIGTERM, closing the Control API, approval manager, and
+  database cleanly before exiting — previously there was no signal handling at all.
+- **Packaging**: `"files": ["dist"]` added to all three publishable packages (previously shipped `src`/`tests`
+  in every tarball); new `scripts/verify-packed-install.mjs` proves — with a real `pnpm pack` and `npm install`
+  into an isolated consumer — that installing all three tarballs together works end-to-end, including running
+  the installed `agentgate smoke-test`. Wired into CI.
+- New ADR-0011 (Zero-Friction Onboarding Without New Trust or Execution Surfaces).
+- 56 new tests (50 across five `onboarding-*.test.ts` files, 4 in a new `lifecycle.test.ts`, 2 of which are
+  correctly platform-skipped on Windows) — 206 total across the workspace.
+
+### Fixed
+- **Control Center `.main-content` card clipping**: a flex-column container with `overflow-y:auto` let its
+  `.card` children shrink below their real content height instead of the container scrolling, and each card's
+  own `overflow:hidden` then clipped the shrunk content — visible on any page with enough cards to exceed the
+  viewport (e.g. Event Detail with the Safe Replay card). Documented as a known limitation since Milestone 4's
+  Phase 5 session log; fixed this milestone with `flex-shrink: 0` on `.card`/`.page-header`, and verified in a
+  real browser at both a desktop and a narrow viewport.
+- Publishable-package tarball bloat (see Packaging above).
+
+### Changed
+- README rewritten from the quickstart down: leads with the new onboarding commands, a verified installation
+  section (source + packed tarballs), a client-integrations table with cited authoritative sources, and a
+  platform/runtime support matrix backed by CI (Ubuntu 20/22, Windows 22; macOS explicitly stated as untested,
+  not implied covered).
+- `docs/ARCHITECTURE.md`, `docs/THREAT_MODEL.md`, `docs/DEVELOPMENT.md`, `docs/TROUBLESHOOTING.md`,
+  `docs/VERIFICATION.md` updated with the onboarding CLI's design, threats/mitigations, contributor notes, a
+  doctor check-id reference table, and a full evidence table respectively.
+
+### Known limitations (unchanged claims, restated for this milestone)
+- No published npm package — packed-tarball install requires running `pnpm pack` from a source checkout
+  yourself; installing the gateway tarball in isolation (without its two workspace siblings) does not work.
+- `agentgate init` has no interactive mode in this milestone (deterministic/non-interactive only).
+- The verified client-integration matrix is intentionally small (two verified clients, one labeled-generic
+  fallback).
+- macOS is not covered by CI in this milestone.
+
 ## [Unreleased] — Milestone 4: Safe Replay and policy-drift analysis
 
 ### Added

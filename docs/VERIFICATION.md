@@ -101,3 +101,32 @@ root against this milestone's final candidate commit.
 plus all three end-to-end demos, all passing as of this milestone's final candidate commit. See the dated Safe
 Replay session-log entries in `docs/AI_DECISIONS.md` for the exact commands run and their output, phase by
 phase.
+
+---
+
+# Milestone 5 Verification — Zero-Friction Adoption, Diagnostics, and Release Readiness (ADR-0011)
+
+Each row names an exact test file/case or reproducible command. All commands below were run from the repository
+root against this milestone's final candidate commit.
+
+| Claim | Evidence |
+|---|---|
+| Packed-tarball install actually works end-to-end (pack → install all three together → run the installed CLI) | `node scripts/verify-packed-install.mjs` — 9 assertions, all PASS; wired into both CI jobs |
+| Installing the gateway tarball alone genuinely fails (a real limitation, not hypothetical) | Reproduced manually with `npm install <gateway-tarball-only>` → real `npm error 404` for `@agentgate/policy`; documented in `docs/DEVELOPMENT.md#installability`, not silently omitted |
+| Publishable tarballs contain only `dist/` (no `src`/`tests`/`tsconfig`) | `scripts/verify-packed-install.mjs`'s tarball-content assertions; tarball size comparison recorded in the dated ledger entry |
+| `agentgate init` never overwrites without `--force`, writes atomically, and generates a deny-by-default, non-wildcard-allow policy | `packages/gateway/tests/onboarding-init.test.ts` (11 cases: clean init, overwrite refusal, `--force` overwrite, nested-dir creation, spaces/Unicode paths, determinism, real-loader parse success, deny-by-default with exactly one narrow rule, no token/secret literal, loopback-only) |
+| `agentgate config validate` reuses the exact production loaders, never a second validator | `packages/gateway/tests/onboarding-config-validate.test.ts` (8 cases covering every failure category: missing_file, syntax_error, schema_error, policy_error, unsafe_value, plus a valid pass and a never-throws guarantee) |
+| `agentgate doctor` is read-only and never executes a downstream server | `packages/gateway/tests/onboarding-doctor.test.ts` (10 cases, including a structural no-`child_process`-import guardrail mirroring Safe Replay's own no-execution test, an mtime-unchanged assertion after a real audit-chain check, and a genuine tampering-detection case) |
+| `agentgate integrate` supports exactly `claude-code`/`antigravity` (both verified against fetched, current docs) plus a `generic` fallback explicitly labeled unverified | `packages/gateway/tests/onboarding-integrate.test.ts` (17 cases) |
+| `integrate --apply` backs up, writes atomically, and preserves unrelated content; `--dry-run` writes nothing | `packages/gateway/tests/onboarding-integrate.test.ts`'s `applyIntegration` suite (9 cases: new-file creation, unrelated-key/entry preservation, timestamped backup, dry-run no-op, overwrite reporting, malformed-JSON refusal, non-object refusal, atomic no-leftover-temp-file) |
+| `agentgate smoke-test` proves allow/deny/redaction/chain-verification, fully offline, and cleans up on success | `packages/gateway/tests/onboarding-smoke-test.test.ts` (4 cases) and a real run from an **installed, packed** package via `scripts/verify-packed-install.mjs` |
+| The gateway shuts down cleanly on SIGINT/SIGTERM (POSIX) and a structural guardrail confirms the handler exists regardless of platform | `packages/gateway/tests/lifecycle.test.ts` (4 cases; 2 POSIX-only, correctly skipped on Windows — see the dated ledger entry for the verified Node/Windows platform limitation that necessitated this) |
+| A second gateway on an occupied port fails clearly without affecting the first | `packages/gateway/tests/lifecycle.test.ts` |
+| The Control Center `.main-content` card-clipping bug (documented as a known limitation since Milestone 4) is fixed | Real browser verification: a live Event Detail/Safe Replay page at both a desktop (1280×900) and a narrow (420×800) viewport, asserting `card.scrollHeight <= card.clientHeight + 2px` (i.e. nothing hidden by overflow) at both sizes, zero console errors at both sizes; screenshots `docs/assets/control-center-{desktop,narrow}-no-clip.png` |
+| No secret/token/path leakage across onboarding stdout/stderr/JSON/generated files | Per-command assertions across all five `onboarding-*.test.ts` files (each checks for `AKIA...`, `x-agentgate-token`, and similar patterns in its own command's output) |
+
+**Status:** PASS — 206 tests total across the workspace (52 policy + 16 control-center + 138 gateway, of which 2
+gateway tests are correctly platform-skipped on Windows), all three pre-existing demos, `scripts/
+verify-packed-install.mjs`, and a real browser verification of the clipping fix, all passing as of this
+milestone's final candidate commit. See the dated Milestone 5 session-log entries in `docs/AI_DECISIONS.md` for
+the exact commands run and their output, phase by phase.

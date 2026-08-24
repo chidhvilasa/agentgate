@@ -101,7 +101,29 @@ Run `node packages/gateway/dist/cli.js validate <your-policy.yml>` and read the 
 comes directly from Zod's schema validation (`packages/policy/src/schema.ts`) and names the exact field and
 constraint that failed. Common causes: `version` is not `1`, a `decision` value is misspelled (must be exactly
 `allow`, `deny`, `require_approval`, or `allow_with_transform`), or `approval_ttl_seconds` is outside 10–3600.
-See [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md) for the full field reference.
+See [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md) for the full field reference. For a broader first-run
+problem, `agentgate config validate <config.yml>` checks the full gateway config (not just a bare policy file),
+and `agentgate doctor <config.yml>` diagnoses everything else — see the next section.
+
+## Diagnosing setup with `agentgate doctor`
+
+`agentgate doctor [config.yml] [--json]` is read-only — it never executes a downstream server, never opens a
+network connection, and never modifies your configuration or database. Each check reports a stable id and one
+of `PASS`/`WARN`/`FAIL`/`SKIP`:
+
+| Check id | Meaning when not PASS |
+|---|---|
+| `node_version` | `FAIL`: your Node.js is below 20 — install a newer version. |
+| `config_exists` / `policy_valid` | `FAIL`: the config or its referenced policy is missing or invalid — the message names the exact problem; run `agentgate config validate` for the full detail. |
+| `db_writable` | `FAIL`: the database's parent directory isn't writable — fix its permissions or change `db_path`. |
+| `audit_chain` | `WARN`: the database exists but hasn't been migrated to the latest schema yet — run `agentgate start` once (it migrates automatically), then re-run doctor. `FAIL`: the chain failed verification — see [`agentgate audit verify` reports a broken chain](#agentgate-audit-verify-reports-a-broken-chain) above. `SKIP`: no database exists yet — expected before the first `agentgate start`. |
+| `downstream_commands` | `WARN`: a configured server's `command` still uses the `agentgate init`-generated placeholder, or doesn't resolve on `PATH` — doctor only checks resolution, it never executes the command. |
+| `ports_available` | `WARN`: `gateway_port` or `control_port` is already in use — often just an AgentGate instance you already have running; see [`EADDRINUSE`](#eaddrinuse-on-port-4001-or-your-configured-control_port) below. |
+| `control_center` | `WARN`: Control Center isn't built yet (`pnpm run build` or `pnpm run dev:control`). `SKIP`: not running from a source checkout — the Control Center isn't bundled with an installed gateway package (see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md#installability)). |
+| `stale_artifacts` | `WARN`: an orphaned `.sqlite-wal`/`.sqlite-shm` file exists with no matching database — safe to delete manually. |
+| `client_integration` | Only runs when you pass `--client-config <path>`; `FAIL` means that file isn't valid JSON or has no `mcpServers` object. |
+
+Add `--json` for machine-readable output suitable for scripting.
 
 ## `pnpm run lint` fails after adding a new source file
 
@@ -110,6 +132,18 @@ The shared root `eslint.config.mjs` resolves TypeScript project info from an exp
 A new file inside an existing package's `src`/`tests` directory is picked up automatically; a genuinely new
 top-level package needs its `tsconfig.json` (and, if it has a `tests/` directory outside its build `include`, a
 `tsconfig.eslint.json`) added to the `project` array in `eslint.config.mjs`.
+
+## `agentgate init` says files already exist
+
+`init` never overwrites an existing `agentgate.yml`/`agentgate.policy.yml` unless you pass `--force`. Either
+choose a different (or new) target directory, or re-run with `--force` if you genuinely want to regenerate them
+— this discards any edits already made to those two files.
+
+## `agentgate integrate ... --apply` and backup files
+
+`--apply <path>` always creates a `<path>.backup-<ISO-timestamp>` copy of the target file before writing, and
+never deletes it for you. If you don't need it anymore, delete it manually. Run with `--dry-run` first if you
+want to preview the exact resulting file before anything is written.
 
 ## Windows-specific: paths in policy files
 
