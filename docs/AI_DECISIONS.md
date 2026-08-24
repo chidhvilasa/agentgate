@@ -637,3 +637,73 @@ decisions across AI-agent sessions. Verify entries against the repository.
   changes a durable decision: a bounded, type-aware binary scanner for `output_security.opaque_content` (a
   second value beyond `allow_uninspected`); the deferred replay endpoint; retention enforcement; rate limiting;
   modern/HTTP-transport MCP support (ADR-0005).
+
+### 2026-08-24 — Safe Replay Completion, Phase 1 (prove the completed backend)
+
+- Prompt objective: continue from checkpoint `d0dcc62` (backend-only Safe Replay: service, storage/hash-chain,
+  Control API route, CLI, protocol types — implements ADR-0010) and, per Phase 1 of the governing "Safe Replay
+  Completion, Verification, and Publication" prompt, prove the already-implemented backend with comprehensive,
+  evidence-driven tests before touching the UI, demo, or docs.
+- Continuity check performed at session start: re-read `docs/AI_DECISIONS.md` in full (ADR-0001–0010 plus the
+  full Session Log), re-read the four new Safe Replay implementation files (`replay.ts`, the `storage.ts`
+  replay-lineage additions, the `control.ts` replay route, `cli.ts`'s `replay` command) and confirmed
+  `d0dcc62` was the actual local HEAD with a clean working tree before starting.
+- Decisions added or changed: none — ADR-0010 fully covers this phase's scope; no new or superseded ADR was
+  needed. No architectural change was made to the backend; both fixes below are defect repairs surfaced by real
+  testing, not redesigns, consistent with the prompt's explicit "do not redesign the completed backend" instruction.
+- Implementation completed:
+  - Instrumented `packages/gateway/tests/fixtures/fixture-downstream-server.mjs` with a `FIXTURE_CALL_COUNT_FILE`
+    env-var-driven persistent call counter (bumped on every real `CallToolRequestSchema` handling), giving the
+    no-execution proof genuine external, process-level evidence rather than only in-process mocks.
+  - Added four new test files under `packages/gateway/tests/`: `replay.test.ts` (19 tests — every decision
+    transition, matched-rule-only drift, reason-code-only drift, redacted-argument and missing-original-decision
+    limitations, malformed-event rejection, determinism, non-mutation, no secret leakage in error messages),
+    `replay-no-execution.test.ts` (5 tests — a structural import-statement guardrail against `replay.ts` ever
+    importing the MCP SDK/`ApprovalManager`/`executeDownstream`/`runPipeline`, plus the fixture-counter proof:
+    one real execution bumps the counter to 1, five subsequent replays leave it at 1, `ApprovalManager.create/
+    approve/deny` are never called during a replay whose hypothetical decision is `REQUIRE_APPROVAL`, and the
+    source event/audit chain are unchanged after repeated replays), `storage-replay.test.ts` (12 tests — schema
+    creation, chaining, multi-evaluation lineage, SQLite foreign-key rejection of an orphaned `source_event_id`,
+    tampering detection on decision and policy-digest fields, deletion-gap detection, reordering detection,
+    restart continuation, and a schema-level check that no raw-argument/result column exists), and
+    `replay-api.test.ts` (16 tests — auth, hostile Host, missing/malformed/non-replayable event IDs, malformed
+    current policy failing closed without path leakage, rejection of `dry_run:false`/`execute:true`/`run:true`/
+    unknown fields, acceptance of a valid `contract_version`, no secret leakage, persisted lineage fetchable via
+    both list and single-record GET routes, non-mutation of the source event).
+  - Found and fixed two real, previously-latent defects in `packages/gateway/src/api/control.ts`, both surfaced
+    only by exercising real HTTP requests (manual curl smoke-testing, then the new Vitest `.inject()` suite),
+    not by code inspection: (1) Fastify's default JSON body parser rejected a genuinely empty body sent with
+    `Content-Type: application/json` (`FST_ERR_CTP_EMPTY_JSON_BODY`) — exactly the shape a browser `fetch()` via
+    the Control Center's existing `post()` helper sends, and confirmed (via a second curl reproduction) to
+    *already* affect the pre-existing `/api/approvals/:id/deny` endpoint before this session touched it. Fixed
+    with a custom `addContentTypeParser` that treats an empty body as `{}` and still returns 400 (not 500) on
+    genuinely malformed non-empty JSON. (2) The in-flight replay de-duplication cleanup's
+    `pending.finally(...)` produced a second, separately-unhandled promise rejection distinct from the one the
+    request handler itself already caught, detected via Vitest's unhandled-rejection reporting while running the
+    new API tests; fixed with a `.then(onFulfilled, onRejected)` cleanup whose resulting promise never itself
+    rejects.
+- Files materially changed: `packages/gateway/src/api/control.ts` (two bug fixes only — no route/contract
+  change), `packages/gateway/tests/fixtures/fixture-downstream-server.mjs` (counter instrumentation),
+  `packages/gateway/tests/replay.test.ts` (new), `packages/gateway/tests/replay-no-execution.test.ts` (new),
+  `packages/gateway/tests/storage-replay.test.ts` (new), `packages/gateway/tests/replay-api.test.ts` (new).
+- Commands actually executed and their actual results: `pnpm run build` (clean), `pnpm run lint` (0 errors),
+  `pnpm run test` — **146 tests passing** (94 pre-existing baseline + 52 new Safe Replay tests), zero
+  regressions; `node examples/secret-exfiltration/demo.mjs` (pass); `node examples/downstream-secret-result/
+  demo.mjs` (pass); `git diff --check` (clean, no whitespace errors); a manual tracked-file secret scan matching
+  `security.yml`'s pattern set run against the staged Phase 1 diff (`No credential-shaped strings found outside
+  known placeholders.`). Committed as `b2ffa72 test(replay): prove replay never executes downstream tools`.
+- Verification result: PASS for every Phase 1 item — decision-transition coverage, redacted-argument/missing-
+  decision edge cases, malformed-event rejection, the executable fixture-counter no-execution proof, the
+  structural import guardrail, storage tamper/reordering/deletion/restart cases, and API auth/validation/
+  execution-flag-rejection/leakage/persistence behavior are all now covered by passing, evidence-based tests
+  rather than asserted in prose.
+- Known limitations / follow-up risk: Phase 1 covers the backend only — the Control Center UI still shows the
+  old disabled "Dry-run Replay (coming in Milestone 2)" stub (Phase 2), no deterministic policy-drift demo yet
+  exists (Phase 3), and documentation/threat-model/screenshot/Graphify updates (Phases 4–6) have not started.
+  The two `control.ts` fixes are believed complete for the cases exercised, but have not yet been re-verified
+  under real browser/network conditions (planned for Phase 5).
+- Unresolved questions: none blocking.
+- Exact next action: Phase 2 — replace the disabled Replay stub in `apps/control-center/src/pages/
+  EventDetail.tsx` with a real Safe Replay card wired to a new typed `api.replay()` client method, with
+  component tests covering success/changed/unchanged/redacted-source-warning/safe-error/double-submit-
+  prevention/no-execution-control/no-raw-secret-rendering.
