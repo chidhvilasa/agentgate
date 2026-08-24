@@ -40,8 +40,8 @@ Run it yourself: `node examples/secret-exfiltration/demo.mjs` (see [Demo and ver
 ## Project status
 
 **Early development / research-quality MVP.** AgentGate implements a real policy engine, a real MCP stdio proxy, a
-real tamper-evident audit store, and a real Control Center UI — all covered by executable tests and an end-to-end
-attack demo (see [`docs/VERIFICATION.md`](docs/VERIFICATION.md)). It is **not** production-hardened: there is no
+real tamper-evident audit store, and a real Control Center UI — all covered by executable tests and two end-to-end
+attack demos, inbound and outbound (see [`docs/VERIFICATION.md`](docs/VERIFICATION.md)). It is **not** production-hardened: there is no
 authentication beyond a per-launch local token, no multi-user support, no replay, and MCP protocol support is
 currently **legacy 2025-era stdio only** (see [Supported integrations](#supported-integrations)). Read
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before relying on it for anything sensitive.
@@ -92,8 +92,10 @@ for human approval — is recorded before the call reaches (or is kept from reac
   match wins; secure default-deny.
 - **Four decision types** — `allow`, `deny`, `require_approval` (human-in-the-loop, TTL-bound, single-use), and
   `allow_with_transform` (redact specific fields, then forward).
-- **Deep secret redaction** — AWS/GitHub/OpenAI/Anthropic key patterns, bearer tokens, private-key headers, and
-  DB connection strings are detected and redacted from every persisted audit record, regardless of the decision.
+- **Deep secret redaction — bidirectional** — AWS/GitHub/OpenAI/Anthropic key patterns, bearer tokens,
+  private-key headers, and DB connection strings are detected and redacted from every persisted audit record
+  (inbound arguments), from downstream results before they reach the agent, and from every downstream/internal
+  error message before it is persisted or logged (see [Output security](#output-security) below).
 - **Tamper-evident audit trail** — every event is a SHA-256 hash-chained, append-only record in SQLite;
   `agentgate audit verify` independently re-walks and verifies the chain.
 - **Control Center** — a local, loopback-only web UI: live SSE timeline, approval queue, per-event detail with
@@ -172,6 +174,36 @@ It authenticates with a random per-launch token (printed to the gateway's stderr
 If you need modern-era or HTTP-transport support today, AgentGate is not yet the right fit — track
 [ADR-0005](docs/AI_DECISIONS.md) for status.
 
+## Output security
+
+Inbound tool-call **arguments** are secret-scanned and redacted before audit persistence (Milestone 1). As of
+ADR-0009 (Milestone 3), downstream **results** are also sanitized — after a policy-allowed tool call executes,
+`sanitizeToolResult()` inspects the result before it is ever returned to the upstream agent, and
+`sanitizeErrorMessage()` sanitizes any downstream/internal error before it is persisted, hash-chained, or logged.
+Raw downstream results are never persisted, in either direction, before or after this change — only safe metadata
+(`result_redacted`/`result_blocked`/`result_finding_count`/`error_redacted`) is recorded on the audit event.
+
+```yaml
+output_security:
+  mode: redact              # "redact" (default) — recognized secrets replaced with [REDACTED], result still returned
+                             # "block"  — the whole result is replaced with a safe error if a secret is detected
+                             #            or a depth/size limit prevented full inspection
+  max_depth: 8               # structured-content nesting actually inspected
+  max_text_bytes: 1000000    # per-string scan limit
+```
+
+- **Inspected**: MCP text content, structured content (string leaves only), and embedded-resource text.
+- **Never inspected, in either mode**: `image`/`audio` content and resource `blob` data (base64 binary — never
+  regex-scanned, to avoid corrupting the payload), unrecognized content-block types, and `_meta` fields. These
+  pass through byte-identical.
+- **Limitations**: this reuses the same conservative, pattern-based secret detector as inbound redaction — it is
+  not a general DLP or PII-detection system, will miss unrecognized credential formats, and can occasionally
+  redact benign text that matches a pattern. See [`docs/POLICY_REFERENCE.md`](docs/POLICY_REFERENCE.md#output-security-gateway-level)
+  for the full field reference and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md#malicious-downstream-mcp-server)
+  for what this does and does not protect against.
+- Try it: `node examples/downstream-secret-result/demo.mjs` — a real gateway and a real fixture downstream server
+  that leaks a synthetic credential in both a result and an error message, both sanitized end-to-end.
+
 ## Security model and limitations
 
 AgentGate treats agent identity as **untrusted**: `declared_name`/`declared_version` are self-reported and used for
@@ -194,9 +226,10 @@ Component responsibilities, system and sequence diagrams, the audit data model, 
 ## Demo and verification
 
 ```sh
-node examples/secret-exfiltration/demo.mjs   # end-to-end attack demo (self-cleaning, writes to a temp dir)
-pnpm run test                                # unit/integration tests (policy + gateway)
-pnpm run lint                                # type-aware lint gate across the whole workspace
+node examples/secret-exfiltration/demo.mjs       # inbound attack demo: secret in tool-call arguments (self-cleaning)
+node examples/downstream-secret-result/demo.mjs  # outbound demo: secret in a downstream result AND error (self-cleaning)
+pnpm run test                                    # unit/integration tests (policy + gateway) — 86 tests
+pnpm run lint                                    # type-aware lint gate across the whole workspace
 ```
 
 Everything the demo and test suite assert is cross-checked in [`docs/VERIFICATION.md`](docs/VERIFICATION.md).

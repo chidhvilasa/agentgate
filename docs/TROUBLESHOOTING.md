@@ -35,6 +35,31 @@ behavior of a tamper-evident log (see [`docs/THREAT_MODEL.md`](THREAT_MODEL.md#d
 for what this guarantee does and does not cover). If you deliberately want a fresh chain, delete the SQLite file
 (and its `-wal`/`-shm` companions) and restart the gateway — a new database starts a new chain from record 1.
 
+## A downstream result comes back with `[REDACTED]` in it unexpectedly
+
+The result matched one of `SECRET_PATTERNS` (`packages/policy/src/transformation.ts`) — the same conservative,
+pattern-based detector used for inbound arguments now also scans downstream results (ADR-0009). Check the
+event's `result_finding_count` (Control Center Event Detail, or the `audit_events` table directly) — a nonzero
+count with `result_redacted: true` confirms this is output security, not a bug. This is usually a false positive
+on a long token-shaped or password-shaped string; see
+[`docs/DEVELOPMENT.md`](DEVELOPMENT.md#diagnosing-an-unexpectedly-redacted-result) for what to do about it. There
+is no per-tool exception list in this milestone.
+
+## A downstream result comes back entirely blocked
+
+Only happens under `output_security.mode: block`. Either a secret was detected, or a `max_depth`/`max_text_bytes`
+limit prevented full inspection of otherwise-inspectable content (treated as unsafe in `block` mode, not silently
+allowed through). See [`docs/DEVELOPMENT.md`](DEVELOPMENT.md#diagnosing-a-blocked-result). Switching to
+`mode: redact` (the default) trades this hard stop for in-place redaction.
+
+## An image/audio result seems to leak something and wasn't redacted
+
+Expected, and documented — `image`/`audio` content and embedded-resource `blob` data are base64 binary and are
+**never** scanned in either `output_security` mode, in this milestone. See
+[Output security](../README.md#output-security) and
+[`docs/THREAT_MODEL.md`](THREAT_MODEL.md#malicious-downstream-mcp-server). This is a known, accepted limitation,
+not a misconfiguration.
+
 ## The example gateway config can't reach the downstream server
 
 `examples/agentgate.yml` launches `npx -y @modelcontextprotocol/server-filesystem /tmp` as its downstream MCP

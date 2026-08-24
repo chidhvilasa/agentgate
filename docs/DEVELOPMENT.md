@@ -71,16 +71,56 @@ token the UI should use via `localStorage.setItem('agentgate_token', '<token>')`
 To point an MCP client (e.g. Claude Code) at AgentGate instead of a downstream server directly, configure it to run
 `node <repo>/packages/gateway/dist/cli.js start <repo>/examples/agentgate.yml` as its MCP server command.
 
-## Using the attack demo safely
+## Using the attack demos safely
 
 ```sh
-node examples/secret-exfiltration/demo.mjs
+node examples/secret-exfiltration/demo.mjs        # inbound: secret in tool-call arguments
+node examples/downstream-secret-result/demo.mjs   # outbound: secret in a downstream result AND error message
 ```
 
-This is safe to run repeatedly and from any working directory: it writes its config, mock downstream server, and
-SQLite database into a unique `os.tmpdir()` directory (never the repo root), closes every connection and child
-process it opens, and removes the temp directory in a `finally` block on both success and failure. It uses a
-well-known placeholder AWS key (`AKIAIOSFODNN7EXAMPLE`) — never a real credential.
+Both are safe to run repeatedly and from any working directory: each writes its config, mock/fixture downstream
+server, and SQLite database into its own unique `os.tmpdir()` directory (never the repo root), closes every
+connection and child process it opens, and removes the temp directory in a `finally` block on both success and
+failure. Both use only well-known placeholder credentials (`AKIAIOSFODNN7EXAMPLE`) — never a real one.
+
+## Configuring output security
+
+`output_security` (see [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md#output-security-gateway-level) for the
+full reference) is a gateway config block, not a policy field:
+
+```yaml
+output_security:
+  mode: redact   # or "block"
+```
+
+Omitting it entirely uses the default (`mode: redact`, 8-level depth, 1MB per-string scan limit). Changing it
+requires no rebuild — `loadGatewayConfig()` re-reads and re-validates the YAML on every `agentgate start`.
+
+### Diagnosing an unexpectedly redacted result
+
+If a tool result you expected to see verbatim came back with `[REDACTED]` somewhere in it, the text matched one
+of `packages/policy/src/transformation.ts`'s `SECRET_PATTERNS` (the same conservative set used for inbound
+arguments — see [Secret detection behavior and limitations](POLICY_REFERENCE.md#secret-detection-behavior-and-limitations)).
+Check the event in the Control Center's Event Detail view (or `agentgate_events.result_finding_count` /
+`result_redacted` directly in SQLite) — the false positive is almost always a long token-shaped or
+password-shaped string that isn't actually a secret. There is no per-tool exception list in this milestone; the
+only mitigations are accepting the redaction or, if you control the pattern list, tightening the specific
+over-broad pattern (see [Adding tests](#adding-tests) below for how to do that safely).
+
+### Diagnosing a blocked result
+
+A `result_blocked: true` event under `output_security.mode: block` means either a secret was detected, or a
+`max_depth`/`max_text_bytes` limit prevented the sanitizer from fully inspecting otherwise-inspectable text/
+structured content (truncated content is treated as "not proven safe," not silently passed through, in `block`
+mode). Raise `max_depth`/`max_text_bytes` if the result is legitimately large/deeply nested and you trust the
+downstream server, or switch to `mode: redact` if occasional false-positive blocking is worse for your workflow
+than occasional over-redaction.
+
+### Opaque binary content
+
+Image, audio, and embedded-resource `blob` (base64) content is **never** scanned in either mode — see
+[Output security](../README.md#output-security) for why. If your downstream server returns secrets embedded in
+binary payloads, output security does not protect against that today; this is a documented limitation, not a bug.
 
 ## Database cleanup
 
@@ -89,6 +129,25 @@ development — `.gitignore` excludes `agentgate.sqlite*` and generic `*.sqlite*
 directly against `examples/agentgate.yml` (which uses `./agentgate.sqlite` as `db_path`), delete
 `agentgate.sqlite`, `agentgate.sqlite-wal`, and `agentgate.sqlite-shm` from your working directory when you're
 done — they are gitignored but will otherwise accumulate on disk.
+
+## Migration and audit verification guidance
+
+Opening an existing database with a newer `AuditStorage` automatically runs any migrations it hasn't seen yet
+(`storage.ts`'s `MIGRATIONS` array, resumed from the database's own `schema_version` table) — there is no
+separate migration command to run. After starting the gateway once against an older database, confirm the chain
+is still intact:
+
+```sh
+node packages/gateway/dist/cli.js audit verify <config.yml>
+```
+
+A database created before Milestone 3 has `canonical_payload_version: '1'` lifecycle records; new records
+written after the upgrade are `'2'` (adds the result/error sanitization fields to the hash). `verifyChain()`
+reconstructs each record's hash using *that record's own* stored version, so a chain spanning the upgrade
+verifies correctly — see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#audit-lifecycle-data-model). If you're adding a
+new hash-chained field yourself, follow the same pattern: bump `canonical_payload_version` for new writes, never
+change what an existing version number means, and add the new migration as the **last** entry in `MIGRATIONS`
+(inserting one earlier renumbers every migration after it and causes already-upgraded databases to skip it).
 
 ## Adding a policy rule
 
@@ -108,6 +167,16 @@ done — they are gitignored but will otherwise accumulate on disk.
 - New source files should be covered by lint (the shared `eslint.config.mjs` already includes every package's
   `src` and `tests` directories via explicit `tsconfig.eslint.json`/`tsconfig.json` project references — see that
   file if a new package needs to be added to the workspace).
+- Gateway pipeline/output-security integration tests spawn a **real** fixture downstream MCP server
+  (`packages/gateway/tests/fixtures/fixture-downstream-server.mjs`) over real stdio, rather than mocking
+  `executeDownstream()` — add a new tool case there if you need another downstream behavior to test against.
+- **Adding a synthetic-secret regression test.** Use an unmistakably fake credential (never a real-looking one
+  reused from production) and reuse an existing allowlisted literal from
+  `packages/policy/tests/transformation.test.ts`/`output-sanitization.test.ts` where possible. If you must add a
+  new one, add the exact literal (not a file or directory exclusion) to `.github/workflows/security.yml`'s
+  tracked-file secret-scan `ALLOWED` pattern — excluding a whole file would let a real credential slip through
+  the same test file undetected. Never weaken `SECRET_PATTERNS` itself, disable a passing secret-detection test,
+  or add a blanket suppression to make a new test pass.
 
 ## Release gates
 
@@ -119,6 +188,7 @@ pnpm run build
 pnpm run lint
 pnpm run test
 node examples/secret-exfiltration/demo.mjs
+node examples/downstream-secret-result/demo.mjs
 git diff --check
 ```
 

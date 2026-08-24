@@ -57,13 +57,16 @@ jobs:
       - name: Test
         run: pnpm run test
 
-      - name: Secret-exfiltration attack demo
+      - name: Secret-exfiltration attack demo (inbound)
         run: node examples/secret-exfiltration/demo.mjs
+
+      - name: Downstream-result secret sanitization demo (outbound, ADR-0009)
+        run: node examples/downstream-secret-result/demo.mjs
 
       - name: Verify no whitespace/hygiene errors
         run: git diff --check
 
-      - name: Verify the demo left no generated artifacts
+      - name: Verify the demos left no generated artifacts
         run: |
           if [ -n "$(git status --short)" ]; then
             echo "Unexpected changes after the demo run:"
@@ -104,13 +107,16 @@ jobs:
       - name: Test
         run: pnpm run test
 
-      - name: Secret-exfiltration attack demo
+      - name: Secret-exfiltration attack demo (inbound)
         run: node examples/secret-exfiltration/demo.mjs
+
+      - name: Downstream-result secret sanitization demo (outbound, ADR-0009)
+        run: node examples/downstream-secret-result/demo.mjs
 
       - name: Verify no whitespace/hygiene errors
         run: git diff --check
 
-      - name: Verify the demo left no generated artifacts
+      - name: Verify the demos left no generated artifacts
         run: |
           if [ -n "$(git status --short)" ]; then
             echo "Unexpected changes after the demo run:"

@@ -84,6 +84,63 @@ formats that don't match a known pattern. Redaction of matched secrets to persis
 **unconditionally**, on every decision type, independent of whether `contains_secrets` is used anywhere in your
 policy.
 
+The same pattern set (and the same limitations) also protects the *outbound* direction — see
+[Output security (gateway-level)](#output-security-gateway-level) below.
+
+## Output security (gateway-level)
+
+This is a **gateway config field, not a policy field** — it lives in your `agentgate.yml`/gateway config, not in a
+policy rule, and applies uniformly to every downstream result regardless of which rule allowed the call. It is
+unrelated to `allow_with_transform` above: `allow_with_transform` redacts *inbound arguments* before forwarding
+them to the downstream server; `output_security` redacts (or blocks) the downstream *result* before forwarding it
+back to the upstream client. See ADR-0009 in `docs/AI_DECISIONS.md` and
+[`docs/ARCHITECTURE.md`](ARCHITECTURE.md#output-security-configuration) for the full design rationale.
+
+Schema (`packages/gateway/src/config/registry.ts`, `OutputSecuritySchema`):
+
+```yaml
+output_security:
+  mode: redact                        # "redact" | "block" — default "redact"
+  opaque_content: allow_uninspected    # only this literal value validates today
+  max_depth: 8                        # 1-20, default 8
+  max_text_bytes: 1000000             # 1024-10000000, default 1000000
+```
+
+All fields are optional; omitting `output_security` entirely uses every default above. Zod rejects any other
+`mode` value, any `opaque_content` value other than `allow_uninspected`, or an out-of-range `max_depth`/
+`max_text_bytes` with a structured validation error at gateway startup (`loadGatewayConfig()`), the same way any
+other malformed config field is rejected.
+
+| Field | Type | Default | Behavior |
+|---|---|---|---|
+| `mode` | `"redact" \| "block"` | `redact` | `redact`: recognized secrets in inspectable content are replaced with `[REDACTED]`; the result is still returned. `block`: if a secret is detected in inspectable content, **or** a `max_depth`/`max_text_bytes` limit prevented full inspection of otherwise-inspectable text/structured content, the *entire* result is replaced with a protocol-valid AgentGate error (`isError: true`) that reveals no secret. |
+| `opaque_content` | `"allow_uninspected"` | `allow_uninspected` | The only implemented behavior: MCP `image`/`audio` content and `EmbeddedResource` content with a `blob` field are base64 binary and are **never** regex-scanned or mutated, in either mode — this field exists to make that fixed behavior an explicit, self-documenting config value rather than an invisible hardcoded choice, not to offer a second behavior that doesn't exist yet. |
+| `max_depth` | integer, 1–20 | `8` | Maximum object/array nesting actually inspected in `structuredContent`. A nested value beyond this depth is passed through **unchanged** (not silently dropped) and marked `not_inspected` internally; in `block` mode this counts as "could not be proven safe" and blocks the result. |
+| `max_text_bytes` | integer, 1024–10,000,000 | `1,000,000` | Maximum UTF-8 byte length of a single string leaf actually scanned. An oversized string is passed through unchanged and, in `block` mode, blocks the result for the same reason as a depth-limit truncation. |
+
+**What is inspected:** MCP `text` content, `EmbeddedResource` content with a `text` field, `resource_link`
+string metadata (`uri`/`name`/`description`/`title`), and `structuredContent` (string leaves only — numbers,
+booleans, and null are left untouched, and object keys are preserved).
+
+**What is never inspected, in either mode:** `image`/`audio` content, `EmbeddedResource` content with a `blob`
+field, unrecognized/future MCP content-block `type` values, the top-level `_meta` field (and per-content-block
+`_meta`), and any top-level `CallToolResult` field beyond `content`/`structuredContent`/`isError`/`_meta`. These
+all pass through completely unmodified — deterministic, and safe against future protocol additions AgentGate
+doesn't yet understand, but also genuinely uninspected. See
+[`docs/THREAT_MODEL.md`](THREAT_MODEL.md#malicious-downstream-mcp-server) for the security implications.
+
+**Audit metadata**: `AuditEvent.result_redacted`/`result_blocked`/`result_finding_count` record what actually
+happened — never the matched secret text or the raw result, which is never persisted regardless of `mode`.
+`error_redacted` records whether a downstream/internal error message was modified by the same pattern set before
+being persisted. See [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#audit-lifecycle-data-model).
+
+**Interaction with false positives**: because this reuses the same conservative `SECRET_PATTERNS` as inbound
+redaction, a benign string that happens to match a pattern (e.g. a long non-secret value following the word
+`token`) will be redacted (or, in `block` mode, cause the whole result to be replaced) exactly as it would be for
+inbound arguments. There is no per-tool or per-pattern exception list in this milestone; if a specific tool's
+legitimate output regularly false-positives, the only mitigations today are switching that deployment to
+`redact` mode (if not already) or accepting the redaction.
+
 ## Decision: `allow`
 
 ```yaml
@@ -215,6 +272,9 @@ rules:
   `deny`/`require_approval` rules before broader `allow` rules that might otherwise match first.
 - **Reusing a rule `id`.** Only the first rule with a given `id` can ever be reached; `validatePolicy()` warns on
   this but does not error.
+- **Putting `output_security` inside a policy rule.** It is not a policy field at all — it is a top-level gateway
+  config block (see [Output security (gateway-level)](#output-security-gateway-level)) and has no effect if
+  nested under `rules:`.
 
 ## CLI
 

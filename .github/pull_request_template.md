@@ -19,6 +19,7 @@ pnpm run build
 pnpm run lint
 pnpm run test
 node examples/secret-exfiltration/demo.mjs
+node examples/downstream-secret-result/demo.mjs
 git diff --check
 ```
 

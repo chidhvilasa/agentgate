@@ -4,6 +4,56 @@ All notable changes to this project are documented in this file. Format loosely 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). AgentGate has not yet published a versioned release or
 npm package — see [Project status](README.md#project-status).
 
+## [Unreleased] — Milestone 3: Bidirectional secret safety
+
+### Added
+- **Downstream result sanitization** (ADR-0009): `sanitizeToolResult()` (`packages/gateway/src/output-security.ts`)
+  inspects a downstream tool's result — MCP text content, structured content, and embedded-resource text — for
+  recognized secret patterns before it is ever returned to the upstream MCP client. Configurable via a new
+  gateway-level `output_security` config block (`mode: redact | block`, `max_depth`, `max_text_bytes`; see
+  `docs/POLICY_REFERENCE.md`). Image/audio content and embedded-resource `blob` data (base64 binary) are always
+  passed through untouched in both modes — never regex-scanned, to avoid corrupting binary payloads.
+- **Canonical error sanitization** (ADR-0009): `sanitizeErrorMessage()` (`packages/policy/src/output-sanitization.ts`)
+  redacts recognized secret patterns, bounds length, and normalizes control characters/newlines in every
+  downstream/internal error before it is persisted, hash-chained, returned by the Control API, pushed over SSE,
+  rendered in the Control Center, or written to a gateway log line.
+- New `AuditEvent` fields `result_blocked`, `result_finding_count`, and `error_redacted` (alongside the
+  pre-existing `result_redacted`, whose meaning is corrected — see Changed below). All four are hash-chain
+  protected under a new `canonical_payload_version: '2'`; `verifyChain()` dispatches canonicalization by each
+  lifecycle record's own stored version, so a chain spanning the v1→v2 migration boundary still verifies.
+- New end-to-end demo: `examples/downstream-secret-result/demo.mjs` — a real gateway and a real fixture
+  downstream MCP server that leaks a synthetic credential in both a result and an error message; verifies both
+  are sanitized before reaching the upstream client/database, self-cleaning, no real network/secrets.
+- 34 new tests (28 sanitizer unit tests in `packages/policy`, 16 gateway output-security shape tests, 6 pipeline
+  integration tests against a real spawned fixture downstream server, 4 storage migration/hash-chain-tampering
+  tests) — 86 total across the workspace.
+- CI now runs both attack demos (`.github/workflows/ci.yml`).
+
+### Fixed
+- `stdio.ts`: a `FAILED` (downstream execution threw) response to the upstream client previously showed the
+  stale `ALLOW` decision's explanation instead of the actual failure reason; now shows the sanitized
+  `execution_error`.
+- `storage.ts`: `insertEvent()`'s and `rowToEvent()`'s returned `AuditEvent.canonical_payload_version` was
+  hardcoded to `'1'` regardless of a record's actual stored version.
+
+### Changed
+- `AuditEvent.result_redacted`'s doc-comment previously (inaccurately) implied redaction "before persistence."
+  Raw downstream results were never persisted, before or after this milestone — `result_redacted` now correctly
+  documents that it means "redacted before being forwarded to the upstream client."
+- `docs/THREAT_MODEL.md`: the "downstream results/errors are not secret-scanned" deferred-mitigation language is
+  replaced with the implemented mitigation and its actual, narrower remaining limitations (opaque binary content,
+  unknown content-block types, pattern-detector false positives/negatives — this is not a general DLP/PII system).
+- `docs/ARCHITECTURE.md`, `docs/POLICY_REFERENCE.md`, `README.md`: updated diagrams, a new `output_security`
+  config reference, and a concise "Output security" section describing the new boundary.
+
+### Known limitations (unchanged claims, restated for this milestone)
+- This is not production-ready, not a general DLP/PII/malware-scanning system, and does not claim complete
+  secret detection — the same conservative, pattern-based detector used for inbound arguments is reused, not
+  replaced with something more capable.
+- Opaque binary result content (image/audio/blob) is never inspected, in either output-security mode.
+- Retention enforcement, rate limiting, a working replay endpoint, and modern/HTTP-transport MCP support remain
+  deferred (unchanged from Milestone 2).
+
 ## [Unreleased] — Milestone 2: Public launch preparation
 
 ### Added

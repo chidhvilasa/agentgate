@@ -32,10 +32,13 @@ See the diagram in [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#trust-boundaries). T
 
 1. **MCP client ↔ Gateway** — everything the client sends (tool name, arguments, declared identity) is untrusted
    input to the policy engine.
-2. **Gateway ↔ Downstream server** — everything the downstream server returns is untrusted data returned to the
-   client; AgentGate does not currently inspect or redact *results* the way it redacts request arguments before
-   persistence (`result_redacted` exists as a field in `AuditEvent` but nothing in `pipeline.ts` currently sets it
-   true or scans results for secrets before persisting or forwarding them).
+2. **Gateway ↔ Downstream server** — everything the downstream server returns is untrusted data. As of ADR-0009
+   (Milestone 3), `runPipeline()` inspects the downstream result — MCP text content, structured content, and
+   embedded-resource text — for recognized secret patterns before it is ever returned to the upstream client, and
+   `result_redacted`/`result_blocked`/`result_finding_count` on `AuditEvent` accurately reflect what happened.
+   Raw results are still never persisted (see [Secret exfiltration](#secret-exfiltration) and
+   [Malicious downstream MCP server](#malicious-downstream-mcp-server) below for exactly what is and is not
+   covered — image/audio/blob content is opaque and is not scanned in either mode).
 
 ## Attacker capabilities assumed
 
@@ -69,11 +72,27 @@ further injected instructions, or simply lying about what it did).
 
 **Mitigation implemented:** the downstream server can only be reached for tools/calls a policy explicitly allows;
 `resolveServer()` restricts which server handles which tool name via the `tools` glob list in gateway config.
+As of ADR-0009, the result the downstream server returns is also sanitized — `sanitizeToolResult()`
+(`packages/gateway/src/output-security.ts`) scans MCP text content, structured content, and embedded-resource
+text for recognized secret patterns and redacts them (default `output_security.mode: redact`) — or, in
+`output_security.mode: block`, replaces the entire result with a safe AgentGate error — before the result is
+returned to the client. Raw results are never persisted regardless of mode (see
+[Secret exfiltration](#secret-exfiltration) below); only safe metadata (`result_redacted`/`result_blocked`/
+`result_finding_count`) is recorded.
 
-**Deferred:** results returned by an allowed downstream server are forwarded to the client without content
-inspection, and are persisted to the audit database without the same secret-redaction pass applied to
-*arguments* (see [Trust boundaries](#trust-boundaries) above). A malicious downstream server that returns a
-secret-looking string in its result could have that string persisted to the audit log unredacted.
+**Deferred / limitations:**
+- **Opaque binary content is not scanned.** `image`/`audio` content and `EmbeddedResource` content with a
+  `blob` field are base64 and are passed through byte-identical in both modes — regex-scanning base64 risks
+  corrupting the payload via a spurious match, and there is no bounded, type-aware binary scanner implemented.
+  A malicious downstream server could smuggle a secret inside an image/audio payload undetected.
+- **Unknown/future MCP content-block types and unrecognized top-level result fields are passed through
+  unmodified**, in both modes, rather than guessed at or stripped — deterministic and forward-compatible, but
+  also uninspected.
+- **Pattern-based detection is inherently incomplete** (see [Secret exfiltration](#secret-exfiltration)) — the
+  same conservative `SECRET_PATTERNS` used for inbound arguments is reused here, not a separate or more complete
+  detector.
+- This is **not** a general data-loss-prevention (DLP) system, PII detector, malware scanner, or compliance
+  control — it recognizes a fixed set of credential-shaped patterns and nothing else.
 
 ## Path traversal and normalization mismatch
 
@@ -120,15 +139,29 @@ arguments match. Independently of policy, `redactArgumentsForAudit()` redacts de
 persisted audit record regardless of decision — even an `ALLOW`ed call's arguments are redacted before being
 written to disk.
 
-**Deferred:**
+**Bidirectional coverage (ADR-0009, Milestone 3):** the same pattern set now also protects the *outbound* path —
+`sanitizeToolResult()` (`packages/gateway/src/output-security.ts`) inspects the downstream result before it is
+returned to the client, and `sanitizeErrorMessage()` (`packages/policy/src/output-sanitization.ts`) sanitizes
+every downstream/internal error before it is persisted, hash-chained, returned by the Control API, pushed over
+SSE, rendered in the Control Center, or written to a gateway log line. This closes the specific gap Milestone 1/2
+left open: a credential could previously leak to the agent (or into a log line) via a downstream *result* or
+*error* even though it was correctly redacted from the *audit record of the request*.
+
+**Deferred / limitations:**
 - Pattern-based detection is inherently incomplete — it will miss secrets that don't match a known format (custom
   internal token formats, for example) and can false-positive on 8+ character strings after words like `secret` or
   `password` (the patterns are intentionally conservative — *"prefer false positives over false negatives"*, per
-  the in-code comment).
-- As noted above, downstream **results** are not scanned or redacted the way request **arguments** are.
-- Redaction happens before *persistence*; for `allow_with_transform` it also happens before *forwarding*, but a
-  plain `allow` decision forwards the original, unredacted arguments to the downstream server — redaction there is
-  audit-only, not a data-loss-prevention control on the live call.
+  the in-code comment). This applies identically to the inbound-argument, outbound-result, and error paths — it is
+  one detector reused three ways, not three independent ones.
+- Opaque binary result content (image/audio/blob) is never scanned — see
+  [Malicious downstream MCP server](#malicious-downstream-mcp-server).
+- Redaction happens before *persistence* (inbound arguments) or before *forwarding* (outbound results/errors);
+  for `allow_with_transform` inbound redaction also happens before forwarding to the downstream server, but a
+  plain `allow` decision forwards the original, unredacted *arguments* to the downstream server — redaction
+  there is audit-only, not a data-loss-prevention control on the live outbound call. This is unchanged by
+  Milestone 3, which addresses the downstream-to-client direction, not the client-to-downstream direction.
+- This is not a general DLP/PII/malware-scanning system — see
+  [Malicious downstream MCP server](#malicious-downstream-mcp-server) for the same caveat stated in full.
 
 ## Approval replay and scope confusion
 
@@ -194,11 +227,19 @@ milestone could move to a `fetch`-based streaming client or a short-lived, singl
 
 **Mitigation implemented:** every audit record is hash-chained; injecting a fabricated record without breaking the
 chain requires recomputing every subsequent hash, which `agentgate audit verify` would only fail to catch if the
-attacker also controls the database file directly (see next section).
+attacker also controls the database file directly (see next section). As of ADR-0009 (Milestone 3),
+`execution_error` is also no longer persisted as the raw exception message: `sanitizeErrorMessage()`
+(`packages/policy/src/output-sanitization.ts`) redacts recognized secret patterns, bounds the message length, and
+strips/normalizes control characters and newlines — so a downstream server crafting an error message to inject
+fake log lines or carry a credential can no longer do either through this path. `error_redacted` on `AuditEvent`
+records whether a pattern was actually found and replaced. `result_finding_count`/`result_redacted`/
+`result_blocked` are hash-chain-protected under `canonical_payload_version: '2'` — see
+[`docs/ARCHITECTURE.md`](ARCHITECTURE.md#audit-lifecycle-data-model).
 
-**Deferred:** `execution_error` (populated from a caught downstream exception's `.message`) is persisted **without**
-being passed through `redactSecrets()` — unlike tool-call arguments, an error message from a compromised downstream
-server is not currently secret-scanned before being written to the audit database.
+**Deferred / limitations:** the same pattern-based limitations described in
+[Secret exfiltration](#secret-exfiltration) apply — an error message using an unrecognized secret format is not
+redacted, and this is not a general log-sanitization framework beyond the specific control-character/length/
+secret-pattern handling described above.
 
 ## Database replacement by a local administrator
 
@@ -244,14 +285,26 @@ queue.
 - Path normalization and boundary checks before matching/persistence.
 - Secret detection and redaction of request arguments before persistence (and before forwarding, for
   `allow_with_transform`).
-- Append-only, hash-chained audit trail with independent verification.
+- **Secret detection and redaction (or blocking) of downstream *results* before they are forwarded to the
+  upstream client** (ADR-0009, Milestone 3) — text content, structured content, and embedded-resource text.
+- **Secret detection and redaction of every persisted/logged error message** (ADR-0009), with length bounds and
+  control-character normalization, before database persistence, hash-chaining, Control API/SSE output, Control
+  Center rendering, or gateway log lines.
+- Append-only, hash-chained audit trail with independent verification, including the new result/error
+  sanitization metadata (`canonical_payload_version: '2'`).
 - Single-use, TTL-bound approvals with confused-deputy protection.
 - Loopback-only Control API with Host/Origin/token checks and restrictive CORS.
 
 ## Mitigations deferred (summary)
 
-- Downstream **results** are not secret-scanned or redacted before persistence or forwarding.
-- `execution_error` messages are not secret-scanned before persistence.
+- **Opaque binary result content** (image/audio content, and `EmbeddedResource` content with a `blob` field) is
+  never scanned for secrets, in either output-security mode — see
+  [Malicious downstream MCP server](#malicious-downstream-mcp-server).
+- Unknown/future MCP content-block types and unrecognized top-level `CallToolResult` fields pass through the
+  output sanitizer unmodified rather than being inspected.
+- Downstream results are still not scanned/redacted on the **inbound** (client→downstream) direction — only
+  arguments (redacted for audit only, not the live call) and the **outbound** (downstream→client) direction are
+  covered. See [Secret exfiltration](#secret-exfiltration).
 - No retention enforcement despite configurable `retention` settings.
 - No rate limiting on tool calls, Control API requests, or approval creation.
 - No handling for a malformed policy file inside the pipeline itself (see
@@ -273,3 +326,8 @@ queue.
   model beyond a single per-launch shared token.
 - **Modern MCP (`2026-07-28`) or HTTP-transport support** in this milestone — see
   [ADR-0005](AI_DECISIONS.md) and [`docs/ARCHITECTURE.md`](ARCHITECTURE.md#protocol-limitations).
+- **Generic data-loss-prevention (DLP), PII detection, malware/content scanning, or compliance certification of
+  any kind** (ADR-0009). The result/error sanitizer reuses the same fixed, pattern-based credential detector used
+  for inbound arguments — it is not, and is not claimed to be, a general-purpose content-security product.
+- **Scanning opaque binary content** (images, audio, arbitrary blobs) for secrets, in any direction, in this
+  milestone (ADR-0009) — see [Malicious downstream MCP server](#malicious-downstream-mcp-server).

@@ -8,11 +8,12 @@ where the two disagree, the code is correct and this file is stale; please file 
 | Component | Responsibility | Code |
 |---|---|---|
 | **Stdio proxy** | Speaks MCP to the upstream client (e.g. Claude Code) as a *server*, and to the downstream MCP server as a *client*. Intercepts every `tools/call`. | `packages/gateway/src/transport/stdio.ts` |
-| **Pipeline** | Normalizes arguments, redacts for audit, evaluates policy, executes (or blocks), records the terminal event. Never throws — errors become `FAILED` audit events. | `packages/gateway/src/pipeline.ts` |
-| **Policy engine** | Parses/validates policy YAML (Zod schema), evaluates first-match rules, normalizes paths, detects secrets. | `packages/policy/src/{schema,engine,transformation,index}.ts` |
+| **Pipeline** | Normalizes arguments, redacts for audit, evaluates policy, executes (or blocks), sanitizes the downstream result/error, records the terminal event. Never throws — errors become `FAILED` audit events. | `packages/gateway/src/pipeline.ts` |
+| **Output security** | Sanitizes downstream MCP results (text/structured/resource content) before they cross back to the upstream client; opaque binary content passes through untouched (ADR-0009). | `packages/gateway/src/output-security.ts` |
+| **Policy engine** | Parses/validates policy YAML (Zod schema), evaluates first-match rules, normalizes paths, detects secrets. Also home to the shared deep-JSON sanitizer and canonical error sanitizer reused by output security. | `packages/policy/src/{schema,engine,transformation,output-sanitization,index}.ts` |
 | **Downstream registry** | Parses gateway config, resolves which configured downstream server owns a given tool name. | `packages/gateway/src/config/registry.ts` |
 | **Approval manager** | Creates/approves/denies/expires human-in-the-loop approvals; single-use; TTL-bound; polling-based expiry (10s interval). | `packages/gateway/src/approval.ts` |
-| **Audit storage** | SQLite-backed, hash-chained, append-only audit log plus approvals/agents tables. | `packages/gateway/src/storage.ts` |
+| **Audit storage** | SQLite-backed, hash-chained, append-only audit log plus approvals/agents tables. Lifecycle records carry a `canonical_payload_version` (`'1'` pre-Milestone-3, `'2'` since ADR-0009) so hash verification dispatches on each record's own version. | `packages/gateway/src/storage.ts` |
 | **Control API** | Loopback-only Fastify REST + SSE API behind a per-launch random token. | `packages/gateway/src/api/control.ts` |
 | **Control Center** | React/Vite SPA consuming the Control API. | `apps/control-center/src/**` |
 | **Protocol package** | Shared TypeScript types for events, decisions, and the Control API contract — the only cross-package dependency all three consumers share. | `packages/protocol/src/{events,api}.ts` |
@@ -30,6 +31,7 @@ flowchart LR
         SP["Stdio Proxy\ntransport/stdio.ts"]
         PL["Pipeline\npipeline.ts"]
         PE["Policy Engine\npackages/policy"]
+        OS["Output Security\noutput-security.ts\n(ADR-0009)"]
         AM["Approval Manager\napproval.ts"]
         AS["Audit Storage\nstorage.ts (SQLite)"]
         CA["Control API\napi/control.ts\n(Fastify, loopback)"]
@@ -46,8 +48,10 @@ flowchart LR
     PL --> PE
     PE -- "decision" --> PL
     PL -- "ALLOW / ALLOW_WITH_TRANSFORM" --> D
-    D -- "result" --> PL
-    PL -- "every terminal state" --> AS
+    D -- "raw result / error" --> PL
+    PL -- "sanitize before forwarding" --> OS
+    OS -- "sanitized result, or safe blocked error" --> PL
+    PL -- "every terminal state (result never persisted raw)" --> AS
     PL -- "REQUIRE_APPROVAL" --> AM
     AM --> AS
     CA -- reads/writes --> AS
@@ -63,6 +67,7 @@ sequenceDiagram
     participant Proxy as Stdio Proxy
     participant Pipe as Pipeline
     participant Policy as Policy Engine
+    participant OutSec as Output Security
     participant Audit as Audit Storage
     participant Down as Downstream Server
 
@@ -83,9 +88,19 @@ sequenceDiagram
         Pipe->>Audit: updateEventStatus(EXPIRED | CANCELLED) if not approved
     else ALLOW / ALLOW_WITH_TRANSFORM (or approved)
         Pipe->>Down: spawn stdio client, callTool(toolName, args)
-        Down-->>Pipe: result
-        Pipe->>Audit: updateEventStatus(SUCCEEDED | FAILED)
-        Pipe-->>Proxy: result
+        alt downstream succeeds
+            Down-->>Pipe: raw result
+            Pipe->>OutSec: sanitizeToolResult(result, output_security config)
+            Note over OutSec: text/structured/resource-text scanned;<br/>image/audio/blob passed through opaque
+            OutSec-->>Pipe: sanitized result (or safe blocked-result error)
+            Pipe->>Audit: updateEventStatus(SUCCEEDED, result_redacted/result_blocked/result_finding_count)
+            Pipe-->>Proxy: sanitized result — the raw result is never persisted, in either mode
+        else downstream throws
+            Down-->>Pipe: raw error
+            Pipe->>Pipe: sanitizeErrorMessage(err, source=downstream) — never logged/stored raw
+            Pipe->>Audit: updateEventStatus(FAILED, execution_error=sanitized, error_redacted)
+            Pipe-->>Proxy: {isError: true, text: "[AgentGate] " + sanitized execution_error}
+        end
     end
 
     Proxy-->>Agent: MCP response
@@ -136,6 +151,9 @@ erDiagram
         int duration_ms
         int arguments_redacted
         int result_redacted
+        int result_blocked
+        int result_finding_count
+        int error_redacted
     }
     audit_lifecycle_records {
         text record_id PK
@@ -150,6 +168,10 @@ erDiagram
         int execution_succeeded
         text execution_error
         int duration_ms
+        int result_redacted
+        int result_blocked
+        int result_finding_count
+        int error_redacted
     }
     approvals {
         text id PK
@@ -171,13 +193,53 @@ erDiagram
 - `audit_events` is a **mutable projection** — `UPDATE`d in place so the API can cheaply read "the current state of
   event X" — but every state transition is *also* appended as an immutable row in `audit_lifecycle_records`
   (`storage.ts` `appendLifecycleRecord()`), which is where the actual append-only guarantee lives.
-- Each lifecycle record's `record_hash` is `sha256(canonicalize({record_id, event_id, sequence_number,
-  previous_record_hash, created_at, status, decision_type, execution_succeeded, execution_error, duration_ms,
-  agent_session_id, tool, normalized_arguments}))`, where `canonicalize()` recursively sorts object keys before
-  stringifying so the hash is stable regardless of JS property-insertion order.
+- **Canonical payload versioning (ADR-0009).** Every lifecycle record stores the `canonical_payload_version` used
+  to compute its own `record_hash`:
+  - `'1'` (Milestone 1/2): `sha256(canonicalize({record_id, event_id, sequence_number, previous_record_hash,
+    created_at, status, decision_type, execution_succeeded, execution_error, duration_ms, agent_session_id, tool,
+    normalized_arguments}))`.
+  - `'2'` (Milestone 3, current — every new record is written this way): the same payload plus
+    `{result_redacted, result_blocked, result_finding_count, error_redacted}`.
+  `canonicalize()` recursively sorts object keys before stringifying so the hash is stable regardless of JS
+  property-insertion order. Adding the new fields to a *new* version rather than silently changing what `'1'`
+  means is what lets a database created before this migration keep verifying correctly afterward.
 - `AuditStorage.verifyChain()` re-walks every `audit_lifecycle_records` row in `sequence_number` order, checks the
-  sequence has no gaps, recomputes each hash from the row's own data plus the *stored* `previous_record_hash`, and
-  fails on the first mismatch. This is what `agentgate audit verify` and the demo call.
+  sequence has no gaps, reconstructs the canonical payload **using that row's own stored `canonical_payload_version`**
+  (`buildCanonicalPayload()`), recomputes the hash, and fails on the first mismatch — so a chain that began under
+  `'1'` and continues under `'2'` after an upgrade verifies correctly across the boundary, and tampering with a
+  `'2'`-only field (e.g. flipping `result_finding_count` directly in the database) is still detected. This is what
+  `agentgate audit verify` and both demos call.
+- **Schema migration**: the `result_blocked`/`result_finding_count`/`error_redacted` columns (plus
+  `result_redacted` on `audit_lifecycle_records`, which previously existed only on the `audit_events` projection)
+  are added via `ALTER TABLE ... ADD COLUMN ... DEFAULT 0`, appended as the *last* entry in `storage.ts`'s
+  `MIGRATIONS` array — never inserted earlier, since the migration runner resumes from the database's own
+  recorded `schema_version` (an array index), and inserting a migration mid-array would silently renumber every
+  migration after it and cause an already-upgraded database to skip the new one entirely. Existing rows default
+  to `0`/false, which is historically accurate — they genuinely predate this feature.
+
+## Output security configuration
+
+`output_security` (`packages/gateway/src/config/registry.ts`, `OutputSecuritySchema`) is a **gateway-level**
+config block, deliberately separate from policy rules — it is not a per-rule `allow_with_transform` variant, and
+applies uniformly to every downstream result regardless of which policy rule allowed the call:
+
+```yaml
+output_security:
+  mode: redact            # redact | block
+  opaque_content: allow_uninspected   # the only implemented value — see below
+  max_depth: 8             # object/array nesting actually inspected
+  max_text_bytes: 1000000  # per-string-leaf scan limit
+```
+
+- **`mode: redact`** (default): recognized secrets in inspectable content are replaced with `[REDACTED]`; the
+  result is still delivered.
+- **`mode: block`**: if a secret is detected, or a depth/size limit prevented full inspection of otherwise-
+  inspectable text/structured content, the entire result is replaced with a protocol-valid AgentGate error.
+  Opaque binary content and unrecognized content types never trigger a block on their own in either mode — see
+  [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md#output-security-gateway-level) for the full field reference
+  and worked examples.
+- Every setting is Zod-validated; `loadGatewayConfig()` rejects a malformed `output_security` block the same way
+  it rejects any other invalid config field.
 
 ## Trust boundaries
 
@@ -240,8 +302,10 @@ in browser history/logs, since it must be a query parameter).
   `MALFORMED_POLICY` decision produced for this path today, despite `ReasonCode` defining one. Documented as a
   known gap in [`docs/THREAT_MODEL.md`](THREAT_MODEL.md).
 - **Downstream server unreachable/crashes**: `executeDownstream()` catches the error and the event is recorded as
-  `FAILED` with the (untrusted, unredacted-by-default) error message — see
-  [`docs/THREAT_MODEL.md`](THREAT_MODEL.md#log-and-audit-poisoning) for why that message is not currently secret-scanned.
+  `FAILED` with a sanitized error message — `sanitizeErrorMessage()` (`packages/policy/src/output-sanitization.ts`,
+  ADR-0009) redacts recognized secret patterns, bounds the length, and normalizes control characters *before* the
+  message is ever assigned to `execution_error`, so the untrusted downstream error never reaches storage/logs raw.
+  See [`docs/THREAT_MODEL.md`](THREAT_MODEL.md#log-and-audit-poisoning) for what this does and does not cover.
 - **No downstream server configured for a tool**: recorded as `FAILED` with an explicit error, not silently
   dropped.
 - **Approval never answered**: expires at TTL, recorded as `EXPIRED`, single background sweep
@@ -258,7 +322,12 @@ in browser history/logs, since it must be a query parameter).
   [Protocol limitations](#protocol-limitations)).
 - **New policy match fields**: add to `PolicyRuleSchema` (`packages/policy/src/schema.ts`) and to `ruleMatches()`
   (`packages/policy/src/engine.ts`); both are small, well-isolated functions.
-- **New secret pattern**: append a `RegExp` to `SECRET_PATTERNS` in `packages/policy/src/transformation.ts`.
+- **New secret pattern**: append a `RegExp` to `SECRET_PATTERNS` in `packages/policy/src/transformation.ts` — this
+  single list backs inbound-argument redaction, outbound-result sanitization, and error sanitization, so a new
+  pattern strengthens all three at once (ADR-0009).
+- **A bounded, type-aware binary scanner**: `sanitizeToolResult()` (`packages/gateway/src/output-security.ts`)
+  currently treats all `image`/`audio`/`resource.blob` content as opaque; a future scanner would plug in where
+  those content-block cases are handled, and `output_security.opaque_content` would gain a second valid value.
 - **New Control API endpoint**: add a route in `buildControlApi()`; the `onRequest` hook already applies
   Host/Origin/token checks to every route registered afterward.
 
