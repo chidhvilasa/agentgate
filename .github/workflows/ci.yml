@@ -63,6 +63,9 @@ jobs:
       - name: Downstream-result secret sanitization demo (outbound, ADR-0009)
         run: node examples/downstream-secret-result/demo.mjs
 
+      - name: Policy-drift Safe Replay demo (ADR-0010)
+        run: node examples/policy-drift-replay/demo.mjs
+
       - name: Verify no whitespace/hygiene errors
         run: git diff --check
 
@@ -112,6 +115,9 @@ jobs:
 
       - name: Downstream-result secret sanitization demo (outbound, ADR-0009)
         run: node examples/downstream-secret-result/demo.mjs
+
+      - name: Policy-drift Safe Replay demo (ADR-0010)
+        run: node examples/policy-drift-replay/demo.mjs
 
       - name: Verify no whitespace/hygiene errors
         run: git diff --check

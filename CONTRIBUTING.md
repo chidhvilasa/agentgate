@@ -35,6 +35,7 @@ pnpm run lint
 pnpm run test
 node examples/secret-exfiltration/demo.mjs
 node examples/downstream-secret-result/demo.mjs
+node examples/policy-drift-replay/demo.mjs
 git diff --check
 ```
 
