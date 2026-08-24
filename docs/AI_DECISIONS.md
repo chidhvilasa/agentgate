@@ -1440,3 +1440,36 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Unresolved questions: none blocking.
 - Exact next action: Phase 10 — Graphify re-index and verification queries covering the new onboarding CLI
   paths.
+
+### 2026-08-25 — Milestone 5, Phase 10 (Graphify re-index and verification)
+
+- Prompt objective: re-index with Graphify, query the new onboarding CLI paths, verify shared config parsing
+  reaches the production loader, verify doctor/integrate never reach downstream execution, verify smoke-test
+  reaches only its internal fixture, confirm every finding against source before acting on it.
+- Continuity check: confirmed local HEAD `7b8612c` with a clean tree before starting.
+- Implementation completed: `graphify update .` → 903→1017 nodes, 1135→1322 edges, 54→69 communities. One
+  orientation query correctly surfaced every real function across all five onboarding modules. Four path
+  queries, all verified against real source (`grep -n "^import"` on each file in question) before being
+  trusted: `configValidate.ts`/`doctor.ts` → `loadGatewayConfig()` both real 1-hop paths, confirming neither
+  duplicates config-parsing logic; `doctor.ts`/`integrate.ts` → `executeDownstream()`/`runPipeline()` all
+  genuinely absent (a true negative this time, not the misleading file-level-granularity artifact Milestone 4
+  found for `replay.ts`, because neither file imports anything at all from `pipeline.ts`);
+  `smokeTest.ts` → `runPipeline()` a real, expected 1-hop path (smoke-test legitimately calls it), confirmed
+  safe by reading `smokeTest.ts`'s own `GatewayConfig` construction directly — its one `servers` entry always
+  points at the internal `fixtureServerPath()`, never anything user-supplied. `docs/GRAPHIFY_VERIFICATION.md`
+  updated with a new dated section and refreshed running counts/limitations wording.
+- Files materially changed: `docs/GRAPHIFY_VERIFICATION.md`. `graphify-out/` remains gitignored, confirmed not
+  staged via `git status --short` before committing.
+- Commands actually executed and their actual results: `graphify update .`; one `graphify query`; four
+  `graphify path` invocations (listed above); `grep -n "^import"` on `doctor.ts`, `configValidate.ts`,
+  `integrate.ts`, `smokeTest.ts` to verify/refute each path result against real source. `pnpm run build`/`lint`/
+  `test` re-confirmed clean (206 tests, 2 skipped) after the doc-only change. Committed as `d530d69 docs: record
+  Milestone 5 Graphify re-index and query verification`.
+- Verification result: PASS — every required query was run and every finding checked against source before
+  being trusted or written down; no code or claim was changed based on a graph result alone.
+- Known limitations / follow-up risk: none new. Phase 11 (CI matrix — largely already satisfied by the
+  packed-install step added in Phase 1; a final confirmation pass remains), Phase 12 (full/clean-room
+  verification), and Phase 13 (final commits/push/CI) have not started.
+- Unresolved questions: none blocking.
+- Exact next action: Phase 11/12 — confirm CI coverage for every new command, then run the complete local
+  verification gate followed by a clean-room user journey and clean-clone verification.
