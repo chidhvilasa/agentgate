@@ -218,15 +218,53 @@ Shortest path (2 hops):
 Accurate: `pipeline.ts` imports `sanitizeToolResult` from `output-security.ts` and the `AuditStorage` type from
 `storage.ts`, exactly as the path states.
 
+## Milestone 4 incremental update (2026-08-24) — Safe Replay
+
+After implementing Safe Replay (ADR-0010), `graphify update .` was re-run:
+
+```text
+$ graphify update .
+Re-extracting code files in . (no LLM needed)...
+[graphify watch] backed up curated graph (5 files) -> 2026-08-24/
+[graphify watch] Rebuilt: 903 nodes, 1135 edges, 54 communities
+[graphify watch] graph.json, graph.html and GRAPH_REPORT.md updated in graphify-out
+```
+
+813 → 903 nodes and 987 → 1135 edges (the Milestone 3 baseline recorded above), reflecting the new
+`packages/gateway/src/replay.ts`, `packages/policy/src/digest.ts`, the four new replay test files, the new
+`SafeReplayCard` component, and the new `examples/policy-drift-replay/` demo.
+
+**Orientation query** (all outputs cross-checked against source):
+
+| Question | Result |
+|---|---|
+| *How does the Safe Replay API route reach the policy engine?* | Directly useful, correctly scoped: surfaced `replay.ts`, `evaluateHistoricalEvent()`, `buildEvaluationInput()`, `assertReplayable()`, `boundedLimitation()`, `control.ts`, `cli.ts`, `engine.ts`, `evaluate()`, `normalizePath()`, `ruleMatches()`, `EvaluationInput`, and the new `ReplayComparison`/`ReplayDecisionSummary`/`ReplayCurrentDecisionSummary` types — a materially smaller, more targeted result set than reading `pipeline.ts`/`replay.ts`/`engine.ts` in full would require, confirming the tool's stated value proposition for this codebase. |
+
+**Path tests** (all cross-checked against source, both confirming and disconfirming results reported honestly):
+
+1. `graphify path "control.ts" "evaluateHistoricalEvent"` → **1 hop**, `control.ts --imports--> evaluateHistoricalEvent()`. Accurate — the Control API route directly calls this function.
+2. `graphify path "EventDetail.tsx" "control.ts"` (and `--undirected`) → **no path**. Consistent with the Milestone 3 finding: Control Center and the gateway communicate only over HTTP, no static edge.
+3. `graphify path "replay.ts" "executeDownstream"` → reported a **2-hop path**: `replay.ts --imports_from--> pipeline.ts --contains--> executeDownstream()`. Likewise `graphify path "replay.ts" "ApprovalManager"` → `replay.ts --imports_from--> pipeline.ts --imports--> ApprovalManager`. **These are misleading at face value and were verified against source before being trusted**: `grep -n "^import" packages/gateway/src/replay.ts` shows `replay.ts`'s only relative import is `import { extractPrimaryPath, extractCommand, extractHost } from './pipeline.js'` — never `executeDownstream` or `ApprovalManager`. Graphify's `imports_from`/`contains` edges are **file-level**, not per-named-export: it records only "this file imports *something* from that file," and separately "that file *contains* this symbol," which composes into a misleading transitive "path" whenever the source file happens to also contain unrelated, non-imported symbols. **This is a real, newly-confirmed limitation of the graph's granularity, not evidence against the no-execution invariant** — the actual proof that `replay.ts` cannot reach `executeDownstream()` or `ApprovalManager` is the dedicated structural test (`packages/gateway/tests/replay-no-execution.test.ts`), which parses only the file's real `import` statement lines, not file-level graph edges. **No code or claim was changed based on the graph's path result** — it was checked against source first, exactly as this document's own methodology requires, and found to be a graph limitation rather than an actual connection.
+4. `graphify path "replay.ts" "evaluate()" --undirected` → **no path found**, despite `replay.ts` genuinely importing `evaluate` from `@agentgate/policy` (`import { evaluate, normalizePath, computePolicyDigest, ... } from '@agentgate/policy'`). Sanity-checked against `pipeline.ts`, which imports `evaluate` the identical way and *also* shows no path — confirming this is a **general Graphify limitation with cross-workspace-package imports** (`@agentgate/policy`, a pnpm workspace alias resolved via package name, not a relative path), not specific to `replay.ts` or a regression. The AST extractor evidently does not resolve package-name imports into graph edges the way it resolves relative (`./pipeline.js`-style) imports. This is a new, distinct limitation from the already-documented frontend/backend HTTP-boundary gap (#2 above) — recorded here as its own finding since it applies within a single Node process, not just across a network boundary.
+
+**Net assessment for the "no-execution separation" requirement**: Graphify's path queries alone are **not** sufficient to prove or disprove the no-execution invariant, for two independent reasons found this session (file-level edge granularity producing false-positive-looking paths; no edges at all for cross-package imports producing false-negative-looking gaps). The actual, trustworthy proof of separation is the dedicated automated test that reads `replay.ts`'s real import statements plus an executable fixture-counter test — both already relied upon as the actual evidence in `docs/VERIFICATION.md` and `docs/AI_DECISIONS.md` (ADR-0010), never the graph. Graphify remains valuable here for *orientation* (query #1 above) and for confirming *known* architectural boundaries (#2), just not as a source of truth for a fine-grained security guarantee.
+
 ## Conclusion
 
 Graphify is genuinely functional against AgentGate: it builds a graph from this repository in seconds with no
-API key (511 nodes at Milestone 1 → 702 at the end of Milestone 2 → 813 after Milestone 3), its god-node and
-surprising-connection analysis independently rediscovers the real architectural hubs, targeted queries
-consistently return directly useful and source-accurate answers or vocabulary, `path` produces correct traces
-for anything actually connected in source, and incremental `update` calls after further code changes (now
-exercised three times across two milestones) reliably reflect those changes. Its clearest limitation, confirmed
-again this milestone, is that it cannot trace a relationship that has no static source-level edge — a frontend/
-backend HTTP boundary, in this case — which is an accurate reflection of the codebase, not a tool defect. It
-remains adopted as **optional local developer tooling** (see `docs/DEVELOPMENT.md`), not a build or CI
-dependency.
+API key (511 nodes at Milestone 1 → 702 at the end of Milestone 2 → 813 after Milestone 3 → 903 after Milestone
+4), its god-node and surprising-connection analysis independently rediscovers the real architectural hubs,
+targeted queries consistently return directly useful and source-accurate vocabulary for orientation, `path`
+produces correct traces for anything actually connected by a relative-import edge in source, and incremental
+`update` calls after further code changes (now exercised four times across three milestones) reliably reflect
+those changes. Its limitations, confirmed and *extended* this milestone: it cannot trace a relationship with no
+static source-level edge at all (a frontend/backend HTTP boundary, confirmed again); its `imports_from`/`contains`
+edges are file-level, not per-named-export, which can produce a misleading transitive "path" between a file and
+a symbol the importing file never actually imports (newly confirmed this milestone, always verified against
+source before being trusted); and it does not resolve cross-workspace-package (`@agentgate/policy`-style) import
+edges the way it resolves relative imports (also newly confirmed this milestone). None of these are tool defects
+in the sense of Graphify malfunctioning — they are the accurate behavior of an AST-only, no-LLM-required tool,
+and every finding in this document was checked against real source before being trusted or acted on. It remains
+adopted as **optional local developer tooling** (see `docs/DEVELOPMENT.md`), not a build or CI dependency, and
+specifically **not** a substitute for the executable tests that actually prove Safe Replay's no-execution
+invariant.
