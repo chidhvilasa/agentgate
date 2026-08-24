@@ -65,6 +65,28 @@ export function buildControlApi(opts: {
 
   const app = Fastify({ logger: false });
 
+  // Fastify's built-in JSON body parser rejects a genuinely empty body sent
+  // with `Content-Type: application/json` (FST_ERR_CTP_EMPTY_JSON_BODY),
+  // which is exactly what a real browser fetch() with no body payload but a
+  // default JSON Content-Type header sends — the frontend's post() helper
+  // always sets this header. Several routes (deny, and now Safe Replay
+  // below) document an empty body as valid; this override treats an empty
+  // body as `{}` instead of a 400, without weakening JSON parsing for a
+  // non-empty, malformed body (which still throws normally).
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+    if (body === '') {
+      done(null, {});
+      return;
+    }
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (err) {
+      const parseError = err as Error & { statusCode?: number };
+      parseError.statusCode = 400; // malformed client input, not a server fault
+      done(parseError, undefined);
+    }
+  });
+
   app.register(cors, {
     origin: ['http://127.0.0.1:5173', 'http://localhost:5173'], // Vite dev server
     methods: ['GET', 'POST'],
@@ -263,7 +285,15 @@ export function buildControlApi(opts: {
           });
         })();
         inFlightReplays.set(eventId, pending);
-        void pending.finally(() => inFlightReplays.delete(eventId));
+        // `.finally()` returns a NEW promise that also rejects if `pending`
+        // does — the caller below already awaits/catches `pending` itself,
+        // but this derived cleanup chain needs its own rejection handling
+        // too, or Node reports it as a separate unhandled rejection. Using
+        // .then(onFulfilled, onRejected) with a no-op onRejected (rather
+        // than a further .catch()) means the resulting promise never
+        // itself rejects, so nothing further needs to be caught.
+        const cleanup = () => inFlightReplays.delete(eventId);
+        void pending.then(cleanup, cleanup);
       }
 
       try {
