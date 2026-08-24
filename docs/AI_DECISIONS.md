@@ -1351,3 +1351,48 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Unresolved questions: none blocking.
 - Exact next action: Phase 7 — startup/lifecycle hardening review and the Control Center `.main-content`
   clipping fix.
+
+### 2026-08-25 — Milestone 5, Phase 7 (startup usability and lifecycle hardening)
+
+- Prompt objective: review real first-run/shutdown behavior for high-impact friction and fix the documented
+  Control Center `.main-content` clipping defect.
+- Continuity check: confirmed local HEAD `bcdee82` with a clean tree before starting.
+- Findings: `server.ts` had **no signal handling at all** — `grep -n "SIGINT\|SIGTERM\|process.on"` across the
+  entire gateway `src/` returned nothing before this session. A Ctrl+C or `kill` simply terminated the process
+  with no cleanup of the Fastify listener, SSE connections, or the approval-expiry interval. Separately, the
+  `.main-content` clipping bug documented as a known limitation in Milestone 4's Phase 5 session log (a flex
+  column with `overflow-y:auto` whose `.card` children could shrink below their content height and then be
+  clipped by the card's own `overflow:hidden`) was still present and unfixed.
+- Implementation completed: added idempotent SIGINT/SIGTERM handlers to `startGateway()` that close the Control
+  API, destroy the `ApprovalManager`, and close the audit database before `process.exit(0)`. Fixed the clipping
+  bug with `flex-shrink: 0` on `.card` and `.page-header` — the standard fix for a flex column whose children
+  must never shrink below content size when the container is meant to scroll instead.
+- New `packages/gateway/tests/lifecycle.test.ts` (4 tests, 2 platform-skipped on Windows): spawns the real
+  compiled CLI. **Real, verified platform limitation found while writing this test**: Node's
+  `child_process.kill('SIGINT'/'SIGTERM')` unconditionally terminates a child process on Windows regardless of
+  any registered handler — a documented Node/Windows behavior, confirmed directly (the test failed with
+  `exit.code: null` instead of `0` on this Windows dev machine, consistent with the process being force-killed
+  rather than gracefully exiting) before working around it, not silently ignored. The two behavioral graceful-
+  shutdown assertions are POSIX-only (`it.skipIf(process.platform === 'win32')`); a third, platform-agnostic
+  structural test confirms the handler code is present in source regardless of platform; a fourth test starts
+  two gateways on the same control port and confirms the second fails with a clear `EADDRINUSE`-shaped error
+  while the first process is completely unaffected.
+- Files materially changed: `packages/gateway/src/server.ts`, `apps/control-center/src/index.css`,
+  `packages/gateway/tests/lifecycle.test.ts` (new).
+- Commands actually executed and their actual results: `pnpm run build` (clean), `pnpm run lint` (0 errors —
+  found and fixed 2 real `no-unsafe-call` errors on untyped stream-data callback parameters while writing the
+  new test, before this ledger entry), `pnpm run test` — **206 tests, 2 correctly skipped on this platform**
+  (52 policy + 16 control-center + 138 gateway [136 prior + 4 new, 2 skipped]), zero regressions; all three
+  demos re-run and passing. Committed as `7b12420 fix(lifecycle): graceful shutdown on SIGINT/SIGTERM; fix
+  Control Center card clipping`.
+- Verification result: PASS for the lifecycle behavior actually exercisable on this platform and by structural
+  check on Windows; the clipping CSS fix is code-reviewed as correct against the diagnosed root cause but
+  **not yet visually re-verified in a real browser** — that happens in Phase 9 (screenshots), where the fixed
+  Event Detail/Safe Replay page will be captured and inspected.
+- Known limitations / follow-up risk: the POSIX-only behavioral SIGINT/SIGTERM tests will only actually run on
+  the Ubuntu CI jobs, not the Windows one (by design, given the platform limitation) — this is the one place in
+  this milestone's test suite where full behavioral coverage genuinely differs by OS, stated plainly. The
+  clipping fix's visual correctness is pending Phase 9's browser verification.
+- Unresolved questions: none blocking.
+- Exact next action: Phase 8 — documentation rewrite (README, DEVELOPMENT, TROUBLESHOOTING, ARCHITECTURE,
+  THREAT_MODEL, VERIFICATION, POLICY_REFERENCE, CHANGELOG).
