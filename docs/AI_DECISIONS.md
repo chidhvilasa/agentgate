@@ -1026,3 +1026,59 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Exact next action: Phase 7 — full local verification gates (frozen install, build, lint, complete test suite,
   all three demos, audit/replay chain verification CLI, exact CI secret scan, `git diff --check`), then
   clean-clone verification in a fresh temp directory at the final candidate commit.
+
+### 2026-08-24 — Safe Replay Completion, Phase 7 (full verification gates + clean-clone)
+
+- Prompt objective: run the complete local verification gate against the working tree at its current HEAD, then
+  repeat the equivalent gate against an isolated clean clone at the exact same commit, per Phase 7 of the
+  governing prompt. Do not substitute a dirty-tree pass for clean-clone verification.
+- Continuity check: re-read ADR-0010 and the Phase 1–6 session-log entries above before starting; confirmed
+  local HEAD was `9780db6` (Phase 6 Graphify verification + ledger entry) with `git status --short` showing only
+  the intentionally-untracked `.claude/` and `CLAUDE.md` before making any change.
+- Decisions added or changed: none.
+- Implementation completed / commands actually executed and their actual results (working tree, at `9780db6`):
+  - `pnpm install --frozen-lockfile` → `Already up to date`.
+  - `pnpm run build` → all four buildable packages (`protocol`, `policy`, `control-center`, `gateway`) built
+    clean.
+  - `pnpm run lint` → 0 errors, 2 pre-existing unrelated `no-explicit-any` warnings (unchanged since Phase 1).
+  - `pnpm run test` → **154 tests passing** (52 `packages/policy` + 16 `apps/control-center` + 86
+    `packages/gateway`), 0 failures.
+  - `node examples/secret-exfiltration/demo.mjs` → exit 0, all assertions PASS.
+  - `node examples/downstream-secret-result/demo.mjs` → exit 0, all assertions PASS.
+  - `node examples/policy-drift-replay/demo.mjs` → exit 0, all assertions PASS (this demo itself invokes
+    `agentgate audit verify` as one of its steps, covering the audit/replay chain verification CLI gate with
+    real assertions on both chains' exit code and message content, not merely "ran without crashing").
+  - The exact CI tracked-file secret-scan pattern from `security.yml` run manually against the full tracked
+    tree → `No credential-shaped strings found outside known placeholders.`
+  - `git diff --check` → clean, exit 0.
+  - `git status --short` → only `.claude/` and `CLAUDE.md` untracked, nothing else.
+- **Clean-clone verification**: `git clone` of the local repository (not a working-directory copy) into an
+  isolated temp directory at commit `9780db6`, confirmed via `git log -1`/`git status --short` inside the
+  clone before running anything. Full gate repeated inside the clone:
+  - `pnpm install --frozen-lockfile` → succeeded (448 packages resolved fresh into the clone's own
+    `node_modules`, none reused from the main working tree's install).
+  - `pnpm run build` → clean, same output as the working-tree build.
+  - `pnpm run lint` → same 0 errors / 2 pre-existing warnings, now reported against clone-local paths.
+  - `pnpm run test` → **154 tests passing**, identical count and composition to the working-tree run.
+  - All three demos → exit 0 each, inside the clone.
+  - **No dependency on local artifacts, verified directly, not assumed**: `ls .claude CLAUDE.md graphify-out`
+    inside the clone reported "No such file or directory" for all three — they were never committed, so a fresh
+    clone genuinely does not have them, and every gate above still passed without them. This is direct evidence
+    (not an inference) that nothing in this milestone's shipped code, tests, or demos depends on this session's
+    local `.claude/`/`CLAUDE.md`/Graphify output, or on any pre-existing database/runtime token/dev-only
+    environment variable — the clone had none of those and everything still worked.
+  - `git diff --check` inside the clone → clean.
+  - Clone directory removed after verification; confirmed the main working tree (`C:\Users\chidh\Downloads\
+    agentgate`) was untouched throughout (`git status --short` before and after this phase identical: only
+    `.claude/`/`CLAUDE.md` untracked).
+- Files materially changed: none — this phase is verification-only, no commit was made from it.
+- Verification result: **PASS on every Phase 7 item**, both in the working tree and, independently, in an
+  isolated clean clone at the exact same commit. This satisfies the explicit instruction not to substitute a
+  dirty-tree pass for clean-clone verification — both were actually run, separately, with their own commands and
+  their own observed output recorded above.
+- Known limitations / follow-up risk: none new. Final commits/push/CI observation (Phase 8) have not started;
+  the working tree's current HEAD (`9780db6`) is the publication candidate commit unless further work is added
+  before Phase 8's push.
+- Unresolved questions: none blocking.
+- Exact next action: Phase 8 — push `main` to `origin` (no force), observe GitHub Actions CI/security workflows
+  to completion for the pushed HEAD, and produce the final required report.
