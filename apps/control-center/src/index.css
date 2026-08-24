@@ -236,6 +236,7 @@ input, select, textarea { font: inherit; }
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  flex-shrink: 0; /* see .card's comment above — same fix, same reason */
 }
 
 .page-title {
@@ -257,6 +258,15 @@ input, select, textarea { font: inherit; }
   border: 1px solid var(--bg-border);
   border-radius: var(--radius-lg);
   overflow: hidden;
+  /* .main-content is a flex column with overflow-y:auto; without this,
+     flex's default (flex-shrink:1, min-height:auto resolving to a small
+     content-based floor) lets a tall page's cards shrink below their real
+     content height instead of the container actually scrolling — the
+     shrunk-and-then-clipped-by-this-very-overflow:hidden result was a
+     real, user-visible bug on pages with several cards (e.g. Event Detail
+     with the Safe Replay card). flex-shrink:0 keeps every card at its
+     natural height, so overflow-y:auto on the parent does what it says. */
+  flex-shrink: 0;
 }
 
 .card-header {

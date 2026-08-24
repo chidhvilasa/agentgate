@@ -4,6 +4,7 @@ import { ApprovalManager } from './approval.js';
 import { buildControlApi, LOCAL_AUTH_TOKEN } from './api/control.js';
 import { startStdioProxy } from './transport/stdio.js';
 import { loadGatewayConfig } from './config/registry.js';
+import { sanitizeErrorMessage } from '@agentgate/policy';
 import type { AuditEvent, Approval } from '@agentgate/protocol';
 import type { PipelineContext } from './pipeline.js';
 
@@ -48,6 +49,36 @@ export async function startGateway(configPath: string): Promise<void> {
   const { LOCAL_AUTH_TOKEN: token } = await import('./api/control.js');
   console.error(`[agentgate] Auth token: ${token}`);
   console.error(`[agentgate] Control Center: http://127.0.0.1:${config.control_port}`);
+
+  // Milestone 5: clean shutdown on Ctrl+C / termination. Without this,
+  // SIGINT/SIGTERM killed the process with no handler at all — Fastify's
+  // listener, any open SSE connections, and the approval-expiry interval
+  // were simply abandoned rather than closed. `guard` makes this
+  // idempotent (both signals firing, or the same signal twice in quick
+  // succession, still shuts down exactly once). better-sqlite3's WAL mode
+  // is already crash-safe on its own — this is about closing cleanly, not
+  // about a real corruption risk from the previous behavior.
+  let shuttingDown = false;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.error(`[agentgate] Received ${signal}, shutting down...`);
+    void controlApp
+      .close()
+      .catch((err) => console.error('[agentgate] Error closing Control API:', sanitizeErrorMessage(err, { source: 'internal' }).message))
+      .finally(() => {
+        approvalManager.destroy();
+        try {
+          storage.close();
+        } catch (err) {
+          console.error('[agentgate] Error closing database:', sanitizeErrorMessage(err, { source: 'internal' }).message);
+        }
+        console.error('[agentgate] Shutdown complete.');
+        process.exit(0);
+      });
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 
   // Start the stdio proxy (blocks until stdin closes)
   await startStdioProxy(ctx);
