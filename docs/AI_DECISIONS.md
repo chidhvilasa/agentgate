@@ -5,11 +5,11 @@ decisions across AI-agent sessions. Verify entries against the repository.
 
 ## Project State
 
-- Current phase: Milestone 3 — Bidirectional Secret Safety and Error Sanitization. Implementation, tests, docs,
-  and Control Center UI are complete locally; final local verification, clean-clone verification, and public
-  push/CI observation are recorded in the 2026-08-24 Milestone 3 session log below — check that log's own
-  "Exact next action" for what remains, since this Project State block cannot describe work that happens after
-  it (this entry does not try to record the hash of the commit that contains it).
+- Current phase: Milestone 3 — Bidirectional Secret Safety and Error Sanitization — **COMPLETE and publicly
+  verified** (implementation, tests, docs, Control Center UI, clean-clone verification, and GitHub CI/Security
+  all green on the pushed HEAD). Full detail, including one CI failure found and fixed mid-session, is in the
+  2026-08-24 Milestone 3 session log and its follow-up note below — this summary line does not try to record the
+  hash of the commit that contains it; check that log for the exact final commit.
 - Milestone 2 (Documentation, CI, Graphify verification, visual proof, public launch) is **COMPLETE and publicly
   verified** — reconciled against live GitHub state at the start of the Milestone 3 session (not merely the prior
   report): public repo exists, default branch `main`, CI run `32660796091` PASS, Security run `32660796111` PASS.
@@ -505,7 +505,30 @@ decisions across AI-agent sessions. Verify entries against the repository.
   support remain deferred (ADR-0005); Graphify cannot trace a relationship with no static source-level edge
   (confirmed again this session, not new).
 - Unresolved questions: none blocking.
-- Exact next action: run the complete final local gate on the final committed candidate, perform clean-clone
-  verification, push `main` to `origin` (non-force), and observe GitHub Actions CI/security results for the
-  pushed HEAD — recorded in this session's final report and, if anything materially changed, a short follow-up
-  ledger note after CI completes.
+- Exact next action (superseded by the follow-up note immediately below — kept for chronology): run the
+  complete final local gate on the final committed candidate, perform clean-clone verification, push `main` to
+  `origin` (non-force), and observe GitHub Actions CI/security results for the pushed HEAD.
+
+#### Follow-up (same session, after push and CI observation)
+
+- Final local gate (94 tests: 52 policy + 8 control-center + 34 gateway), clean-clone verification (isolated temp
+  clone, full install/build/lint/test/both-demos/`agentgate audit verify`, zero residue), and the tracked-file
+  secret scan (matching `security.yml` exactly) all passed before the first push of this session's work
+  (commit `934f495`).
+- **First push (`934f495`) revealed a real CI failure**, correctly caught by cross-platform/cross-Node-version
+  testing: `build-test (ubuntu, node 20)` failed at the `Test` step with
+  `TypeError: webidl.util.markAsUncloneable is not a function` inside `jsdom@30.0.1`'s bundled `undici`, while
+  `node 22` and `windows` passed. Root cause confirmed by inspecting `jsdom@30.0.1`'s own `package.json`:
+  `engines.node: "^22.22.2 || ^24.15.0 || >=26.0.0"` — it does not support Node 20 at all, which is this
+  project's documented minimum/tested version. Fixed by pinning to `jsdom@29.1.1` (`engines.node: "^20.19.0 ||
+  ^22.13.0 || >=24.0.0"`, covers Node 20) — commit `6ef2dff`. This was a real, in-scope infrastructure defect,
+  not a security issue; no test was weakened or skipped to reach green.
+- Full local gate (build/lint/94 tests/both demos/`git diff --check`) re-verified passing after the fix, then
+  pushed. **GitHub Actions on the final pushed HEAD (`6ef2dff`)**: CI run `32692744299` — all 3 jobs
+  (ubuntu/node20, ubuntu/node22, windows/node22) **PASS**. Security run `32692744229` — all 3 jobs (dependency
+  audit, tracked-file secret scan, CodeQL) **PASS**. Repository metadata confirmed intact post-push (`main`
+  default branch, Apache-2.0 license detected, description unchanged).
+- Exact next action: none blocking. Future work, each as its own reviewed change with a fresh ADR only if it
+  changes a durable decision: a bounded, type-aware binary scanner for `output_security.opaque_content` (a
+  second value beyond `allow_uninspected`); the deferred replay endpoint; retention enforcement; rate limiting;
+  modern/HTTP-transport MCP support (ADR-0005).
