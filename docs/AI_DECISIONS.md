@@ -1396,3 +1396,47 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Unresolved questions: none blocking.
 - Exact next action: Phase 8 — documentation rewrite (README, DEVELOPMENT, TROUBLESHOOTING, ARCHITECTURE,
   THREAT_MODEL, VERIFICATION, POLICY_REFERENCE, CHANGELOG).
+
+### 2026-08-25 — Milestone 5, Phases 8-9 (documentation and visual proof)
+
+- Prompt objective: rewrite the top of the README for adoption, update every listed doc, and capture sanitized
+  visual proof of the new commands and the clipping fix.
+- Continuity check: confirmed local HEAD `7b12420`→`4cdf6c5` (Phase 7 commit + its ledger entry) with a clean
+  tree before starting.
+- Implementation completed: README rewritten (installation section with both verified methods, client-
+  integrations table with cited sources, platform/runtime support matrix backed by actual CI coverage, updated
+  CLI table/test count/uninstall instructions); `docs/ARCHITECTURE.md` (new component row + "Onboarding CLI"
+  section); `docs/THREAT_MODEL.md` (new "Onboarding CLI" threat section, 5 threats each with an implemented
+  mitigation, updated summary); `docs/DEVELOPMENT.md` (new "Installability" and "Onboarding CLI" sections,
+  updated release gates); `docs/TROUBLESHOOTING.md` (new doctor check-id table, two new entries);
+  `docs/VERIFICATION.md` (new Milestone 5 evidence table); `docs/POLICY_REFERENCE.md` (cross-reference to the
+  init-generated starter policy); `CHANGELOG.md` (new Milestone 5 section); `CONTRIBUTING.md`/
+  `.github/pull_request_template.md` (gate-command lists updated).
+  - **Visual capture**: added Playwright as a temporary root devDependency again (fully removed and reverted
+    afterward, confirmed via `git diff --stat` on `package.json`/`pnpm-lock.yaml` showing no output). Captured
+    four terminal-style renders of real, sanitized CLI output (`cli-init.png`, `cli-doctor.png`,
+    `cli-integrate.png`, `cli-smoke-test.png` — all command output paths replaced with `~/...` placeholders
+    before rendering, both the specific temp-project path used for the capture and, as a defense-in-depth
+    pass, the real repo root path and OS home directory generally, regardless of which specific check happened
+    to print one) and two real browser screenshots of the Event Detail/Safe Replay page proving the Phase 7
+    clipping fix, at a 1280×900 desktop and a 420×800 narrow viewport. Each screenshot's correctness was
+    verified programmatically before being trusted, not just visually: `card.scrollHeight <= card.clientHeight
+    + 2px` (i.e. nothing hidden by overflow) at both sizes, plus zero browser console errors at both sizes —
+    all inspected visually one more time before committing.
+- Files materially changed: README.md, `docs/{ARCHITECTURE,THREAT_MODEL,DEVELOPMENT,TROUBLESHOOTING,
+  VERIFICATION,POLICY_REFERENCE}.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `.github/pull_request_template.md`,
+  six new files under `docs/assets/`.
+- Commands actually executed and their actual results: `pnpm run build` (clean), `pnpm run lint` (0 errors,
+  same 2 pre-existing warnings), `pnpm run test` (206 tests, 2 correctly skipped, zero regressions), all three
+  demos re-run and passing, a targeted grep across every touched doc for "one command"/"zero-config"/"zero
+  configuration" found none. Committed as `60c54ae docs: document the onboarding CLI and add adoption
+  screenshots`.
+- Verification result: PASS — every listed doc updated with content backed by evidence already produced in
+  earlier phases (test counts, verified client sources, the packed-install script's real results, the real
+  browser measurements above), no stale "coming soon"/unverified claims introduced.
+- Known limitations / follow-up risk: none new. Graphify re-indexing (Phase 10), CI matrix confirmation (Phase
+  11 — largely already done via the packed-install CI step added in Phase 1, needs a final check), full/clean-
+  room verification (Phase 12), and final commits/push/CI observation (Phase 13) have not started.
+- Unresolved questions: none blocking.
+- Exact next action: Phase 10 — Graphify re-index and verification queries covering the new onboarding CLI
+  paths.
