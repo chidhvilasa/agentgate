@@ -1082,3 +1082,70 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Unresolved questions: none blocking.
 - Exact next action: Phase 8 — push `main` to `origin` (no force), observe GitHub Actions CI/security workflows
   to completion for the pushed HEAD, and produce the final required report.
+
+### 2026-08-24 — Safe Replay Completion, Phase 8 (commits, push, CI)
+
+- Prompt objective: push `main` to `origin` (no force), observe GitHub Actions CI/security workflows to
+  completion, fix any real failures via normal follow-up commits and re-verify, per Phase 8 of the governing
+  prompt.
+- Continuity check: re-read ADR-0010 and the Phase 1–7 session-log entries above before starting; confirmed
+  local HEAD was `f303972` with `git status --short` showing only the intentionally-untracked `.claude/`/
+  `CLAUDE.md`; `git fetch origin` confirmed `origin/main` (`e1c97a8`) was an ancestor of local HEAD (safe
+  fast-forward, no divergence to reconcile) before pushing.
+- Decisions added or changed: none.
+- Implementation completed:
+  - **First push**: `git push origin main` → `e1c97a8..f303972`. GitHub Actions triggered both `CI` (run
+    `32743526041`) and `Security` (run `32743525991`).
+  - **Security run `32743525991`: all 3 jobs PASS** (CodeQL, tracked-file secret scan, dependency audit).
+  - **CI run `32743526041` revealed a real, previously-undetected cross-platform defect**: `build-test
+    (windows, node 22)` passed, but both `build-test (ubuntu, node 20)` and `build-test (ubuntu, node 22)`
+    failed at the `Test` step — `tests/replay-api.test.ts > ... fails closed (500, sanitized) when the current
+    policy file is malformed`, asserting `AssertionError: expected '{"error":"Policy file \"/tmp/agentgat…'
+    not to contain '/tmp/agentgate-replay-api-hTSQOD/poli…'`. **Root cause, confirmed with a standalone
+    reproduction script comparing `loadPolicyFile()`'s raw error message against the exact `policyPath`
+    variable before writing any fix** (not guessed at): `loadPolicyFile()` embeds the raw absolute policy file
+    path verbatim in its error message by design (useful for local CLI/log debugging); this message was being
+    passed straight through to the Control API's `500` response body for a malformed current policy, on every
+    platform. The existing test's `expect(response.body).not.toContain(policyPath)` assertion had a
+    Windows-only blind spot that had let this slip through 7 phases of local `pnpm run test` runs on this
+    Windows machine: `JSON.stringify()` doubles each backslash in a Windows path when the error is JSON-encoded
+    into the HTTP response body, so the naive substring check never matched the escaped form and the test
+    passed *by accident*; on Linux, forward slashes need no such escaping, so the identical check correctly
+    caught the real leak and failed — cross-platform CI catching exactly the kind of defect it exists to catch.
+  - **Fix** (`packages/gateway/src/api/control.ts`): the replay route's `loadPolicyFile()` call is now wrapped
+    in its own `try/catch`. On failure, the real error (including the path) is logged locally via
+    `console.error` (stderr, never sent over the network — the operator's own machine, running their own local
+    tool) for genuine local debugging value, and a generic, path-free error (`'Could not load the current
+    policy file — it is missing or invalid. Check the gateway logs for details.'`) is thrown for the HTTP
+    response instead. This is the *only* call site changed — the CLI's own `agentgate replay` error output,
+    which already legitimately shows local paths in the operator's own terminal on their own machine, is
+    unaffected and unchanged; loadPolicyFile()'s underlying error format itself is unchanged, since it is
+    correctly useful everywhere else it is used (CLI, startup logs).
+  - Strengthened the test (`packages/gateway/tests/replay-api.test.ts`) to check both the raw path and its
+    JSON-escaped form (so this specific platform blind spot cannot recur silently), and to assert the exact
+    generic message.
+  - Full local gate re-run before the second push: `pnpm run build` (clean), `pnpm run lint` (0 errors, same 2
+    pre-existing unrelated warnings), `pnpm run test` (154 tests, all passing, including the corrected
+    assertion), all three demos re-run (all exit 0), `git diff --check` (clean).
+  - **Second push**: `git push origin main` → `f303972..7418e60`. GitHub Actions triggered both `CI` (run
+    `32744072456`) and `Security` (run `32744072250`) for the fix commit.
+  - **Security run `32744072250`: all 3 jobs PASS** (CodeQL, tracked-file secret scan, dependency audit).
+  - **CI run `32744072456`: all 3 jobs PASS** (`build-test (ubuntu, node 20)`, `build-test (ubuntu, node 22)`,
+    `build-test (windows, node 22)`) — every step, including the new policy-drift Safe Replay demo step, green
+    on all three platform/Node combinations.
+- Files materially changed: `packages/gateway/src/api/control.ts`, `packages/gateway/tests/replay-api.test.ts`.
+- Commands actually executed and their actual results: as itemized above (`gh run view`/`gh run watch` used to
+  observe both runs to actual completion, not assumed). Committed as `7418e60 fix(replay): never leak the local
+  policy file path in the API's malformed-policy error`.
+- Verification result: PASS — the final pushed remote `HEAD` (`7418e60`) has both `CI` and `Security` GitHub
+  Actions workflows green, confirmed by directly observing the completed run status for that exact commit, not
+  inferred from the local pass alone. This is the first time in this milestone's work that Ubuntu CI ran this
+  specific code path (all of Phases 1–7's local verification happened only on this Windows machine) — exactly
+  the scenario cross-platform CI exists to catch, and it did.
+- Known limitations / follow-up risk: none new. This defect is a useful reminder that this session's local
+  verification, while extensive, was single-platform (Windows) throughout Phases 1–7; the final authoritative
+  cross-platform check is always the pushed CI run, not the local one, which is exactly why this phase's
+  push-then-observe-then-fix-then-repush cycle exists and was followed exactly as specified rather than treating
+  the local Windows pass as sufficient on its own.
+- Unresolved questions: none blocking.
+- Exact next action: none — produce the final required report for this milestone.
