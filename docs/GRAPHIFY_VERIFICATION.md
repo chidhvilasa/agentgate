@@ -249,15 +249,67 @@ Re-extracting code files in . (no LLM needed)...
 
 **Net assessment for the "no-execution separation" requirement**: Graphify's path queries alone are **not** sufficient to prove or disprove the no-execution invariant, for two independent reasons found this session (file-level edge granularity producing false-positive-looking paths; no edges at all for cross-package imports producing false-negative-looking gaps). The actual, trustworthy proof of separation is the dedicated automated test that reads `replay.ts`'s real import statements plus an executable fixture-counter test — both already relied upon as the actual evidence in `docs/VERIFICATION.md` and `docs/AI_DECISIONS.md` (ADR-0010), never the graph. Graphify remains valuable here for *orientation* (query #1 above) and for confirming *known* architectural boundaries (#2), just not as a source of truth for a fine-grained security guarantee.
 
+## Milestone 5 incremental update (2026-08-25) — Onboarding CLI
+
+After implementing the onboarding CLI (`init`/`config validate`/`doctor`/`integrate`/`smoke-test`, ADR-0011),
+`graphify update .` was re-run:
+
+```text
+$ graphify update .
+Re-extracting code files in . (no LLM needed)...
+[graphify watch] Rebuilt: 1017 nodes, 1322 edges, 69 communities
+[graphify watch] graph.json, graph.html and GRAPH_REPORT.md updated in graphify-out
+```
+
+903 → 1017 nodes and 1135 → 1322 edges (the Milestone 4 baseline recorded above), reflecting the five new
+`packages/gateway/src/onboarding/*.ts` modules, the new fixture, `scripts/copy-assets.mjs`,
+`scripts/verify-packed-install.mjs`, and six new test files.
+
+**Orientation query** (cross-checked against source): *"how do the onboarding CLI commands init, config
+validate, doctor, integrate, and smoke-test work"* → correctly surfaced every real function in all five modules
+(`runInit`, `buildConfigTemplate`, `buildPolicyTemplate`, `validateConfigFile`, `runDoctor` and its dozen
+per-check helper functions, `buildIntegration`, `applyIntegration`, `runSmokeTest`, `fixtureServerPath`), plus
+the correct shared dependencies (`loadGatewayConfig`, `AuditStorage`, `runPipeline`, `readSchemaVersionReadOnly`)
+— a materially smaller, correctly-scoped result set versus reading all five files in full.
+
+**Path tests** (all cross-checked against source, per this document's established methodology):
+
+1. `graphify path "configValidate.ts" "loadGatewayConfig"` and `graphify path "doctor.ts" "loadGatewayConfig"`
+   → both **1 hop**, `--imports-->`. Confirmed accurate: `grep -n "^import"` on both files shows each genuinely
+   imports `loadGatewayConfig` from `../config/registry.js` directly — proving, not just claiming, that neither
+   command duplicates config-parsing logic (ADR-0011 point 3).
+2. `graphify path "doctor.ts" "executeDownstream"`, `graphify path "integrate.ts" "executeDownstream"`, and
+   `graphify path "doctor.ts" "runPipeline"` → **no path found** for all three (directed, and this time genuinely
+   absent even as a misleading file-level artifact, unlike the Milestone 4 `replay.ts`/`pipeline.ts` case —
+   because `doctor.ts` and `integrate.ts` import *nothing* from `pipeline.ts` at all, so there is no file-level
+   edge for a contained symbol to piggyback on). Confirmed accurate: both files' full import lists (checked via
+   `grep -n "^import"`) contain only Node builtins and this project's own non-execution modules.
+3. `graphify path "smokeTest.ts" "runPipeline"` → **1 hop**, `--imports-->` — a genuine, expected, positive
+   result: `smoke-test` *does* legitimately call `runPipeline()`, unlike `doctor`/`integrate`. What matters is
+   *what it's configured with*, which a static graph edge cannot show — confirmed by reading `smokeTest.ts`'s own
+   `GatewayConfig` construction directly: its one `servers` entry always points at `fixtureServerPath()`
+   (`packages/gateway/src/onboarding/smokeFixtureServer.mjs`), never a user-supplied path.
+4. `graphify path "smokeTest.ts" "fixtureServerPath"` → **1 hop**, `--contains-->`, accurate (it's a function
+   defined in the same file).
+
+**Net assessment**: this session's four path queries all produced results confirmed accurate against source —
+the two "no path" results genuinely reflect zero relevant imports (not the file-level-granularity false
+positive documented in Milestone 4), and the two "real path" results are legitimate, intended connections
+whose safety depends on *configuration* (verified by reading source), not on the mere existence of the call
+edge itself — exactly the same caveat this document has carried since Milestone 4's findings.
+
 ## Conclusion
 
 Graphify is genuinely functional against AgentGate: it builds a graph from this repository in seconds with no
 API key (511 nodes at Milestone 1 → 702 at the end of Milestone 2 → 813 after Milestone 3 → 903 after Milestone
-4), its god-node and surprising-connection analysis independently rediscovers the real architectural hubs,
-targeted queries consistently return directly useful and source-accurate vocabulary for orientation, `path`
-produces correct traces for anything actually connected by a relative-import edge in source, and incremental
-`update` calls after further code changes (now exercised four times across three milestones) reliably reflect
-those changes. Its limitations, confirmed and *extended* this milestone: it cannot trace a relationship with no
+4 → 1017 after Milestone 5), its god-node and surprising-connection analysis independently rediscovers the real
+architectural hubs, targeted queries consistently return directly useful and source-accurate vocabulary for
+orientation, `path` produces correct traces for anything actually connected by a relative-import edge in source,
+and incremental `update` calls after further code changes (now exercised five times across four milestones)
+reliably reflect those changes. Its limitations, confirmed in Milestone 4 and *not re-triggered* in Milestone 5
+(the new onboarding modules' import graphs happened not to exercise either false-positive/false-negative
+pattern — a useful data point in itself, not evidence the limitations went away): it cannot trace a relationship
+with no
 static source-level edge at all (a frontend/backend HTTP boundary, confirmed again); its `imports_from`/`contains`
 edges are file-level, not per-named-export, which can produce a misleading transitive "path" between a file and
 a symbol the importing file never actually imports (newly confirmed this milestone, always verified against
