@@ -143,7 +143,15 @@ rules:
       headers: { host: 'localhost', 'x-agentgate-token': LOCAL_AUTH_TOKEN },
     });
     expect(response.statusCode).toBe(500);
-    expect(response.body).not.toContain(policyPath); // no local path leakage beyond what's necessary
+    // No local path leakage beyond what's necessary — checked both as a raw
+    // substring and as its JSON-escaped form (JSON.stringify doubles
+    // backslashes in a Windows path, which would otherwise mask a real leak
+    // in this specific assertion on Windows but not on POSIX).
+    expect(response.body).not.toContain(policyPath);
+    expect(response.body).not.toContain(JSON.stringify(policyPath).slice(1, -1));
+    expect(response.json().error).toBe(
+      'Could not load the current policy file — it is missing or invalid. Check the gateway logs for details.'
+    );
   });
 
   it('rejects dry_run: false rather than silently ignoring it', async () => {

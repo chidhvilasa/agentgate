@@ -263,7 +263,20 @@ export function buildControlApi(opts: {
       let pending = inFlightReplays.get(eventId);
       if (!pending) {
         pending = (async () => {
-          const currentPolicy = loadPolicyFile(opts.policyPath);
+          let currentPolicy;
+          try {
+            currentPolicy = loadPolicyFile(opts.policyPath);
+          } catch (err) {
+            // loadPolicyFile()'s own error message embeds the raw local file
+            // path by design (useful for local CLI/log debugging, where it
+            // never leaves the machine). This is the one call site where that
+            // message would otherwise cross an HTTP response boundary to
+            // anyone holding the Control API token — log the real error
+            // locally (stderr, never sent over the network) and raise a
+            // generic, path-free error for the response instead.
+            console.error('[agentgate] Replay could not load the current policy:', err);
+            throw new Error('Could not load the current policy file — it is missing or invalid. Check the gateway logs for details.');
+          }
           const comparison = evaluateHistoricalEvent({ sourceEvent, currentPolicy });
           return opts.storage.insertReplayEvaluation({
             source_event_id: eventId,
