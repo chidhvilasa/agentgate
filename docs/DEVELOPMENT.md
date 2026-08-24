@@ -46,7 +46,7 @@ version); `apps/control-center` depends on `@agentgate/protocol` for shared type
 pnpm install --frozen-lockfile   # exact versions from pnpm-lock.yaml — use this, not `pnpm install`, in CI/scripts
 pnpm run build                   # tsc (protocol, policy, gateway) + tsc -b && vite build (control-center)
 pnpm run lint                    # eslint . — one root flat config, type-aware, covers every package + examples/
-pnpm run test                    # vitest run, in packages/policy and packages/gateway
+pnpm run test                    # vitest run, in packages/policy, packages/gateway, and apps/control-center
 ```
 
 `pnpm run lint` is a real gate — it exits non-zero on any lint error. It is deliberately **not** run recursively
@@ -71,17 +71,20 @@ token the UI should use via `localStorage.setItem('agentgate_token', '<token>')`
 To point an MCP client (e.g. Claude Code) at AgentGate instead of a downstream server directly, configure it to run
 `node <repo>/packages/gateway/dist/cli.js start <repo>/examples/agentgate.yml` as its MCP server command.
 
-## Using the attack demos safely
+## Using the demos safely
 
 ```sh
-node examples/secret-exfiltration/demo.mjs        # inbound: secret in tool-call arguments
-node examples/downstream-secret-result/demo.mjs   # outbound: secret in a downstream result AND error message
+node examples/secret-exfiltration/demo.mjs        # attack demo, inbound: secret in tool-call arguments
+node examples/downstream-secret-result/demo.mjs   # attack demo, outbound: secret in a downstream result AND error message
+node examples/policy-drift-replay/demo.mjs        # Safe Replay demo: policy drift detection, no execution (ADR-0010)
 ```
 
-Both are safe to run repeatedly and from any working directory: each writes its config, mock/fixture downstream
-server, and SQLite database into its own unique `os.tmpdir()` directory (never the repo root), closes every
-connection and child process it opens, and removes the temp directory in a `finally` block on both success and
-failure. Both use only well-known placeholder credentials (`AKIAIOSFODNN7EXAMPLE`) — never a real one.
+All three are safe to run repeatedly and from any working directory: each writes its config, mock/fixture
+downstream server, and SQLite database into its own unique `os.tmpdir()` directory (never the repo root), closes
+every connection and child process it opens, and removes the temp directory in a `finally` block on both success
+and failure. All three use only well-known placeholder credentials (`AKIAIOSFODNN7EXAMPLE`) — never a real one.
+The third demo is not an attack demo — it proves Safe Replay's policy-drift and no-execution behavior against a
+real historical event, not a blocked attack.
 
 ## Configuring output security
 
@@ -149,6 +152,33 @@ new hash-chained field yourself, follow the same pattern: bump `canonical_payloa
 change what an existing version number means, and add the new migration as the **last** entry in `MIGRATIONS`
 (inserting one earlier renumbers every migration after it and causes already-upgraded databases to skip it).
 
+## Using Safe Replay locally
+
+`agentgate replay <event-id> [config.yml] [--json]` (ADR-0010) re-evaluates one historical event from the
+gateway's own audit database against whatever policy `config.yml` currently points to — it needs a running or
+previously-run gateway with at least one recorded event, not a fresh checkout:
+
+```sh
+# Find an event id — either from the Control Center's Timeline/Event Detail page, or:
+node -e "const {AuditStorage}=require('./packages/gateway/dist/storage.js'); const s=new AuditStorage('./agentgate.sqlite'); console.log(s.listEvents({limit:5}))"
+
+node packages/gateway/dist/cli.js replay <event-id> examples/agentgate.yml --json
+```
+
+- Edit the policy file `config.yml` points to, then re-run the same command — no gateway restart is required;
+  both the CLI and the Control API load the policy file fresh on every replay.
+- `original.decision_type` reflects what was actually recorded for that event at the time; `current.decision_type`
+  reflects the policy loaded just now. A `null` in `original` means the source event never had a policy decision
+  recorded (e.g. it failed before evaluation) — this is reported explicitly, not treated as an error.
+- If `source_arguments_redacted: true` appears in the output, treat any reported change with a `contains_secrets`
+  rule involved as potentially just redaction-representation drift, not necessarily a real policy change — see
+  [ADR-0010](AI_DECISIONS.md) and [`docs/THREAT_MODEL.md`](THREAT_MODEL.md#safe-replay-adr-0010).
+- Every replay call — from the CLI, the Control API, or the Control Center's Safe Replay card — persists a new
+  row in the `replay_evaluations` table; running replay repeatedly against the same event is expected and simply
+  grows that event's lineage (`GET /api/events/:id/replays` lists it), never overwrites a prior evaluation.
+- There is intentionally no execution flag anywhere in this command, the API, or the UI — do not add one. See
+  the security invariant in [ADR-0010](AI_DECISIONS.md).
+
 ## Adding a policy rule
 
 1. Add the rule to `policies/agentgate.example.yml` (or your own policy file).
@@ -189,6 +219,7 @@ pnpm run lint
 pnpm run test
 node examples/secret-exfiltration/demo.mjs
 node examples/downstream-secret-result/demo.mjs
+node examples/policy-drift-replay/demo.mjs
 git diff --check
 ```
 

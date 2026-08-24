@@ -13,11 +13,12 @@ where the two disagree, the code is correct and this file is stale; please file 
 | **Policy engine** | Parses/validates policy YAML (Zod schema), evaluates first-match rules, normalizes paths, detects secrets. Also home to the shared deep-JSON sanitizer and canonical error sanitizer reused by output security. | `packages/policy/src/{schema,engine,transformation,output-sanitization,index}.ts` |
 | **Downstream registry** | Parses gateway config, resolves which configured downstream server owns a given tool name. | `packages/gateway/src/config/registry.ts` |
 | **Approval manager** | Creates/approves/denies/expires human-in-the-loop approvals; single-use; TTL-bound; polling-based expiry (10s interval). | `packages/gateway/src/approval.ts` |
-| **Audit storage** | SQLite-backed, hash-chained, append-only audit log plus approvals/agents tables. Lifecycle records carry a `canonical_payload_version` (`'1'` pre-Milestone-3, `'2'` since ADR-0009) so hash verification dispatches on each record's own version. | `packages/gateway/src/storage.ts` |
+| **Audit storage** | SQLite-backed, hash-chained, append-only audit log plus approvals/agents/replay-evaluation tables. Lifecycle records carry a `canonical_payload_version` (`'1'` pre-Milestone-3, `'2'` since ADR-0009) so hash verification dispatches on each record's own version. | `packages/gateway/src/storage.ts` |
+| **Safe Replay service** | Pure function: re-evaluates a historical event's stored, redacted representation against the current policy. Imports only the policy engine and three tiny argument-extraction helpers — structurally cannot reach a downstream server, `executeDownstream()`, `runPipeline()`, or `ApprovalManager` (ADR-0010). | `packages/gateway/src/replay.ts` |
 | **Control API** | Loopback-only Fastify REST + SSE API behind a per-launch random token. | `packages/gateway/src/api/control.ts` |
 | **Control Center** | React/Vite SPA consuming the Control API. | `apps/control-center/src/**` |
-| **Protocol package** | Shared TypeScript types for events, decisions, and the Control API contract — the only cross-package dependency all three consumers share. | `packages/protocol/src/{events,api}.ts` |
-| **CLI** | `agentgate start`/`validate`/`audit verify`. | `packages/gateway/src/cli.ts` |
+| **Protocol package** | Shared TypeScript types for events, decisions, and the Control API contract, including the Safe Replay request/response contract — the only cross-package dependency all three consumers share. | `packages/protocol/src/{events,api}.ts` |
+| **CLI** | `agentgate start`/`validate`/`audit verify`/`replay`. | `packages/gateway/src/cli.ts` |
 
 ## System diagram
 
@@ -34,6 +35,7 @@ flowchart LR
         OS["Output Security\noutput-security.ts\n(ADR-0009)"]
         AM["Approval Manager\napproval.ts"]
         AS["Audit Storage\nstorage.ts (SQLite)"]
+        RP["Safe Replay Service\nreplay.ts\n(ADR-0010)"]
         CA["Control API\napi/control.ts\n(Fastify, loopback)"]
     end
 
@@ -56,6 +58,10 @@ flowchart LR
     AM --> AS
     CA -- reads/writes --> AS
     CA -- reads/writes --> AM
+    CA -- "stored event + current policy" --> RP
+    RP -- "comparison (read-only policy eval)" --> CA
+    RP -. "no import path — never calls, never connects" .-> D
+    RP -. "no import path — never calls" .-> AM
     UI -- "REST + SSE, x-agentgate-token" --> CA
 ```
 
@@ -217,6 +223,95 @@ erDiagram
   migration after it and cause an already-upgraded database to skip the new one entirely. Existing rows default
   to `0`/false, which is historically accurate — they genuinely predate this feature.
 
+## Safe Replay (ADR-0010)
+
+Safe Replay re-evaluates a historical, already-redacted `AuditEvent` against the policy loaded from disk *right
+now* and reports whether the decision would change. It is a pure function plus one append-only write — never a
+second execution path.
+
+```mermaid
+sequenceDiagram
+    participant UI as Control Center / CLI
+    participant CA as Control API
+    participant RP as replay.ts (pure)
+    participant AS as Audit Storage
+    participant PE as Policy Engine
+
+    UI->>CA: POST /api/events/:id/replay (no body, or {contract_version:1})
+    CA->>CA: reject any dry_run/execute/run/unknown field (400)
+    CA->>AS: getEvent(id)
+    AS-->>CA: stored AuditEvent (already redacted)
+    CA->>CA: loadPolicyFile(current policy path)
+    CA->>RP: evaluateHistoricalEvent({ sourceEvent, currentPolicy })
+    RP->>PE: evaluate(reconstructed input, currentPolicy)
+    PE-->>RP: current decision
+    RP-->>CA: comparison (original vs current, limitations)
+    CA->>AS: insertReplayEvaluation(comparison)
+    AS-->>CA: stored ReplayEvaluation (hash-chained)
+    CA-->>UI: { executed: false, mode: "policy_only", ... }
+```
+
+- **`replay.ts` depends on exactly two things**: the same pure `evaluate()` function from `@agentgate/policy`
+  that `runPipeline()` itself calls (one rule matcher, not a second copy), and three tiny, already-existing pure
+  argument-extraction helpers re-exported from `pipeline.ts`. It never imports the MCP SDK,
+  `executeDownstream()`, `runPipeline()`, or `ApprovalManager` — enforced by a dedicated structural test
+  (`packages/gateway/tests/replay-no-execution.test.ts`) that inspects `replay.ts`'s own import statements, not
+  just its runtime behavior.
+- **Input reconstruction uses only what is already stored**: the same redacted `tool_call.normalized_arguments`
+  `pipeline.ts` itself persists (`normalizePath()` is re-applied — idempotent and safe — but nothing is
+  re-fetched or decrypted). There is no raw-argument store to read from in the first place.
+- **`replay_evaluations` is a separate, append-only, hash-chained table** — not folded into
+  `audit_events`/`audit_lifecycle_records` — because a replay evaluation has no mutable "current state"
+  projection to maintain, unlike a live tool call's lifecycle:
+
+  ```mermaid
+  erDiagram
+      replay_evaluations {
+          text id PK
+          text source_event_id FK
+          int sequence_number UK
+          text previous_replay_hash
+          text replay_hash
+          text canonical_payload_version
+          text evaluated_at
+          text policy_digest
+          text original_decision_type
+          text original_rule_id
+          text original_reason_code
+          text current_decision_type
+          text current_rule_id
+          text current_reason_code
+          text current_explanation
+          text current_transformations_json
+          int decision_changed
+          int matched_rule_changed
+          int reason_code_changed
+          int source_arguments_redacted
+          text limitations_json
+      }
+      audit_events ||--o{ replay_evaluations : "zero or more evaluations"
+  ```
+
+  No column stores a raw argument, a raw result, or a raw secret — only decision types, rule IDs, reason codes, a
+  policy digest, and bounded limitation strings. `AuditStorage.verifyReplayChain()` mirrors `verifyChain()`'s
+  approach exactly (sequence-gap and hash-mismatch detection) and is called by `agentgate audit verify` alongside
+  the audit chain, in the same invocation.
+- **`policy_digest`** (`packages/policy/src/digest.ts`) is a SHA-256 hash of the *canonicalized policy
+  structure* (never raw file bytes), sliced to 16 hex characters — recorded so a later reviewer can confirm which
+  policy version a given replay used, without needing to reconstruct or store the full policy file itself.
+- **A source event with no recorded original decision, or a legacy/malformed `tool_call` shape** (missing tool
+  name, malformed `normalized_arguments`, missing agent) is rejected with `ReplayUnsupportedEventError` — surfaced
+  as a `409` by the API and a non-zero exit by the CLI — rather than guessed at.
+- **A missing or malformed current policy file fails closed** — `evaluateHistoricalEvent()` reuses the same
+  `loadPolicyFile()` every other code path uses, which already throws a structured error; there is no silent
+  default-allow and no stale cached policy.
+- **Multiple evaluations of the same event are expected, not an error**: re-running replay after a further policy
+  edit simply appends another row to the same event's lineage (`GET /api/events/:id/replays` lists all of them,
+  newest last), each independently hash-chained.
+
+See [ADR-0010](AI_DECISIONS.md) for the full decision record and
+[`docs/THREAT_MODEL.md`](THREAT_MODEL.md#safe-replay-adr-0010) for the threats this design addresses.
+
 ## Output security configuration
 
 `output_security` (`packages/gateway/src/config/registry.ts`, `OutputSecuritySchema`) is a **gateway-level**
@@ -314,6 +409,13 @@ in browser history/logs, since it must be a query parameter).
 - **Gateway process killed mid-call**: SQLite writes inside `appendLifecycleRecord()` are wrapped in a
   `this.db.transaction()`, so a crash mid-write cannot leave a partially-written lifecycle record; a call in
   flight simply never reaches a terminal audit state.
+- **Malformed policy file at replay time** (ADR-0010): unlike the live pipeline path above, this *is* caught —
+  `evaluateHistoricalEvent()`'s `loadPolicyFile()` failure propagates up to a handled `catch` in both the Control
+  API route (`500`, sanitized message) and the CLI (`non-zero exit`, sanitized message). Replay fails closed
+  explicitly rather than silently defaulting to allow or serving a stale cached policy.
+- **Historical event with no recorded decision or a legacy/malformed shape** (ADR-0010): rejected with
+  `ReplayUnsupportedEventError` (`409` / non-zero exit) rather than guessed at — see
+  [Safe Replay](#safe-replay-adr-0010) above.
 
 ## Extension points
 

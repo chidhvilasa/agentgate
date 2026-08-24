@@ -254,16 +254,70 @@ records; it does not defend against someone who controls the file itself. Extern
 publishing chain heads to an append-only external log) would be required for a stronger guarantee and is not
 implemented.
 
-## Unsafe replay
+## Safe Replay (ADR-0010)
 
-**Threat:** re-executing a previously denied or approved tool call against current state without the operator
-realizing it is happening again.
+**What it is, precisely:** Safe Replay re-evaluates a historical, already-redacted `AuditEvent` against the
+*current* policy and reports whether the decision would change. It never executes the original tool call, never
+contacts or discovers a downstream MCP server, never creates or resolves an approval, and never mutates the
+source event. The response's `executed` field is the TypeScript literal type `false`, not `boolean` — there is
+no execution mode, no `dry_run` toggle, and no input that flips replay into re-running anything. See
+[ADR-0010](AI_DECISIONS.md) for the full decision record and [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) for how
+the pieces fit together.
 
-**Status:** the Control Center's Event Detail page has a disabled "Dry-run Replay (coming in Milestone 2)" button
-(`apps/control-center/src/pages/EventDetail.tsx`) and `packages/protocol/src/api.ts` defines a `ReplayRequest`/
-`ReplayResponse` contract (*"Always dry-run by default. Must explicitly set to false to execute."*), but **no
-replay endpoint is implemented in `control.ts`** as of this milestone. This is a documented future capability, not
-a present attack surface.
+**Threat: re-executing a previously denied or approved tool call against current state.** Not applicable by
+construction — `packages/gateway/src/replay.ts` never imports the MCP SDK, `executeDownstream()`,
+`runPipeline()`, or `ApprovalManager`; this is verified by both a structural (import-statement) test and an
+executable fixture-counter test (`packages/gateway/tests/replay-no-execution.test.ts`) that proves a real
+downstream server's call count is unchanged across repeated replays of a real historical event.
+
+**Threat: execution-flag smuggling** — a client sends `dry_run: false`, `execute: true`, `run: true`, or any
+other field hoping the server silently honors it. **Mitigation implemented:** `POST /api/events/:id/replay`
+rejects the request with `400` and an explanatory message naming the offending field for *any* body field other
+than the optional `contract_version`; the CLI (`agentgate replay`) has no execution-related flag defined at all,
+not merely one that is ignored.
+
+**Threat: forged or unauthorized event IDs** — a client requests a replay for an event ID it should not be able
+to read, or a nonexistent one, hoping for an information leak or a crash. **Mitigation implemented:** the replay
+route requires the same per-launch Control API token as every other endpoint; an unknown event ID returns a
+generic `404`; a malformed/legacy/unsupported historical event (missing tool name, malformed
+`normalized_arguments`, missing agent) returns a `409` with a safe, generic message that never echoes back any
+argument value from the malformed record.
+
+**Threat: policy-replacement / time-of-check confusion** — an operator might assume a replayed decision reflects
+the policy *as it was* when the event originally occurred. **This is a real, permanent limitation, not a bug**:
+AgentGate does not snapshot policy files per-event, so replay always evaluates against whatever policy is
+loaded from disk *right now*. Every replay response includes a fixed limitation string stating this explicitly,
+and the `policy_digest` field (a hash of the policy actually used) is recorded so a later reviewer can at least
+confirm which policy version a given replay evaluation used — but not reconstruct an arbitrary past policy.
+
+**Threat: redacted-input ambiguity** — because AgentGate never stores raw arguments (unchanged since Milestone
+1), a replay of an event whose arguments were redacted at ingest necessarily evaluates the stored `[REDACTED]`
+placeholder, not the original value. A `contains_secrets`-style rule that matched the *original* secret value
+may no longer match the placeholder text, which can look like a policy change even when the policy itself is
+unchanged. **Mitigation implemented:** the response's `source_arguments_redacted` field is `true` whenever this
+applies, and a specific limitation string calling out exactly this ambiguity is always included — never left
+for the reader to discover on their own.
+
+**Threat: source or replay-chain mutation, deletion, or reordering** — an attacker with database access tries to
+alter a stored replay evaluation, or the source event it references, without detection. **Mitigation
+implemented:** replay evaluations are themselves append-only and hash-chained in their own sequence, independent
+of the audit chain (`replay_evaluations` table, `AuditStorage.verifyReplayChain()`), covering tampering,
+deletion (sequence-gap detection), and reordering (hash-mismatch detection) — see
+`packages/gateway/tests/storage-replay.test.ts` for the executable proof of each case. `agentgate audit verify`
+checks both the audit chain and the replay lineage chain in one invocation, so a reviewer cannot forget to check
+the second chain. SQLite's foreign-key constraint additionally rejects a replay evaluation referencing a
+nonexistent source event outright. Same caveat as the rest of the audit trail applies here too: this is local
+tamper *evidence*, not tamper-*proof* storage — see
+[Database replacement](#database-replacement-by-a-local-administrator).
+
+**Threat: sensitive-data leakage via the replay surface itself** — the UI, API, CLI, logs, or a screenshot of any
+of them. **Mitigation implemented:** replay only ever reads the already-redacted `normalized_arguments` already
+persisted for the source event; the `replay_evaluations` table schema has no raw-argument or raw-result column
+at all (verified by a `PRAGMA table_info` test); API error responses (including a malformed-policy `500`) are
+routed through the same `sanitizeErrorMessage()` used everywhere else and never include a local file path or raw
+value from the malformed record; the Control Center's Safe Replay card renders only fields present in the
+server's own response, never reconstructs or fabricates additional data. `docs/assets/control-center-safe-
+replay.png` (referenced from the README) was captured against synthetic data only.
 
 ## Denial of service and storage growth
 
@@ -294,6 +348,11 @@ queue.
   sanitization metadata (`canonical_payload_version: '2'`).
 - Single-use, TTL-bound approvals with confused-deputy protection.
 - Loopback-only Control API with Host/Origin/token checks and restrictive CORS.
+- **Safe Replay** (ADR-0010, this milestone): structurally incapable of execution (no import path to the MCP
+  SDK, `executeDownstream()`, `runPipeline()`, or `ApprovalManager`, proven both structurally and with an
+  executable fixture-counter test); rejects any execution-like or unknown request field rather than ignoring
+  it; always surfaces the redacted-argument and current-policy-not-historical-snapshot limitations explicitly;
+  its own evaluations are append-only and hash-chained, independently verified alongside the audit chain.
 
 ## Mitigations deferred (summary)
 
@@ -311,7 +370,9 @@ queue.
   [Failure modes](ARCHITECTURE.md#failure-modes)).
 - No symlink resolution in path normalization.
 - SSE token passed as a URL query parameter (protocol limitation of `EventSource`).
-- No replay endpoint implemented yet (contract exists, UI stub exists, no server code).
+- Safe Replay always evaluates against the *current* policy — there is no historical policy snapshot, so replay
+  cannot reconstruct "what would this decision have been at some specific past moment," only "what would it be
+  right now" (see [Safe Replay](#safe-replay-adr-0010) above).
 
 ## Non-goals
 

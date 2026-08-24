@@ -278,5 +278,9 @@ rules:
 
 ## CLI
 
-There is no `agentgate explain`/`agentgate test` subcommand in this milestone — only `validate` is implemented for
-inspecting a policy without running the gateway (see [`README.md`](../README.md#cli)).
+There is no `agentgate explain`/`agentgate test` subcommand in this milestone — `validate` checks a policy file's
+shape without running the gateway, and `replay <event-id> [config]` (ADR-0010) answers a narrower, adjacent
+question: given a *real historical event*, would today's policy decide it differently? Replay is not a policy
+linter or test runner — it re-evaluates one specific stored event, never executes anything, and requires an
+existing audit database with at least one recorded event. See [`README.md`](../README.md#cli) for both commands
+and [`docs/AI_DECISIONS.md`](AI_DECISIONS.md) (ADR-0010) for what Safe Replay does and does not do.

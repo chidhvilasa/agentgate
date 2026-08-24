@@ -40,9 +40,10 @@ Run it yourself: `node examples/secret-exfiltration/demo.mjs` (see [Demo and ver
 ## Project status
 
 **Early development / research-quality MVP.** AgentGate implements a real policy engine, a real MCP stdio proxy, a
-real tamper-evident audit store, and a real Control Center UI — all covered by executable tests and two end-to-end
-attack demos, inbound and outbound (see [`docs/VERIFICATION.md`](docs/VERIFICATION.md)). It is **not** production-hardened: there is no
-authentication beyond a per-launch local token, no multi-user support, no replay, and MCP protocol support is
+real tamper-evident audit store, a real Control Center UI, and a real Safe Replay policy-drift analyzer — all
+covered by executable tests and three end-to-end demos, two attack demos (inbound and outbound) and one
+policy-drift demo (see [`docs/VERIFICATION.md`](docs/VERIFICATION.md)). It is **not** production-hardened: there
+is no authentication beyond a per-launch local token, no multi-user support, and MCP protocol support is
 currently **legacy 2025-era stdio only** (see [Supported integrations](#supported-integrations)). Read
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before relying on it for anything sensitive.
 
@@ -102,6 +103,9 @@ for human approval — is recorded before the call reaches (or is kept from reac
   redaction and hash-chain display, and the currently loaded policy.
 - **Path-traversal defenses** — path arguments are normalized (`..`/`.` resolved, separators unified) before
   matching or persistence.
+- **Safe Replay — policy re-evaluation, never re-execution** — re-evaluate a historical, redacted event against
+  the *current* policy to see whether the decision would change, with `executed` a fixed literal `false`; never
+  contacts a downstream server, never creates an approval (see [Safe Replay](#safe-replay) below).
 
 ## Example policy
 
@@ -137,9 +141,12 @@ Full field reference, matching semantics, and worked examples: [`docs/POLICY_REF
 ## CLI
 
 ```sh
-agentgate start [config.yml]     # Start the gateway (default: ./agentgate.yml)
-agentgate validate [policy.yml]  # Validate a policy file (default: ./agentgate.policy.yml)
-agentgate audit verify [config]  # Independently re-verify the tamper-evident audit chain
+agentgate start [config.yml]          # Start the gateway (default: ./agentgate.yml)
+agentgate validate [policy.yml]       # Validate a policy file (default: ./agentgate.policy.yml)
+agentgate audit verify [config]       # Independently re-verify the tamper-evident audit chain and replay lineage
+agentgate replay <event-id> [config]  # Safe Replay: re-evaluate a historical event against the current policy.
+                                       # Policy re-evaluation only — never executes the tool. Add --json for
+                                       # machine-readable output.
 ```
 
 `agentgate` is `packages/gateway/dist/cli.js` after `pnpm run build` (not yet published to npm — see
@@ -155,7 +162,8 @@ gateway YAML:
 - **Timeline** — every intercepted tool call in real time over Server-Sent Events.
 - **Approvals** — pending `require_approval` requests, with a countdown to TTL expiry; deny is the visually
   primary action.
-- **Event Detail** — full decision trace, redacted arguments, and the event's position in the hash chain.
+- **Event Detail** — full decision trace, redacted arguments, the event's position in the hash chain, and a
+  Safe Replay card to re-evaluate the event against the current policy (see [Safe Replay](#safe-replay) below).
 - **Policies** — the currently loaded policy file and a decision-type reference (read-only in this milestone).
 
 It authenticates with a random per-launch token (printed to the gateway's stderr on startup) sent as the
@@ -207,6 +215,54 @@ output_security:
 - Try it: `node examples/downstream-secret-result/demo.mjs` — a real gateway and a real fixture downstream server
   that leaks a synthetic credential in both a result and an error message, both sanitized end-to-end.
 
+## Safe Replay
+
+**What it is:** Safe Replay re-evaluates a historical, already-redacted tool-call event against the policy
+loaded *right now* and reports whether the decision would change — useful for validating a policy edit against
+real history, or reviewing an incident after tightening a rule. **What it is not:** it never re-executes the
+original tool call, never connects to, discovers, or contacts any downstream MCP server, never creates or
+resolves an approval, and never mutates the source event. `executed` in every response is the fixed literal
+`false` — there is no `dry_run` toggle, `execute` flag, or any other input that changes this; the API and CLI
+both reject an execution-like field outright rather than silently ignoring it. See
+[ADR-0010](docs/AI_DECISIONS.md) for the full design rationale and
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md#safe-replay-adr-0010) for what this does and does not protect
+against.
+
+![AgentGate Control Center — Safe Replay card showing a historical ALLOW decision compared against a changed current policy that now denies it, with a prominent no-execution indicator](docs/assets/control-center-safe-replay.png)
+
+```sh
+agentgate replay evt_abc123 examples/agentgate.yml --json
+```
+
+```json
+{
+  "replay_id": "rpl_...",
+  "source_event_id": "evt_abc123",
+  "mode": "policy_only",
+  "executed": false,
+  "source_arguments_redacted": false,
+  "original": { "decision_type": "ALLOW", "matched_rule_id": "echo-rule", "reason_code": "POLICY_ALLOW" },
+  "current":  { "decision_type": "DENY",  "matched_rule_id": "echo-rule", "reason_code": "POLICY_DENY", "explanation": "..." },
+  "decision_changed": true,
+  "matched_rule_changed": false,
+  "comparison": "Policy decision changed from ALLOW to DENY.",
+  "limitations": ["Safe Replay never executes the tool — this is a policy comparison only.", "..."]
+}
+```
+
+- **Redacted-argument limitation**: AgentGate never stores raw arguments, so a replay of an event whose
+  arguments were redacted at ingest evaluates the stored `[REDACTED]` placeholder, not the original secret
+  value — a `contains_secrets`-style rule that matched the original value may no longer match on replay. This
+  is always surfaced as an explicit limitation in the response, never silently.
+- **Current policy, not a historical snapshot**: replay always compares against the policy loaded from disk at
+  the moment of replay. It answers "what would this decision be today," not "what was policy at the time." The
+  response's `policy_digest` records which policy version was actually used.
+- **Its own tamper-evident lineage**: every replay evaluation is persisted in a separate, append-only,
+  hash-chained table (`replay_evaluations`), verified alongside the audit chain by `agentgate audit verify`.
+- Try it: `node examples/policy-drift-replay/demo.mjs` — a real gateway and a real fixture downstream server; one
+  real audited tool call under policy A, then a policy change to policy B, replayed through both the Control
+  API and the CLI, with the downstream server's call counter asserted unchanged throughout.
+
 ## Security model and limitations
 
 AgentGate treats agent identity as **untrusted**: `declared_name`/`declared_version` are self-reported and used for
@@ -231,7 +287,8 @@ Component responsibilities, system and sequence diagrams, the audit data model, 
 ```sh
 node examples/secret-exfiltration/demo.mjs       # inbound attack demo: secret in tool-call arguments (self-cleaning)
 node examples/downstream-secret-result/demo.mjs  # outbound demo: secret in a downstream result AND error (self-cleaning)
-pnpm run test                                    # unit/integration tests (policy + gateway) — 86 tests
+node examples/policy-drift-replay/demo.mjs       # Safe Replay demo: policy drift, no execution (self-cleaning)
+pnpm run test                                    # unit/integration tests (policy + gateway + control-center) — 154 tests
 pnpm run lint                                    # type-aware lint gate across the whole workspace
 ```
 

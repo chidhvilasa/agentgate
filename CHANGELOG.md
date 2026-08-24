@@ -4,6 +4,73 @@ All notable changes to this project are documented in this file. Format loosely 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). AgentGate has not yet published a versioned release or
 npm package — see [Project status](README.md#project-status).
 
+## [Unreleased] — Milestone 4: Safe Replay and policy-drift analysis
+
+### Added
+- **Safe Replay** (ADR-0010): re-evaluates a historical, already-redacted `AuditEvent` against the *current*
+  policy and reports whether the decision would change — policy re-evaluation only, never tool re-execution.
+  `executed` in every response is the TypeScript literal type `false`, not `boolean`; there is no `dry_run`
+  toggle, `execute` flag, or any other input that changes this, and none is planned as an "escape hatch" —
+  the API and CLI both reject an execution-like or unknown request field outright rather than ignoring it.
+  - New pure service `packages/gateway/src/replay.ts`: imports only the policy engine's `evaluate()` (the same
+    function the live pipeline calls) and three existing pure argument-extraction helpers re-exported from
+    `pipeline.ts` — never the MCP SDK, `executeDownstream()`, `runPipeline()`, or `ApprovalManager`.
+  - New `POST /api/events/:id/replay`, `GET /api/events/:id/replays`, and `GET /api/replays/:replayId` Control
+    API routes (`packages/gateway/src/api/control.ts`).
+  - New `agentgate replay <event-id> [config.yml] [--json]` CLI command; `agentgate audit verify` now also
+    verifies the new replay lineage chain alongside the audit chain in the same invocation.
+  - New append-only, hash-chained `replay_evaluations` table (`AuditStorage.insertReplayEvaluation()`/
+    `verifyReplayChain()`), independent of the audit chain — no raw argument, result, or secret column exists in
+    its schema at all.
+  - New `computePolicyDigest()` (`packages/policy/src/digest.ts`) — a stable hash of the canonicalized policy
+    structure (never raw file bytes), recorded on every replay evaluation.
+  - Real Safe Replay card in the Control Center's Event Detail page (`apps/control-center/src/pages/
+    EventDetail.tsx`), replacing the previously disabled "Dry-run Replay (coming in Milestone 2)" stub: a
+    prominent no-execution indicator, original-vs-current decision/rule/reason, a clear changed/unchanged result,
+    a redacted-source-arguments warning when applicable, and loading/success/safe-error(with retry) states —
+    with no execute/run/approve control anywhere, because none is possible.
+  - New end-to-end demo: `examples/policy-drift-replay/demo.mjs` — a real gateway and a real fixture downstream
+    server; one real audited tool call under policy A, a policy change to policy B, then a replay of that same
+    historical event through both the Control API and the CLI, asserting the correct decision drift, an
+    unchanged downstream call counter, no approval created, and an unchanged source event.
+  - 60 new tests: 52 in `packages/gateway` (19 decision-transition/edge-case tests, 5 no-execution-invariant
+    tests including an executable fixture-counter proof, 12 storage/tamper-evidence tests, 16 Control API tests)
+    and 8 new Control Center component tests — 154 total across the workspace.
+  - CI now also runs the policy-drift Safe Replay demo (`.github/workflows/ci.yml`).
+
+### Fixed
+- `control.ts`: Fastify's default JSON body parser rejected a genuinely empty request body sent with
+  `Content-Type: application/json` — exactly what a browser `fetch()` via the Control Center's `post()` helper
+  sends. This was found while testing the new replay endpoint but was already present and already affected the
+  pre-existing `/api/approvals/:id/deny` endpoint before this milestone. A custom content-type parser now treats
+  an empty body as `{}` and still returns `400` (not `500`) for genuinely malformed non-empty JSON.
+- `control.ts`: the in-flight replay request-deduplication cleanup produced a separate, unhandled promise
+  rejection distinct from the one the request handler itself already caught; fixed with a
+  `.then(onFulfilled, onRejected)` cleanup whose resulting promise never itself rejects.
+
+### Changed
+- `packages/protocol/src/api.ts`: replaced the old, unimplemented `ReplayRequest`/`ReplayResponse` contract
+  (which had a `dry_run?: boolean` field and a comment reading *"Must explicitly set to false to execute"*) with
+  the real `ReplayEvaluationRequest`/`ReplayEvaluationResponse` contract described above.
+- `docs/THREAT_MODEL.md`: replaced the "Unsafe replay" (deferred/unimplemented) section with a full "Safe Replay
+  (ADR-0010)" section covering replay endpoint abuse, execution-flag smuggling, forged event IDs,
+  policy-replacement/time-of-check confusion, redacted-input ambiguity, replay-chain tampering, and
+  sensitive-data leakage — each with its actual implemented mitigation, not a promise of a future one.
+- `README.md`, `docs/ARCHITECTURE.md`, `docs/POLICY_REFERENCE.md`, `docs/VERIFICATION.md`,
+  `docs/DEVELOPMENT.md`, `docs/TROUBLESHOOTING.md`: updated with Safe Replay usage, architecture, a new
+  screenshot, and troubleshooting guidance; removed stale "coming in Milestone 2"/"no replay" claims.
+
+### Known limitations (unchanged claims, restated for this milestone)
+- Safe Replay always evaluates against the *current* policy — there is no per-event historical policy snapshot,
+  so it answers "what would this decision be today," not "what was policy at some specific past moment."
+- A source event whose arguments were redacted at ingest can show `decision_changed: true` on replay purely from
+  representational drift (the stored `[REDACTED]` placeholder no longer matching a `contains_secrets` rule that
+  matched the original value) — always surfaced explicitly in the response, never silently.
+- The replay lineage chain shares the same local tamper-*evidence*-not-tamper-*proof* limitation as the audit
+  chain — see [Database replacement](docs/THREAT_MODEL.md#database-replacement-by-a-local-administrator).
+- Retention enforcement, rate limiting, and modern/HTTP-transport MCP support remain deferred (unchanged from
+  Milestone 3).
+
 ## [Unreleased] — Milestone 3: Bidirectional secret safety
 
 ### Added

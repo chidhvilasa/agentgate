@@ -29,11 +29,40 @@ your gateway config YAML.
 
 ## `agentgate audit verify` reports a broken chain
 
-This means `AuditStorage.verifyChain()` found a sequence gap, a hash mismatch, or missing event data — i.e. the
-database was modified outside of AgentGate's own append-only write path, or is corrupted. This is the intended
-behavior of a tamper-evident log (see [`docs/THREAT_MODEL.md`](THREAT_MODEL.md#database-replacement-by-a-local-administrator)
+This command checks **two** independent chains and prints a result for each: the audit chain
+(`AuditStorage.verifyChain()`) and, since ADR-0010, the Safe Replay lineage chain (`verifyReplayChain()`). Either
+line reporting a sequence gap, a hash mismatch, or missing data means that specific database table was modified
+outside of AgentGate's own append-only write path, or is corrupted — the two chains are stored and verified
+completely independently, so one can be valid while the other is broken. This is the intended behavior of a
+tamper-evident log (see [`docs/THREAT_MODEL.md`](THREAT_MODEL.md#database-replacement-by-a-local-administrator)
 for what this guarantee does and does not cover). If you deliberately want a fresh chain, delete the SQLite file
 (and its `-wal`/`-shm` companions) and restart the gateway — a new database starts a new chain from record 1.
+
+## `agentgate replay` (or the Control Center's Safe Replay card) says the decision changed, but I didn't touch the policy
+
+Two common, non-bug causes:
+
+1. **The source event's arguments were redacted.** Check the response's `source_arguments_redacted` field (CLI
+   `--json`, the API response, or the Control Center card's redaction warning). AgentGate never stores raw
+   arguments, so replay evaluates the stored `[REDACTED]` placeholder, not the original value — a
+   `contains_secrets`-style rule that matched the original secret may no longer match the placeholder text. This
+   is a representational limitation of replay, not a real policy change; it is always surfaced in the response's
+   `limitations` array.
+2. **You (or something else) edited the policy file more recently than you remember.** Replay always evaluates
+   against whatever the current policy file on disk says *right now*, never a historical snapshot — check the
+   response's `policy_digest` and compare it against `computePolicyDigest()` of the policy version you expected.
+   There is no per-event policy snapshot in this milestone; see [ADR-0010](AI_DECISIONS.md).
+
+## `agentgate replay <event-id>` fails with "No event found" or "unsupported historical event"
+
+- **"No event found"**: the event id doesn't exist in the database `config.yml` points to — double check
+  `db_path` in that config file matches the database you actually ran the original call against (find the id via
+  the Control Center's Timeline, or `GET /api/events`).
+- **"unsupported historical event"**: the stored event is missing a tool name, has malformed
+  `normalized_arguments`, or is missing agent identity — this happens for events created before Safe Replay
+  existed only if they somehow have a corrupted/legacy shape; a normally-created event (from `runPipeline()`)
+  always has everything replay needs. Replay deliberately fails closed here rather than guessing — see
+  [ADR-0010](AI_DECISIONS.md).
 
 ## A downstream result comes back with `[REDACTED]` in it unexpectedly
 

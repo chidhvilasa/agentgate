@@ -69,3 +69,35 @@ root against this milestone's final candidate commit.
 **Status:** PASS — 86 tests (52 in `packages/policy`, 34 in `packages/gateway`) plus both end-to-end demos, all
 passing as of this milestone's final candidate commit. See the dated Milestone 3 entry in
 `docs/AI_DECISIONS.md` for the exact commands run and their output.
+
+---
+
+# Milestone 4 Verification — Safe Replay and Policy-Drift Analysis (ADR-0010)
+
+Each row names an exact test file/case or reproducible command. All commands below were run from the repository
+root against this milestone's final candidate commit.
+
+| Claim | Evidence |
+|---|---|
+| Replay never executes the original tool call — structurally, not just today | `packages/gateway/tests/replay-no-execution.test.ts` → *"replay.ts imports nothing capable of reaching a downstream server or creating an approval"* (inspects only actual `import` statements, not comment prose) |
+| Replay never contacts a downstream server — executable, process-external proof | `packages/gateway/tests/replay-no-execution.test.ts` → a real fixture downstream MCP server's call counter (persisted to a temp file) is 1 after one real execution and **still 1** after 5 subsequent replays of the same event; `node examples/policy-drift-replay/demo.mjs` reproduces this against production-built (`dist`) packages, through both the Control API and the CLI, and asserts the counter unchanged after each |
+| Replay never creates or resolves an approval | `packages/gateway/tests/replay-no-execution.test.ts` → *"never creates or resolves an approval during replay"* (spies on `ApprovalManager.create/approve/deny`, confirms none called even when the hypothetical current decision is `REQUIRE_APPROVAL`); `node examples/policy-drift-replay/demo.mjs` asserts `GET /api/approvals` is empty after a real replay |
+| Replay never mutates the source event | `packages/gateway/tests/replay-no-execution.test.ts` → *"never modifies the source event or appends a new audit lifecycle record"*; `packages/gateway/tests/replay-api.test.ts` → *"does not mutate the source event when replaying"*; `node examples/policy-drift-replay/demo.mjs` asserts the source event is byte-identical before/after two real replays |
+| Every decision-transition combination is correctly reported (ALLOW↔DENY, to/from `REQUIRE_APPROVAL`, `ALLOW_WITH_TRANSFORM`), including matched-rule-only and reason-code-only drift | `packages/gateway/tests/replay.test.ts` (19 cases) |
+| A source event whose arguments were redacted at ingest surfaces an explicit limitation, never silently | `packages/gateway/tests/replay.test.ts` → *"warns explicitly when source arguments were redacted"* / *"does not claim a redaction limitation when arguments were not redacted"* |
+| A malformed/legacy/unsupported historical event is rejected, not guessed at, and never echoes a raw value in its error | `packages/gateway/tests/replay.test.ts` → the `ReplayUnsupportedEventError` cases; `packages/gateway/tests/replay-api.test.ts` → *"returns 409 for a non-replayable (malformed) historical event"* |
+| Replay evaluations are append-only and hash-chained, with tampering/deletion/reordering all detected | `packages/gateway/tests/storage-replay.test.ts` (12 cases: schema creation, chaining, multi-evaluation lineage, referential integrity, tampering on decision/policy-digest fields, deletion-gap detection, reordering detection, restart continuation) |
+| The `replay_evaluations` table has no raw-argument/result column at all (schema-level guarantee, not just behavioral) | `packages/gateway/tests/storage-replay.test.ts` → *"never stores raw arguments or raw secrets (schema-level guarantee: no such column exists)"* |
+| `agentgate audit verify` checks both the audit chain and the replay lineage chain in one invocation | `packages/gateway/tests/storage-replay.test.ts` → *"verifyChain and verifyReplayChain are independent"*; `node examples/policy-drift-replay/demo.mjs` (Step 6) |
+| The Control API rejects `dry_run:false`/`execute:true`/`run:true`/any unknown field, rather than ignoring it | `packages/gateway/tests/replay-api.test.ts` (4 cases) |
+| The Control API requires auth, rejects a hostile Host header, and returns safe, generic errors for missing/malformed events and a malformed policy file (no local path leakage) | `packages/gateway/tests/replay-api.test.ts` (7 cases) |
+| No raw secret ever appears in the API response, CLI output, or `agentgate audit verify` output | `packages/gateway/tests/replay-api.test.ts` → *"never leaks a raw secret-shaped value..."*; `node examples/policy-drift-replay/demo.mjs` (asserted after every replay path and the verify command) |
+| The Control Center's Safe Replay card has no execution control anywhere, handles every UI state, and never renders anything the API didn't actually return | `apps/control-center/src/pages/EventDetail.test.tsx` (8 cases: initial no-execution state with no execution control present, success unchanged, success changed, redacted-source warning shown/not-shown, safe error with working retry, double-submit prevention, no value fabrication) |
+| A real historical event, replayed under a genuinely changed policy, through both the API and the CLI, shows the correct drift end-to-end against production-built packages | `node examples/policy-drift-replay/demo.mjs` — 24 in-demo assertions, all PASS |
+| The prior two demos have no regression | `node examples/secret-exfiltration/demo.mjs` and `node examples/downstream-secret-result/demo.mjs` re-run and passing after this milestone's changes |
+
+**Status:** PASS — 154 tests total across the workspace (52 in `packages/policy`, 86 in `packages/gateway`
+[including 52 new Safe Replay tests], 16 in `apps/control-center` [including 8 new Safe Replay component tests])
+plus all three end-to-end demos, all passing as of this milestone's final candidate commit. See the dated Safe
+Replay session-log entries in `docs/AI_DECISIONS.md` for the exact commands run and their output, phase by
+phase.
