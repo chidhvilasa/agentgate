@@ -707,3 +707,60 @@ decisions across AI-agent sessions. Verify entries against the repository.
   EventDetail.tsx` with a real Safe Replay card wired to a new typed `api.replay()` client method, with
   component tests covering success/changed/unchanged/redacted-source-warning/safe-error/double-submit-
   prevention/no-execution-control/no-raw-secret-rendering.
+
+### 2026-08-24 — Safe Replay Completion, Phase 2 (Control Center UI)
+
+- Prompt objective: replace the disabled "Dry-run Replay (coming in Milestone 2)" stub in
+  `apps/control-center/src/pages/EventDetail.tsx` with a real, accessible Safe Replay card, backed by a typed
+  API client method, per Phase 2 of the governing prompt and ADR-0010.
+- Continuity check: re-read ADR-0010 and the Phase 1 session-log entry above before starting; confirmed local
+  HEAD was `909fe83` (Phase 1 tests + ledger entry) with a clean tree before making any change.
+- Decisions added or changed: none — no new or superseded ADR needed; this phase implements ADR-0010's existing
+  UI requirements rather than making a new durable architectural decision.
+- Implementation completed:
+  - `apps/control-center/src/api.ts`: added a typed `api.replay(eventId)` method using the
+    `ReplayEvaluationResponse` type already exported from `@agentgate/protocol` (no new type had to be
+    invented — the protocol package already defined the exact wire shape), plus `api.replays(eventId)` for the
+    list endpoint. Added a dedicated `postForResult()` helper, separate from the pre-existing generic `post()`
+    (left untouched so approve/deny behavior is unaffected), that parses and surfaces the server's own safe
+    `error` message on a non-2xx response instead of only a bare status code.
+  - `apps/control-center/src/pages/EventDetail.tsx`: replaced the disabled button with a `SafeReplayCard`
+    component. Prominent "NO TOOL EXECUTION" badge; explanatory text that the saved, already-redacted request
+    is compared against the *current* policy and nothing is sent downstream; renders original vs current
+    decision/matched-rule/reason, a CHANGED/UNCHANGED badge with the server's `comparison` sentence, the
+    redacted-source-arguments warning when applicable, the full `limitations` list, and the evaluated-at
+    timestamp plus replay ID. Idle/loading/success/error(with retry) states are all handled explicitly.
+    Double-submission is prevented with a `useRef` guard checked synchronously inside the click handler (not
+    only React state, which batches asynchronously and would not reliably block two clicks in the same tick).
+    There is no execute/run/approve control anywhere in the card — `api.replay()` has no parameter that could
+    request one.
+  - `apps/control-center/src/pages/EventDetail.test.tsx`: added 8 new tests (initial no-execution state with no
+    execution control present anywhere on the page; successful unchanged-decision replay; successful
+    changed-decision replay; redacted-source warning shown/not-shown; safe error message with a working retry
+    that succeeds on the second attempt; double-submit prevention — three rapid clicks issue exactly one
+    request; confirmation the card never renders anything beyond what the mocked response actually contained).
+  - One real lint finding fixed during this phase: an `@typescript-eslint/no-unnecessary-type-assertion` error
+    on the `postForResult()` error-message extraction — TypeScript's `in`-operator narrowing (since TS 4.9)
+    already types `data.error` as `unknown` once `'error' in data` is checked, making the `(data as { error:
+    unknown })` cast redundant; removed it.
+- Files materially changed: `apps/control-center/src/api.ts`, `apps/control-center/src/pages/EventDetail.tsx`,
+  `apps/control-center/src/pages/EventDetail.test.tsx`.
+- Commands actually executed and their actual results: `pnpm run build` (clean), `pnpm run lint` (0 errors, the
+  2 pre-existing unrelated `no-explicit-any` warnings in gateway test files still present and untouched),
+  `pnpm run test` — **154 tests passing** (52 policy + 16 control-center [8 pre-existing + 8 new] + 86 gateway),
+  zero regressions; `node examples/secret-exfiltration/demo.mjs` (pass); `node examples/downstream-secret-
+  result/demo.mjs` (pass); `git diff --check` (clean). Committed as `96f4833 feat(control-center): replace
+  disabled Replay stub with real Safe Replay card`.
+- Verification result: PASS for every Phase 2 item — a real, working Safe Replay card exists with no execution
+  control, covered by passing component tests for every required state (success/changed/unchanged/redacted-
+  source-warning/safe-error-with-retry/double-submit-prevention/no-raw-value-fabrication).
+- Known limitations / follow-up risk: this phase has not yet been exercised in a real browser against a real
+  running gateway (planned for Phase 5) — only jsdom-based component tests so far. No deterministic
+  policy-drift demo exists yet (Phase 3). Accessibility was addressed via semantic HTML (native `<button>`
+  elements, `role="alert"` on the error message, `aria-live="polite"` on the result region, `aria-busy` on the
+  loading button) but has not been verified with a screen reader or automated a11y tooling — only by component
+  test queries using accessible roles/names, which passed.
+- Unresolved questions: none blocking.
+- Exact next action: Phase 3 — build `examples/policy-drift-replay/demo.mjs`, a deterministic, offline,
+  CI-safe demo proving a real historical audited request replayed under a changed policy shows the correct
+  decision drift, with the downstream fixture's call counter confirmed unchanged throughout.
