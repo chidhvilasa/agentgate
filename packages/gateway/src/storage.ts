@@ -143,6 +143,40 @@ function sha256(data: string): string {
   return crypto.createHash('sha256').update(data, 'utf8').digest('hex');
 }
 
+/**
+ * The schema version a fresh database ends up at after `AuditStorage`
+ * applies every migration — i.e. `MIGRATIONS.length`. Exported so read-only
+ * tooling (`agentgate doctor`, Milestone 5) can tell whether an *existing*
+ * database is already fully migrated without opening it via `AuditStorage`
+ * itself, which would apply any pending migration as a side effect —
+ * exactly the "doctor never mutates the database" guarantee requires.
+ */
+export const LATEST_SCHEMA_VERSION = MIGRATIONS.length;
+
+/**
+ * Reads the current `schema_version` of an existing database file, opened
+ * strictly read-only (`better-sqlite3`'s `readonly` mode — an OS-level
+ * open flag, not just an application convention). Returns `0` for a file
+ * that exists but has no `schema_version` table yet (e.g. an empty file).
+ * Never creates the file, never writes to it, never runs a migration.
+ * Throws if `dbPath` does not exist or is not a valid SQLite file.
+ */
+export function readSchemaVersionReadOnly(dbPath: string): number {
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    const tableExists = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'`)
+      .get();
+    if (!tableExists) return 0;
+    const row = db.prepare('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1').get() as
+      | { version: number }
+      | undefined;
+    return row?.version ?? 0;
+  } finally {
+    db.close();
+  }
+}
+
 // ─── Storage Class ────────────────────────────────────────────────────────────
 
 export class AuditStorage {
