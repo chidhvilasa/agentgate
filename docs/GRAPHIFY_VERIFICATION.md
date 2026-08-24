@@ -177,11 +177,56 @@ local tooling configuration, not a repository artifact.
   (`noFallthroughCasesInSwitch` in `apps/control-center/tsconfig.app.json`) purely on the substring "switch" —
   a reminder that graph results should be spot-checked against source, which is exactly what this document does.
 
+## Milestone 3 incremental update (2026-08-24)
+
+After implementing bidirectional output/error sanitization (ADR-0009), `graphify update .` was re-run:
+
+```text
+$ graphify update .
+Re-extracting code files in . (no LLM needed)...
+[graphify watch] Rebuilt: 813 nodes, 987 edges, 54 communities
+[graphify watch] graph.json, graph.html and GRAPH_REPORT.md updated in graphify-out
+```
+
+702 → 813 nodes and 835 → 987 edges (the Milestone 2 baseline recorded at the end of the previous section),
+reflecting the two new source modules (`packages/policy/src/output-sanitization.ts`,
+`packages/gateway/src/output-security.ts`), the new test/fixture files, and the new
+`examples/downstream-secret-result/` demo.
+
+**Queries** (all outputs cross-checked against source):
+
+| Question | Result |
+|---|---|
+| *Where are downstream MCP results sanitized before they reach the upstream client?* | **Directly useful.** Correctly surfaced `sanitizeToolResult()` (`packages/gateway/src/output-security.ts:120` — confirmed against source), plus `sanitizeContentBlock()`, `sanitizeTextLeaf()`, `sanitizeJsonValue()`, `sanitizeErrorMessage()`, and `OutputSecurityConfig`. |
+| *How does EventDetail display result redaction and blocking metadata?* | Useful but structural-only: correctly found `EventDetail.tsx --contains--> statusClass()`, the `App.tsx --imports_from--> EventDetail.tsx` routing edge, and (separately in the result set) `pipeline.ts --imports--> sanitizeToolResult()`. It does **not** surface the new conditional JSX ("Result Security" card) itself — the AST extraction does not parse into JSX conditional-render bodies, a known, pre-existing limitation (see below), not a Milestone 3 regression. |
+| *How are downstream execution errors sanitized before audit persistence?* | Useful vocabulary (`sanitizeErrorMessage()`, `.updateEventStatus()`, `runPipeline()`, `stdio.ts`) but, consistent with the Milestone 2 finding, a broad "flow" question needed the `path` follow-up below to become a full trace rather than a single query call. |
+
+**Path test**: `graphify path "sanitizeToolResult()" "EventDetail.tsx" --undirected` returned **no path** — an
+honest, structurally-correct negative result, not a graph defect. Control Center (`apps/control-center`) and the
+gateway/policy packages communicate only over HTTP/SSE at runtime; there is no static import or call edge
+between them anywhere in this codebase (confirmed independently: `grep -rn "@agentgate/protocol"
+apps/control-center/src/` finds zero real imports, only one comment). This is a genuine, pre-existing limitation
+of an AST-only graph for any full-stack app with a network boundary between frontend and backend — not specific
+to output security. A connectable, real path was confirmed instead:
+
+```text
+$ graphify path "sanitizeToolResult()" "storage.ts" --undirected
+Shortest path (2 hops):
+  sanitizeToolResult() <--imports [EXTRACTED]-- pipeline.ts --imports_from [EXTRACTED]--> storage.ts
+```
+
+Accurate: `pipeline.ts` imports `sanitizeToolResult` from `output-security.ts` and the `AuditStorage` type from
+`storage.ts`, exactly as the path states.
+
 ## Conclusion
 
-Graphify is genuinely functional against AgentGate: it builds a 511-node, 624-edge graph from this repository in
-seconds with no API key, its god-node and surprising-connection analysis independently rediscovers the real
-architectural hubs, three of four targeted queries returned directly useful and source-accurate answers, the
-`path` command produced a correct 2-hop trace, and an incremental `update` after further code changes reflected
-those changes. It is adopted as **optional local developer tooling** (see `docs/DEVELOPMENT.md`), not a build or
-CI dependency.
+Graphify is genuinely functional against AgentGate: it builds a graph from this repository in seconds with no
+API key (511 nodes at Milestone 1 → 702 at the end of Milestone 2 → 813 after Milestone 3), its god-node and
+surprising-connection analysis independently rediscovers the real architectural hubs, targeted queries
+consistently return directly useful and source-accurate answers or vocabulary, `path` produces correct traces
+for anything actually connected in source, and incremental `update` calls after further code changes (now
+exercised three times across two milestones) reliably reflect those changes. Its clearest limitation, confirmed
+again this milestone, is that it cannot trace a relationship that has no static source-level edge — a frontend/
+backend HTTP boundary, in this case — which is an accurate reflection of the codebase, not a tool defect. It
+remains adopted as **optional local developer tooling** (see `docs/DEVELOPMENT.md`), not a build or CI
+dependency.

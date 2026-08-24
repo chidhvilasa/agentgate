@@ -5,18 +5,20 @@ decisions across AI-agent sessions. Verify entries against the repository.
 
 ## Project State
 
-- Current phase: Milestone 3 — Bidirectional Secret Safety and Error Sanitization — IN PROGRESS. Milestone 2
-  (Documentation, CI, Graphify verification, visual proof, public launch) is **COMPLETE and publicly verified**:
-  reconciled against live GitHub state at the start of this session, not merely the prior report (see the
-  2026-08-24 Milestone 3 session log below for the exact `gh` evidence).
+- Current phase: Milestone 3 — Bidirectional Secret Safety and Error Sanitization. Implementation, tests, docs,
+  and Control Center UI are complete locally; final local verification, clean-clone verification, and public
+  push/CI observation are recorded in the 2026-08-24 Milestone 3 session log below — check that log's own
+  "Exact next action" for what remains, since this Project State block cannot describe work that happens after
+  it (this entry does not try to record the hash of the commit that contains it).
+- Milestone 2 (Documentation, CI, Graphify verification, visual proof, public launch) is **COMPLETE and publicly
+  verified** — reconciled against live GitHub state at the start of the Milestone 3 session (not merely the prior
+  report): public repo exists, default branch `main`, CI run `32660796091` PASS, Security run `32660796111` PASS.
 - Public repository: https://github.com/chidhvilasa/agentgate (public, default branch `main`).
 - Current branch: main.
-- Last verified implementation commit (Milestone 2, public, CI-green): b48163a — CI run `32660796091` PASS,
-  Security run `32660796111` PASS, both observed live via `gh run list`/`gh run view` at the start of this
-  session, not merely trusted from the prior session's own report.
-- Ledger status: Updated after the Milestone 2 candidate commits; verify current HEAD with Git — this entry
-  deliberately does not try to record its own future commit hash (see rule in the session-continuity instructions
-  this session operated under).
+- Last verified implementation commit as of the start of Milestone 3 documentation/UI work: `49c6267` (core
+  output/error sanitization implementation — ADR-0009 — committed locally, not yet pushed at that point).
+- Ledger status: Updated during the Milestone 3 session; verify current HEAD with Git — this entry deliberately
+  does not try to record its own future commit hash.
 - Last updated: 2026-08-24
 - Updated by: Claude Code
 - Next action: see "Exact next action" at the end of the 2026-08-24 Milestone 3 session log below.
@@ -427,3 +429,83 @@ decisions across AI-agent sessions. Verify entries against the repository.
   consider implementing the deferred replay endpoint, result-scanning for secrets, and retention enforcement
   documented as gaps in `docs/THREAT_MODEL.md`, each as its own reviewed change with a fresh ADR only if it
   changes a durable decision recorded above.
+
+### 2026-08-24 — Claude Code — Milestone 3: Bidirectional Secret Safety and Error Sanitization
+
+- Prompt objective: continue an in-progress Milestone 3 session from a clean implementation checkpoint
+  (`49c6267`, core sanitization already committed locally, unpushed) and complete documentation, Control Center
+  representation, Graphify refresh, verification, and public push/CI observation.
+- Starting state verified (not trusted from the prior report): HEAD `49c6267` on `main`, only `.claude/`/
+  `CLAUDE.md` untracked, `origin` exactly `https://github.com/chidhvilasa/agentgate.git`, GitHub auth as
+  `chidhvilasa`, remote HEAD still `b48163a` (i.e. `49c6267` genuinely not yet pushed).
+- Checkpoint gates re-verified for real: `pnpm install --frozen-lockfile`, `pnpm run build`, `pnpm run lint` (0
+  errors, 2 pre-existing warnings), `pnpm run test` → 52 (policy) + 34 (gateway) = **86 tests**, matching the
+  reported checkpoint exactly; both `examples/secret-exfiltration/demo.mjs` and
+  `examples/downstream-secret-result/demo.mjs` passed, self-cleaned, no residue; `git diff --check` clean.
+- Documentation truth pass (commit `af2438a`): corrected every stale "downstream results/errors are not
+  scanned" statement across `docs/THREAT_MODEL.md` (trust boundaries, malicious-downstream-server, secret-
+  exfiltration, log-and-audit-poisoning, mitigations-implemented/deferred, non-goals), `docs/ARCHITECTURE.md`
+  (component table, system diagram, sequence diagram split into result/error flows, audit lifecycle data model
+  with v1/v2 canonical-payload-version rationale, new "Output security configuration" section, extension
+  points), new "Output security (gateway-level)" section in `docs/POLICY_REFERENCE.md` (exact schema, explicitly
+  distinguished from `allow_with_transform`), new Milestone 3 claim/evidence table in `docs/VERIFICATION.md` (one
+  row per test file/case or command), new sections in `docs/DEVELOPMENT.md`/`docs/TROUBLESHOOTING.md`
+  (configuring output security, diagnosing redacted/blocked results, migration/audit-verify guidance, adding a
+  synthetic-secret regression without weakening scanning), a concise "Output security" section in `README.md`,
+  and a Milestone 3 `CHANGELOG.md` entry. Added both attack demos to `.github/workflows/ci.yml` (previously only
+  the inbound one ran in CI) and updated `CONTRIBUTING.md`/`.github/pull_request_template.md`'s gate commands to
+  match. A commit-message authoring mistake (unescaped backticks in a `git commit -m` string were interpreted by
+  the shell as command substitution, silently blanking two inline-code spans) was caught by reading back the
+  actual recorded message and fixed via `git commit --amend` before this commit was ever pushed.
+- Control Center (commit `2ba1696`): added a "Result Security" card to `EventDetail.tsx`, rendered only for
+  `SUCCEEDED`/`FAILED` events (the only statuses output security runs for, so DENIED/EXPIRED/etc. events never
+  show a fabricated scan result) — clean/neutral state phrased as "No supported secret pattern detected" (never
+  "fully safe," per explicit requirement), redacted state, blocked state, a plain finding count, an
+  "Error sanitized" row when `execution_error` is present, and a static (non-fabricated) note that opaque binary
+  content is never scanned — chosen over inventing a new per-event schema field, since the current schema has no
+  field distinguishing "contains opaque content" from other finding categories. Added a minimal component-
+  testing harness for `apps/control-center` (previously absent): `vitest` + `@testing-library/react` + `jsdom`,
+  with test files isolated into their own `tsconfig.test.json` rather than folded into `tsconfig.app.json` —
+  importing `vitest` pulls in `@types/node`'s ambient globals, and once those leaked into the same TypeScript
+  program as `App.tsx`, `setInterval`'s resolved overload changed and produced two false
+  `no-misused-promises` errors on unrelated, unchanged production code; isolating test files into their own
+  program (matching gateway/policy's existing `tests/` + `tsconfig.eslint.json` pattern) fixed this cleanly. 8
+  new tests in `EventDetail.test.tsx` cover every card state, the neutral zero-finding wording, card suppression
+  for non-terminal statuses, preserved DENIED badge styling, and that `tool_call.raw_arguments` (as opposed to
+  the already-redacted `normalized_arguments`) is never rendered. Also removed
+  `apps/control-center/README.md`, a leftover Vite template placeholder missed during Milestone 2's cleanup.
+- Real browser verification (commit `ada1565`): ran the real gateway + real Control Center against a temporary
+  fixture (real `fixture-downstream-server.mjs`, real policy, real SQLite db) issuing a clean call, a call whose
+  downstream *result* leaks a synthetic AWS-shaped key, a call whose downstream server *throws* with a secret in
+  the message, and an `isError` result that also leaks a secret — all through the real pipeline. A headless
+  Chromium session (Playwright, added as a temporary root devDependency for this one run and fully removed
+  afterward — `git diff` on `package.json`/`pnpm-lock.yaml` confirmed byte-for-byte reversion) confirmed: real
+  Overview data ("Gateway connected"), the redacted event's Event Detail correctly showed "Result Security" /
+  "REDACTED", and the synthetic secret `AKIAIOSFODNN7EXAMPLE` was confirmed absent from the rendered DOM. Zero
+  console errors, zero failed/4xx+ network requests. Captured
+  `docs/assets/control-center-result-security.png` and embedded it in README's Output security section.
+- Graphify: `graphify update .` rebuilt the graph to 813 nodes / 987 edges / 54 communities (up from 702/835/47
+  at the end of Milestone 2). Three targeted queries returned source-verified, useful results (one — "how does
+  EventDetail display result metadata" — correctly found the structural `contains`/`imports` edges but, as
+  expected from a pure-AST graph, did not surface the new conditional-JSX card body itself). The requested
+  `sanitizeToolResult() -> EventDetail.tsx` path query returned **no path** — confirmed as an honest, accurate
+  negative: Control Center and the gateway/policy packages have no static import/call edge between them
+  anywhere in this codebase (verified independently via `grep`), since they communicate only over HTTP/SSE at
+  runtime. A connectable path (`sanitizeToolResult() -> pipeline.ts -> storage.ts`) was recorded instead.
+  `docs/GRAPHIFY_VERIFICATION.md` updated with a dated Milestone 3 section; `graphify-out/` remains gitignored
+  and was not committed.
+- Verification result: PASS for every item above. See this session's final report for the itemized pass/fail per
+  required completion gate, including final local verification, clean-clone verification, and the push/CI
+  outcome performed after this ledger entry was drafted.
+- Known limitations (see `docs/THREAT_MODEL.md` for the authoritative, current list): opaque binary result
+  content (image/audio/blob) is never scanned in either output-security mode; unknown/future MCP content-block
+  types and unrecognized top-level result fields pass through uninspected; the reused pattern-based secret
+  detector can miss unrecognized formats and occasionally over-redact; audit tamper-evidence remains local-only
+  (ADR-0004); retention enforcement, rate limiting, a working replay endpoint, and modern/HTTP-transport MCP
+  support remain deferred (ADR-0005); Graphify cannot trace a relationship with no static source-level edge
+  (confirmed again this session, not new).
+- Unresolved questions: none blocking.
+- Exact next action: run the complete final local gate on the final committed candidate, perform clean-clone
+  verification, push `main` to `origin` (non-force), and observe GitHub Actions CI/security results for the
+  pushed HEAD — recorded in this session's final report and, if anything materially changed, a short follow-up
+  ledger note after CI completes.
