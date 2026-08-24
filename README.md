@@ -181,7 +181,10 @@ ADR-0009 (Milestone 3), downstream **results** are also sanitized — after a po
 `sanitizeToolResult()` inspects the result before it is ever returned to the upstream agent, and
 `sanitizeErrorMessage()` sanitizes any downstream/internal error before it is persisted, hash-chained, or logged.
 Raw downstream results are never persisted, in either direction, before or after this change — only safe metadata
-(`result_redacted`/`result_blocked`/`result_finding_count`/`error_redacted`) is recorded on the audit event.
+(`result_redacted`/`result_blocked`/`result_finding_count`/`error_redacted`) is recorded on the audit event, shown
+in the Control Center's Event Detail view:
+
+![AgentGate Control Center — Event Detail showing a downstream result redacted by output security, with no secret rendered](docs/assets/control-center-result-security.png)
 
 ```yaml
 output_security:
