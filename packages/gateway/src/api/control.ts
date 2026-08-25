@@ -6,6 +6,12 @@ import type { AuditEvent, Approval, ReplayEvaluation } from '@agentgate/protocol
 import cors from '@fastify/cors';
 import { loadPolicyFile, sanitizeErrorMessage } from '@agentgate/policy';
 import { evaluateHistoricalEvent, ReplayUnsupportedEventError } from '../replay.js';
+import type { DownstreamServer, ToolIntegrityMode } from '../config/registry.js';
+import { computeServerIdentity } from '../tool-integrity/identity.js';
+import { scanDownstreamServer } from '../tool-integrity/scan.js';
+import { applyScanToRegistry, acceptCandidate, rejectCandidate } from '../tool-integrity/registry.js';
+import { diffStoredDefinitions } from '../tool-integrity/diff.js';
+import type { ToolIntegrityState } from '../tool-integrity/types.js';
 
 /** Per-launch local auth token — generated fresh on each start. */
 export let LOCAL_AUTH_TOKEN = '';
@@ -45,6 +51,22 @@ function toReplayResponse(r: ReplayEvaluation) {
   };
 }
 
+/** Safe, bounded projection of ToolIntegrityState for the wire — never includes raw definition JSON in list responses (only the dedicated diff endpoint returns field-level content, and even that only a bounded diff, never the full raw definition). */
+function toToolStateSummary(s: ToolIntegrityState) {
+  return {
+    tool_name: s.tool_name,
+    status: s.status,
+    current_fingerprint: s.current_fingerprint,
+    trusted_fingerprint: s.trusted_fingerprint,
+    candidate_fingerprint: s.candidate_fingerprint,
+    candidate_id: s.candidate_id,
+    first_seen_at: s.first_seen_at,
+    last_seen_at: s.last_seen_at,
+    last_scan_at: s.last_scan_at,
+    updated_at: s.updated_at,
+  };
+}
+
 export function buildControlApi(opts: {
   storage: AuditStorage;
   approvalManager: ApprovalManager;
@@ -54,6 +76,11 @@ export function buildControlApi(opts: {
   /** Path to the policy file to load fresh on every Safe Replay evaluation (ADR-0010). */
   policyPath: string;
   onEvent: (handler: (event: AuditEvent | Approval) => void) => void;
+  /** Tool Integrity Registry (ADR-0012) — the downstream server config and configured mode, used for on-demand rescans. Optional only so existing tests that don't exercise Tool Integrity need not construct one; server.ts always supplies it in real operation. */
+  toolIntegrity?: {
+    server: DownstreamServer;
+    mode: ToolIntegrityMode;
+  };
 }) {
   LOCAL_AUTH_TOKEN = randomBytes(32).toString('hex');
 
@@ -335,6 +362,144 @@ export function buildControlApi(opts: {
     if (!row) return reply.code(404).send({ error: 'Replay evaluation not found.' });
     return toReplayResponse(row);
   });
+
+  // ── Tool Integrity Registry (ADR-0012) ──────────────────────────────────
+  // Rug-pull / tool-definition-poisoning defense. See docs/AI_DECISIONS.md
+  // (ADR-0012) and docs/THREAT_MODEL.md for the full model. Every mutation
+  // route below requires BOTH the exact candidate id AND its exact
+  // fingerprint — never a name-only shortcut, and there is no "accept all"
+  // endpoint. Rescan never calls a tool (see scan.ts).
+
+  if (opts.toolIntegrity) {
+    const ti = opts.toolIntegrity;
+    const serverIdentityInfo = computeServerIdentity(ti.server);
+    const serverIdentity = serverIdentityInfo.identity;
+
+    app.get('/api/tool-integrity/summary', async () => {
+      const tools = opts.storage.listToolIntegrityState(serverIdentity);
+      const counts: Record<string, number> = { pending_review: 0, trusted: 0, drifted: 0, rejected: 0, removed: 0 };
+      let lastScanAt: string | null = null;
+      for (const t of tools) {
+        counts[t.status] = (counts[t.status] ?? 0) + 1;
+        if (!lastScanAt || t.last_scan_at > lastScanAt) lastScanAt = t.last_scan_at;
+      }
+      return {
+        server_identity: serverIdentity,
+        server_id: serverIdentityInfo.serverId,
+        mode: ti.mode,
+        enforcing: ti.mode === 'explicit' || ti.mode === 'tofu',
+        last_scan_at: lastScanAt,
+        counts,
+        total: tools.length,
+      };
+    });
+
+    app.get('/api/tool-integrity/tools', async () => ({
+      server_identity: serverIdentity,
+      mode: ti.mode,
+      tools: opts.storage.listToolIntegrityState(serverIdentity).map(toToolStateSummary),
+    }));
+
+    app.get('/api/tool-integrity/history', async (request) => {
+      const q = request.query as Record<string, string>;
+      const events = opts.storage.listToolIntegrityEvents({ serverIdentity, toolName: q.tool });
+      const chain = opts.storage.verifyToolIntegrityChain();
+      return { server_identity: serverIdentity, chain_valid: chain.valid, chain_error: chain.error, events };
+    });
+
+    app.get<{ Params: { candidateId: string } }>('/api/tool-integrity/tools/:candidateId/diff', async (request, reply) => {
+      const match = opts.storage.listToolIntegrityState(serverIdentity).find((s) => s.candidate_id === request.params.candidateId);
+      if (!match) return reply.code(404).send({ error: 'No pending candidate with that id was found.' });
+      if (!match.candidate_definition_json) return reply.code(409).send({ error: 'Candidate has no stored candidate definition.' });
+      const diff = diffStoredDefinitions(match.trusted_definition_json ?? '{}', match.candidate_definition_json);
+      if (!diff.ok) return reply.code(500).send({ error: diff.error ?? 'Could not compute diff.' });
+      return {
+        tool_name: match.tool_name,
+        status: match.status,
+        trusted_fingerprint: match.trusted_fingerprint,
+        candidate_fingerprint: match.candidate_fingerprint,
+        candidate_id: match.candidate_id,
+        changes: diff.changes,
+        truncated: diff.truncated,
+      };
+    });
+
+    // Rescan — the mandatory "safe lifecycle point" for on-demand
+    // re-verification without restarting the gateway (see ADR-0012 on
+    // rescan timing; there is no notifications/tools/list_changed
+    // dependency). Never calls a tool.
+    app.post('/api/tool-integrity/rescan', async (_request, reply) => {
+      try {
+        const scanResult = await scanDownstreamServer(ti.server);
+        const applyResult = applyScanToRegistry(opts.storage, serverIdentity, serverIdentityInfo.serverId, scanResult.manifest, ti.mode);
+        if (!applyResult.ok) {
+          return reply.code(502).send({ error: applyResult.error ?? 'Scan failed.' });
+        }
+        return {
+          server_identity: serverIdentity,
+          tool_outcomes: applyResult.toolOutcomes,
+          removed_tool_names: applyResult.removedToolNames,
+        };
+      } catch (err) {
+        const sanitized = sanitizeErrorMessage(err, { source: 'internal' });
+        return reply.code(500).send({ error: sanitized.message });
+      }
+    });
+
+    /** Strictly validates a review request body: exactly `{ fingerprint: string, reason?: string }`, rejecting any unknown or execution-like field rather than silently ignoring it (mirrors the Safe Replay body-validation pattern above). */
+    function parseReviewBody(body: unknown): { ok: true; fingerprint: string; reason?: string } | { ok: false; error: string } {
+      if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        return { ok: false, error: 'Request body must be a JSON object.' };
+      }
+      const rec = body as Record<string, unknown>;
+      const allowed = new Set(['fingerprint', 'reason']);
+      const unexpected = Object.keys(rec).filter((k) => !allowed.has(k));
+      if (unexpected.length > 0) {
+        return { ok: false, error: `Request body contains unsupported field(s): ${unexpected.join(', ')}.` };
+      }
+      if (typeof rec.fingerprint !== 'string' || rec.fingerprint.length === 0) {
+        return { ok: false, error: 'Request body must include a non-empty string "fingerprint".' };
+      }
+      if (rec.reason !== undefined && typeof rec.reason !== 'string') {
+        return { ok: false, error: '"reason" must be a string if present.' };
+      }
+      // Bound reason length defensively — this is operator-authored text, not
+      // hostile server content, but an API caller could still send something
+      // huge; keep review reasons small and readable.
+      if (typeof rec.reason === 'string' && rec.reason.length > 2000) {
+        return { ok: false, error: '"reason" is too long (max 2000 characters).' };
+      }
+      return { ok: true, fingerprint: rec.fingerprint, reason: rec.reason };
+    }
+
+    app.post<{ Params: { candidateId: string }; Body: unknown }>(
+      '/api/tool-integrity/tools/:candidateId/accept',
+      async (request, reply) => {
+        const parsed = parseReviewBody(request.body);
+        if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+        const candidateId = request.params.candidateId;
+        const match = opts.storage.listToolIntegrityState(serverIdentity).find((s) => s.candidate_id === candidateId);
+        if (!match) return reply.code(404).send({ error: 'No pending candidate with that id was found.' });
+        const result = acceptCandidate(opts.storage, serverIdentity, match.tool_name, candidateId, parsed.fingerprint, 'control-api');
+        if (!result.ok) return reply.code(409).send({ error: result.error });
+        return { ok: true, tool_name: match.tool_name, status: 'trusted' };
+      }
+    );
+
+    app.post<{ Params: { candidateId: string }; Body: unknown }>(
+      '/api/tool-integrity/tools/:candidateId/reject',
+      async (request, reply) => {
+        const parsed = parseReviewBody(request.body);
+        if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+        const candidateId = request.params.candidateId;
+        const match = opts.storage.listToolIntegrityState(serverIdentity).find((s) => s.candidate_id === candidateId);
+        if (!match) return reply.code(404).send({ error: 'No pending candidate with that id was found.' });
+        const result = rejectCandidate(opts.storage, serverIdentity, match.tool_name, candidateId, parsed.fingerprint, 'control-api', parsed.reason ?? null);
+        if (!result.ok) return reply.code(409).send({ error: result.error });
+        return { ok: true, tool_name: match.tool_name, status: 'rejected' };
+      }
+    );
+  }
 
   return app;
 }

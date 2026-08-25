@@ -7,12 +7,14 @@ import Approvals from './pages/Approvals';
 import Agents from './pages/Agents';
 import Policies from './pages/Policies';
 import EventDetail from './pages/EventDetail';
+import ToolIntegrity from './pages/ToolIntegrity';
 
 type GatewayStatus = 'connected' | 'disconnected' | 'checking';
 
 export default function App() {
   const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus>('checking');
   const [pendingCount, setPendingCount] = useState(0);
+  const [toolIntegrityPendingCount, setToolIntegrityPendingCount] = useState(0);
 
   useEffect(() => {
     const check = async () => {
@@ -42,10 +44,25 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const summary = await api.toolIntegritySummary();
+        setToolIntegrityPendingCount((summary.counts.pending_review ?? 0) + (summary.counts.drifted ?? 0));
+      } catch {
+        // Ignore — keep showing the last known count until the next poll.
+      }
+    };
+    void load();
+    const interval = setInterval(load, 8_000);
+    return () => clearInterval(interval);
+  }, []);
+
   const navItems = [
     { to: '/', label: 'Overview', icon: '⬡', exact: true },
     { to: '/timeline', label: 'Timeline', icon: '◈' },
     { to: '/approvals', label: 'Approvals', icon: '◉', badge: pendingCount },
+    { to: '/tool-integrity', label: 'Tool Integrity', icon: '🛡', badge: toolIntegrityPendingCount },
     { to: '/agents', label: 'Agents', icon: '◎' },
     { to: '/policies', label: 'Policies', icon: '⬡' },
   ];
@@ -109,6 +126,7 @@ export default function App() {
           <Route path="/" element={<Overview />} />
           <Route path="/timeline" element={<Timeline />} />
           <Route path="/approvals" element={<Approvals onCountChange={setPendingCount} />} />
+          <Route path="/tool-integrity" element={<ToolIntegrity />} />
           <Route path="/agents" element={<Agents />} />
           <Route path="/policies" element={<Policies />} />
           <Route path="/events/:id" element={<EventDetail />} />

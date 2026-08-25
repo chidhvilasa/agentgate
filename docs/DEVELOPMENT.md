@@ -77,14 +77,19 @@ To point an MCP client (e.g. Claude Code) at AgentGate instead of a downstream s
 node examples/secret-exfiltration/demo.mjs        # attack demo, inbound: secret in tool-call arguments
 node examples/downstream-secret-result/demo.mjs   # attack demo, outbound: secret in a downstream result AND error message
 node examples/policy-drift-replay/demo.mjs        # Safe Replay demo: policy drift detection, no execution (ADR-0010)
+node examples/tool-rug-pull/demo.mjs              # Tool Integrity demo: rug-pull detected, quarantined, and blocked (ADR-0012)
 ```
 
-All three are safe to run repeatedly and from any working directory: each writes its config, mock/fixture
+All four are safe to run repeatedly and from any working directory: each writes its config, mock/fixture
 downstream server, and SQLite database into its own unique `os.tmpdir()` directory (never the repo root), closes
 every connection and child process it opens, and removes the temp directory in a `finally` block on both success
-and failure. All three use only well-known placeholder credentials (`AKIAIOSFODNN7EXAMPLE`) — never a real one.
-The third demo is not an attack demo — it proves Safe Replay's policy-drift and no-execution behavior against a
-real historical event, not a blocked attack.
+and failure. All four use only well-known placeholder credentials (`AKIAIOSFODNN7EXAMPLE`) — never a real one.
+The third and fourth demos are not attack demos in the "malicious input blocked" sense: the third proves Safe
+Replay's policy-drift and no-execution behavior against a real historical event; the fourth proves a downstream
+server's tool DEFINITION (not a single malicious call) changing after being trusted is detected, quarantined, and
+blocked before the downstream server is contacted again — see `RUG_PULL_INJECT_FAILURE` in the script itself
+(and `packages/gateway/tests/tool-rug-pull-demo-cleanup.test.ts`) for how its `finally` cleanup is proven with a
+deterministic injected mid-run failure, not merely inspected by eye.
 
 ## Configuring output security
 
@@ -178,6 +183,31 @@ node packages/gateway/dist/cli.js replay <event-id> examples/agentgate.yml --jso
   grows that event's lineage (`GET /api/events/:id/replays` lists it), never overwrites a prior evaluation.
 - There is intentionally no execution flag anywhere in this command, the API, or the UI — do not add one. See
   the security invariant in [ADR-0010](AI_DECISIONS.md).
+
+## Using Tool Integrity locally
+
+`agentgate tools <scan|status|diff|trust|reject|history> [--config <path>]` (ADR-0012) operates against the same
+database a running (or previously-run) gateway uses — you do not need to stop the gateway first; `scan`/`trust`/
+`reject` all take effect on the live gateway's own enforcement immediately (registry state is re-read fresh on
+every `tools/list`/`tools/call`), without a restart.
+
+```sh
+# Add tool_integrity: { mode: explicit } to your config first (agentgate init already does this for new projects).
+node packages/gateway/dist/cli.js tools scan --config agentgate.yml       # rescan now — never calls a tool
+node packages/gateway/dist/cli.js tools status --config agentgate.yml --json
+node packages/gateway/dist/cli.js tools diff <candidate-id> --config agentgate.yml
+node packages/gateway/dist/cli.js tools trust  <candidate-id> --fingerprint <hash> --config agentgate.yml
+node packages/gateway/dist/cli.js tools reject <candidate-id> --fingerprint <hash> --config agentgate.yml
+node packages/gateway/dist/cli.js tools history --config agentgate.yml
+```
+
+- `<candidate-id>` and `--fingerprint <hash>` both come from `tools status`/`tools diff` output — never type these
+  by hand from memory; they must be the CURRENT values on record, or `trust`/`reject` fails closed with a
+  "stale or unknown candidate" error rather than silently applying to whatever the current candidate happens to
+  be.
+- `scan`/`status`/`diff`/`history` never call a tool and never mutate trust state — only `trust`/`reject` do.
+- Try `node examples/tool-rug-pull/demo.mjs` for a full, real, end-to-end walkthrough (trust → rug-pull →
+  rescan → diff → block → reject → distinct benign update trusted).
 
 ## Adding a policy rule
 
@@ -274,6 +304,7 @@ pnpm run test
 node examples/secret-exfiltration/demo.mjs
 node examples/downstream-secret-result/demo.mjs
 node examples/policy-drift-replay/demo.mjs
+node examples/tool-rug-pull/demo.mjs
 node scripts/verify-packed-install.mjs
 node packages/gateway/dist/cli.js smoke-test
 git diff --check

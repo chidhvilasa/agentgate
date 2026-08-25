@@ -681,3 +681,54 @@ input, select, textarea { font: inherit; }
 .mt-4          { margin-top: 4px; }
 .mt-8          { margin-top: 8px; }
 .mt-16         { margin-top: 16px; }
+
+/* ─── Tool Integrity (Milestone 6, ADR-0012) ─────────────────────────────── */
+.ti-mode-banner { margin-bottom: 16px; }
+
+.ti-untrusted-banner {
+  background: rgba(245,158,11,0.08);
+  border: 1px solid rgba(245,158,11,0.3);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  font-size: 12.5px;
+  color: var(--text-warning);
+  margin-bottom: 16px;
+}
+
+.ti-error {
+  background: rgba(239,68,68,0.08);
+  border: 1px solid rgba(239,68,68,0.3);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--text-danger);
+}
+
+.ti-diff-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.ti-diff-row {
+  border: 1px solid var(--border-color, rgba(148,163,184,0.2));
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  font-size: 12.5px;
+  word-break: break-word;
+}
+
+.ti-diff-kind {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+}
+
+.ti-diff-path { color: var(--text-secondary); margin-bottom: 4px; }
+.ti-diff-before { color: var(--color-denied); font-family: var(--font-mono); font-size: 11.5px; white-space: pre-wrap; }
+.ti-diff-after  { color: var(--color-allowed); font-family: var(--font-mono); font-size: 11.5px; white-space: pre-wrap; }

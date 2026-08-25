@@ -76,7 +76,84 @@ export const api = {
    */
   replay: (eventId: string) => postForResult<ReplayEvaluationResponse>(`/api/events/${eventId}/replay`),
   replays: (eventId: string) => get<ReplayEvaluationSummary[]>(`/api/events/${eventId}/replays`),
+
+  // ── Tool Integrity Registry (ADR-0012) ──────────────────────────────────
+  // Rug-pull / tool-definition-poisoning defense. Every mutation call
+  // requires BOTH the exact candidate id AND its exact fingerprint — there
+  // is no "trust all" call in this client, by design.
+  toolIntegritySummary: () => get<ToolIntegritySummary>('/api/tool-integrity/summary'),
+  toolIntegrityTools: () => get<{ server_identity: string; mode: string; tools: ToolIntegrityToolSummary[] }>('/api/tool-integrity/tools'),
+  toolIntegrityHistory: (toolName?: string) =>
+    get<{ server_identity: string; chain_valid: boolean; chain_error?: string; events: ToolIntegrityEventWire[] }>(
+      `/api/tool-integrity/history${toolName ? `?tool=${encodeURIComponent(toolName)}` : ''}`
+    ),
+  toolIntegrityDiff: (candidateId: string) => get<ToolIntegrityDiffResponse>(`/api/tool-integrity/tools/${encodeURIComponent(candidateId)}/diff`),
+  toolIntegrityRescan: () =>
+    postForResult<{ server_identity: string; tool_outcomes: Array<{ toolName: string; status: string; changed: boolean }>; removed_tool_names: string[] }>(
+      '/api/tool-integrity/rescan'
+    ),
+  toolIntegrityAccept: (candidateId: string, fingerprint: string) =>
+    postForResult<{ ok: true; tool_name: string; status: string }>(`/api/tool-integrity/tools/${encodeURIComponent(candidateId)}/accept`, { fingerprint }),
+  toolIntegrityReject: (candidateId: string, fingerprint: string, reason?: string) =>
+    postForResult<{ ok: true; tool_name: string; status: string }>(`/api/tool-integrity/tools/${encodeURIComponent(candidateId)}/reject`, {
+      fingerprint,
+      ...(reason ? { reason } : {}),
+    }),
 };
+
+export interface ToolIntegritySummary {
+  server_identity: string;
+  server_id: string;
+  mode: 'explicit' | 'tofu' | 'monitor' | 'disabled';
+  enforcing: boolean;
+  last_scan_at: string | null;
+  counts: Record<string, number>;
+  total: number;
+}
+
+export interface ToolIntegrityToolSummary {
+  tool_name: string;
+  status: 'pending_review' | 'trusted' | 'drifted' | 'rejected' | 'removed';
+  current_fingerprint: string | null;
+  trusted_fingerprint: string | null;
+  candidate_fingerprint: string | null;
+  candidate_id: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  last_scan_at: string;
+  updated_at: string;
+}
+
+export interface ToolIntegrityEventWire {
+  id: string;
+  sequence_number: number;
+  created_at: string;
+  event_type: string;
+  server_identity: string;
+  tool_name: string | null;
+  fingerprint: string | null;
+  state_before: string | null;
+  state_after: string | null;
+  reviewer: string | null;
+  reason: string | null;
+}
+
+export interface ToolIntegrityDiffChange {
+  path: string;
+  kind: 'field_added' | 'field_removed' | 'value_changed' | 'type_changed' | 'array_length_changed';
+  before?: string;
+  after?: string;
+}
+
+export interface ToolIntegrityDiffResponse {
+  tool_name: string;
+  status: string;
+  trusted_fingerprint: string | null;
+  candidate_fingerprint: string | null;
+  candidate_id: string | null;
+  changes: ToolIntegrityDiffChange[];
+  truncated: boolean;
+}
 
 /** Opens an SSE connection to the event stream. */
 export function openEventStream(

@@ -40,6 +40,11 @@ export async function startGateway(configPath: string): Promise<void> {
     dbPath: config.db_path,
     policyPath: config.policy,
     onEvent: (handler) => subscribers.push(handler),
+    // Milestone 6 (ADR-0012): the Tool Integrity Control API routes are
+    // scoped to the first configured downstream server, matching
+    // startStdioProxy()'s own "first server" scope for Milestone 1-era
+    // single-server support.
+    toolIntegrity: config.servers[0] ? { server: config.servers[0], mode: config.tool_integrity.mode } : undefined,
   });
 
   await controlApp.listen({ port: config.control_port, host: '127.0.0.1' });

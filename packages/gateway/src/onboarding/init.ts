@@ -96,6 +96,18 @@ control_port: 4001
 policy: ./${POLICY_FILE_NAME}
 db_path: ./${DB_FILE_NAME}
 
+# Tool Integrity Registry (rug-pull / tool-definition-poisoning defense).
+# "explicit" is the recommended, high-security mode for a NEW project: a new
+# or changed downstream tool definition is quarantined until you explicitly
+# review and accept its exact fingerprint (\`agentgate tools status\` /
+# \`agentgate tools trust <id> --fingerprint <hash>\`). This differs from
+# AgentGate's own backwards-compatibility default (omitting this section
+# entirely defaults to "monitor" — reporting only, never blocking, kept only
+# so pre-existing configs are not silently broken on upgrade). See
+# docs/POLICY_REFERENCE.md and ADR-0012 in docs/AI_DECISIONS.md.
+tool_integrity:
+  mode: explicit
+
 servers:
   # Replace this placeholder with your real downstream MCP server. Until
   # you do, \`agentgate start\` will fail to spawn it — that is expected;

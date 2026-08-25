@@ -130,3 +130,35 @@ gateway tests are correctly platform-skipped on Windows), all three pre-existing
 verify-packed-install.mjs`, and a real browser verification of the clipping fix, all passing as of this
 milestone's final candidate commit. See the dated Milestone 5 session-log entries in `docs/AI_DECISIONS.md` for
 the exact commands run and their output, phase by phase.
+
+---
+
+# Milestone 6 Verification — Tool Integrity Registry and Rug-Pull Defense (ADR-0012)
+
+Each row names an exact test file/case or reproducible command. All commands below were run from the repository
+root against this milestone's final candidate commit.
+
+| Claim | Evidence |
+|---|---|
+| Key/tool-list reordering never causes false drift; array-order changes where semantically meaningful do | `packages/gateway/tests/tool-integrity-canonicalize.test.ts` (27 golden-fixture cases) |
+| Every supported definition-field change (description, title, input/output schema, annotations, added/removed fields, unknown/future fields) is detected | `packages/gateway/tests/tool-integrity-canonicalize.test.ts`; `packages/gateway/tests/tool-integrity-diff.test.ts` (29 cases, including all 5 diff-change classifications) |
+| Duplicate and case-confusable tool names, and malformed/oversized/deeply-nested/cyclic definitions, fail closed | `packages/gateway/tests/tool-integrity-canonicalize.test.ts` |
+| Server identity is not `serverInfo.name` alone; distinguishes two servers with the same name; stable across harmless path-separator differences; changes on security-relevant config change; never persists raw env values | `packages/gateway/tests/tool-integrity-identity.test.ts` (12 cases) |
+| Every registry state transition (unseen→pending/trusted, trusted→drifted, rejected→same-fingerprint-stays-rejected/new-fingerprint-reopens-drift, removed→reappeared-always-requires-review) is correct | `packages/gateway/tests/tool-integrity-registry.test.ts` (21 cases) |
+| Exact-fingerprint accept/reject required; a stale review can never silently approve a superseded candidate | `packages/gateway/tests/tool-integrity-registry.test.ts`; `packages/gateway/tests/tool-integrity-cli.test.ts`; `packages/gateway/tests/tool-integrity-api.test.ts` (409/404 cases); `examples/tool-rug-pull/demo.mjs` (Step 14) |
+| Accepting a candidate never rewrites/deletes the prior trusted baseline or review history (append-only) | `packages/gateway/tests/tool-integrity-registry.test.ts`; `packages/gateway/tests/tool-integrity-api.test.ts` → *"reject does not rewrite or delete a previously trusted baseline"*; `examples/tool-rug-pull/demo.mjs` (Step 17) |
+| Registry migration from a pre-Milestone-6 database, restart persistence, tampering (field mutation), deleted-row (sequence gap), reordered-row, and broken-hash-link detection | `packages/gateway/tests/tool-integrity-storage-migration.test.ts` (8 cases) |
+| `scan.ts` is the ONLY Tool Integrity module that ever connects to a downstream server; every other module (including `diff.ts`) never imports the MCP SDK, `executeDownstream`, or `runPipeline` | `packages/gateway/tests/tool-integrity-no-execution.test.ts` (6 cases) |
+| A quarantined tool is filtered from the REAL gateway's `tools/list`; a direct cached-name `tools/call` is blocked BEFORE policy evaluation or downstream contact; the SAME already-open MCP client connection succeeds immediately after an out-of-process exact-fingerprint accept, with no restart | `packages/gateway/tests/tool-integrity-gateway-enforcement.test.ts` — spawns the real compiled gateway, connects a real `@modelcontextprotocol/sdk` `Client` over stdio; the downstream fixture's own call counter proves 0 calls during the blocked attempt |
+| Untrusted annotations (`readOnlyHint`/`destructiveHint`) never reduce enforced risk | `packages/gateway/src/tool-integrity/enforcement.ts` never reads them (structural, by construction — reviewed directly); `examples/tool-rug-pull/demo.mjs` generation 2 flips both annotations AND is still quarantined |
+| CLI `scan`/`status`/`diff`/`history` are read-only and never call a tool; `trust`/`reject` require exact identity/fingerprint; safe human/JSON output; correct exit codes | `packages/gateway/tests/tool-integrity-cli.test.ts` (9 cases against a real fixture downstream server) plus a manual end-to-end walkthrough of the built CLI binary |
+| Control API: auth required, hostile Host/Origin rejected, malformed candidate ids/unknown fields/oversized reason rejected (400), stale fingerprint (409), double-submit safely rejected (404, candidate already consumed), concurrent accept-vs-reject mutually exclusive, no secret/token/path leakage in any response | `packages/gateway/tests/tool-integrity-api.test.ts` (19 cases) |
+| Control Center renders every major state (loading/empty/trusted/quarantine/drifted), all 5 diff-change kinds, truncation, exact-fingerprint accept (with confirmation)/reject (no confirmation, calmer default), stale/already-consumed error surfaces, double-submit prevention, rescan busy/error, history, and renders hostile HTML/prompt-injection/ANSI as inert text only (zero `<script>` elements created) — with no "trust all" control anywhere | `apps/control-center/src/pages/ToolIntegrity.test.tsx` (31 cases) |
+| A real benign-to-malicious rug-pull is detected, quarantined, and blocked before downstream execution, end to end, against production-built packages | `examples/tool-rug-pull/demo.mjs` — ~40 in-demo assertions, all PASS, run 3× consecutively with identical results |
+| The rug-pull demo's cleanup runs even on a real injected mid-run failure, not merely a `finally` block inspected by eye | `packages/gateway/tests/tool-rug-pull-demo-cleanup.test.ts` (2 cases: injected failure → no temp-dir residue and the control port stops listening; hook is a true no-op when unset) |
+| The prior four demos have no regression | `node examples/{secret-exfiltration,downstream-secret-result,policy-drift-replay}/demo.mjs` and `node scripts/verify-packed-install.mjs` re-run and passing after this milestone's changes |
+| `agentgate init` generates new projects with the recommended `explicit` mode; the generated config is valid YAML that passes `agentgate config validate` | Manual verification (documented in the dated Milestone 6 ledger entries); `packages/gateway/tests/onboarding-init.test.ts` unaffected/still passing |
+
+**Status:** PASS as of the commands recorded in the dated Milestone 6 session-log entries in
+`docs/AI_DECISIONS.md` — see those entries for the exact test counts, gate results, and commands run, phase by
+phase; the final candidate commit's exact counts are recorded in the milestone's final report and ledger entry.

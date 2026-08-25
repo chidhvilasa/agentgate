@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
 import type { AuditEvent, Approval, ApprovalStatus, ReplayEvaluation } from '@agentgate/protocol';
+import type { ToolIntegrityEvent, ToolIntegrityState } from './tool-integrity/types.js';
 
 // ─── Schema Migrations ────────────────────────────────────────────────────────
 
@@ -126,6 +127,59 @@ const MIGRATIONS = [
   );
   CREATE INDEX IF NOT EXISTS idx_replay_source_event ON replay_evaluations(source_event_id);
   `,
+  // Milestone 6 (ADR-0012): Tool Integrity Registry. Two tables, mirroring
+  // the audit_events/audit_lifecycle_records pattern (ADR-0004) rather than
+  // the single-table replay_evaluations pattern (ADR-0010), because a tool
+  // DOES have a mutable "current state" worth projecting cheaply (is this
+  // tool trusted right now?) that the gateway's enforcement path needs to
+  // check on every discovery/call — replaying the full event log on every
+  // check would be both slow and unnecessary. `tool_integrity_events` is
+  // the append-only, hash-chained source of truth; `tool_integrity_state`
+  // is a mutable projection over it, exactly like `audit_events` is over
+  // `audit_lifecycle_records`. MUST stay appended at the end of MIGRATIONS
+  // — see the ADR-0009 migration above for why.
+  `
+  CREATE TABLE IF NOT EXISTS tool_integrity_events (
+    id TEXT PRIMARY KEY,
+    sequence_number INTEGER NOT NULL UNIQUE,
+    previous_event_hash TEXT,
+    event_hash TEXT NOT NULL,
+    canonical_payload_version TEXT NOT NULL DEFAULT '1',
+    created_at TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    server_identity TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    tool_name TEXT,
+    fingerprint TEXT,
+    previous_fingerprint TEXT,
+    manifest_fingerprint TEXT,
+    state_before TEXT,
+    state_after TEXT,
+    reviewer TEXT,
+    reason TEXT,
+    definition_json TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_tool_integrity_events_server ON tool_integrity_events(server_identity);
+  CREATE INDEX IF NOT EXISTS idx_tool_integrity_events_tool ON tool_integrity_events(server_identity, tool_name);
+
+  CREATE TABLE IF NOT EXISTS tool_integrity_state (
+    server_identity TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    current_fingerprint TEXT,
+    trusted_fingerprint TEXT,
+    candidate_fingerprint TEXT,
+    candidate_id TEXT,
+    trusted_definition_json TEXT,
+    candidate_definition_json TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    last_scan_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (server_identity, tool_name)
+  );
+  `,
 ];
 
 // ─── Canonical Payload for Hashing ────────────────────────────────────────────
@@ -185,6 +239,8 @@ export class AuditStorage {
   private lastHash: string | null;
   private nextReplaySeq: number;
   private lastReplayHash: string | null;
+  private nextToolIntegritySeq: number;
+  private lastToolIntegrityHash: string | null;
 
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
@@ -207,6 +263,14 @@ export class AuditStorage {
 
     this.nextReplaySeq = lastReplay ? lastReplay.sequence_number + 1 : 1;
     this.lastReplayHash = lastReplay?.replay_hash ?? null;
+
+    // Resume the independent Tool Integrity chain (ADR-0012)
+    const lastToolIntegrity = this.db
+      .prepare('SELECT sequence_number, event_hash FROM tool_integrity_events ORDER BY sequence_number DESC LIMIT 1')
+      .get() as { sequence_number: number; event_hash: string } | undefined;
+
+    this.nextToolIntegritySeq = lastToolIntegrity ? lastToolIntegrity.sequence_number + 1 : 1;
+    this.lastToolIntegrityHash = lastToolIntegrity?.event_hash ?? null;
   }
 
   private runMigrations(): void {
@@ -751,6 +815,256 @@ export class AuditStorage {
   disconnectAgent(session_id: string): void {
     this.db.prepare(`UPDATE agents SET state = 'disconnected', last_activity_at = ? WHERE session_id = ?`)
       .run(new Date().toISOString(), session_id);
+  }
+
+  // ─── Tool Integrity Registry (Milestone 6, ADR-0012) ───────────────────────
+
+  /**
+   * Appends one immutable, hash-chained Tool Integrity event. This method
+   * only persists and hash-chains what it is given — all state-machine
+   * decision logic (what event to emit, whether a transition is valid)
+   * lives in `tool-integrity/registry.ts`, exactly mirroring how
+   * `insertReplayEvaluation()` only persists what `replay.ts` already
+   * decided.
+   */
+  insertToolIntegrityEvent(
+    data: Omit<ToolIntegrityEvent, 'id' | 'sequence_number' | 'previous_event_hash' | 'event_hash' | 'canonical_payload_version'>
+  ): ToolIntegrityEvent {
+    const id = uuidv4();
+    const sequence_number = this.nextToolIntegritySeq++;
+    const previous_event_hash = this.lastToolIntegrityHash;
+    const canonical_payload_version = '1' as const;
+
+    const canonicalPayload = {
+      id,
+      sequence_number,
+      previous_event_hash,
+      created_at: data.created_at,
+      event_type: data.event_type,
+      server_identity: data.server_identity,
+      server_id: data.server_id,
+      tool_name: data.tool_name,
+      fingerprint: data.fingerprint,
+      previous_fingerprint: data.previous_fingerprint,
+      manifest_fingerprint: data.manifest_fingerprint,
+      state_before: data.state_before,
+      state_after: data.state_after,
+      reviewer: data.reviewer,
+      reason: data.reason,
+      definition_json: data.definition_json,
+    };
+
+    const event_hash = sha256(canonicalize(canonicalPayload));
+    this.lastToolIntegrityHash = event_hash;
+
+    this.db
+      .prepare(
+        `INSERT INTO tool_integrity_events (
+          id, sequence_number, previous_event_hash, event_hash, canonical_payload_version,
+          created_at, event_type, server_identity, server_id, tool_name,
+          fingerprint, previous_fingerprint, manifest_fingerprint,
+          state_before, state_after, reviewer, reason, definition_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        sequence_number,
+        previous_event_hash,
+        event_hash,
+        canonical_payload_version,
+        data.created_at,
+        data.event_type,
+        data.server_identity,
+        data.server_id,
+        data.tool_name,
+        data.fingerprint,
+        data.previous_fingerprint,
+        data.manifest_fingerprint,
+        data.state_before,
+        data.state_after,
+        data.reviewer,
+        data.reason,
+        data.definition_json
+      );
+
+    return { ...data, id, sequence_number, previous_event_hash, event_hash, canonical_payload_version };
+  }
+
+  /** Lists all Tool Integrity events, optionally scoped to one server and/or tool, oldest first. */
+  listToolIntegrityEvents(filter: { serverIdentity?: string; toolName?: string } = {}): ToolIntegrityEvent[] {
+    let sql = 'SELECT * FROM tool_integrity_events';
+    const params: string[] = [];
+    const clauses: string[] = [];
+    if (filter.serverIdentity) {
+      clauses.push('server_identity = ?');
+      params.push(filter.serverIdentity);
+    }
+    if (filter.toolName) {
+      clauses.push('tool_name = ?');
+      params.push(filter.toolName);
+    }
+    if (clauses.length > 0) sql += ' WHERE ' + clauses.join(' AND ');
+    sql += ' ORDER BY sequence_number ASC';
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToToolIntegrityEvent(r));
+  }
+
+  /** Reads the current projected state for one (server, tool) pair, or null if never observed. */
+  getToolIntegrityState(serverIdentity: string, toolName: string): ToolIntegrityState | null {
+    const row = this.db
+      .prepare('SELECT * FROM tool_integrity_state WHERE server_identity = ? AND tool_name = ?')
+      .get(serverIdentity, toolName) as Record<string, unknown> | undefined;
+    return row ? this.rowToToolIntegrityState(row) : null;
+  }
+
+  /** Lists every tool's current state, optionally scoped to one server. */
+  listToolIntegrityState(serverIdentity?: string): ToolIntegrityState[] {
+    const rows = serverIdentity
+      ? (this.db.prepare('SELECT * FROM tool_integrity_state WHERE server_identity = ? ORDER BY tool_name ASC').all(serverIdentity) as Record<string, unknown>[])
+      : (this.db.prepare('SELECT * FROM tool_integrity_state ORDER BY server_identity ASC, tool_name ASC').all() as Record<string, unknown>[]);
+    return rows.map((r) => this.rowToToolIntegrityState(r));
+  }
+
+  /**
+   * Writes (creates or overwrites) the current projected state for one
+   * (server, tool) pair. This is a mutable projection, exactly like
+   * `audit_events` is over `audit_lifecycle_records` — the append-only
+   * source of truth is `tool_integrity_events`; this table only exists so
+   * enforcement checks are a cheap primary-key lookup instead of a full
+   * event-log replay on every discovery/call.
+   */
+  upsertToolIntegrityState(state: ToolIntegrityState): void {
+    this.db
+      .prepare(
+        `INSERT INTO tool_integrity_state (
+          server_identity, tool_name, server_id, status, current_fingerprint,
+          trusted_fingerprint, candidate_fingerprint, candidate_id,
+          trusted_definition_json, candidate_definition_json,
+          first_seen_at, last_seen_at, last_scan_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(server_identity, tool_name) DO UPDATE SET
+          server_id = excluded.server_id,
+          status = excluded.status,
+          current_fingerprint = excluded.current_fingerprint,
+          trusted_fingerprint = excluded.trusted_fingerprint,
+          candidate_fingerprint = excluded.candidate_fingerprint,
+          candidate_id = excluded.candidate_id,
+          trusted_definition_json = excluded.trusted_definition_json,
+          candidate_definition_json = excluded.candidate_definition_json,
+          last_seen_at = excluded.last_seen_at,
+          last_scan_at = excluded.last_scan_at,
+          updated_at = excluded.updated_at`
+      )
+      .run(
+        state.server_identity,
+        state.tool_name,
+        state.server_id,
+        state.status,
+        state.current_fingerprint,
+        state.trusted_fingerprint,
+        state.candidate_fingerprint,
+        state.candidate_id,
+        state.trusted_definition_json,
+        state.candidate_definition_json,
+        state.first_seen_at,
+        state.last_seen_at,
+        state.last_scan_at,
+        state.updated_at
+      );
+  }
+
+  /**
+   * Independently re-walks the Tool Integrity event chain, exactly
+   * mirroring verifyChain()/verifyReplayChain()'s approach — recomputes
+   * each event's hash from its own stored data and the stored
+   * previous_event_hash, failing on the first mismatch or sequence gap.
+   */
+  verifyToolIntegrityChain(): { valid: boolean; error?: string; count: number } {
+    const rows = this.db.prepare('SELECT * FROM tool_integrity_events ORDER BY sequence_number ASC').all() as Record<string, unknown>[];
+    if (rows.length === 0) return { valid: true, count: 0 };
+
+    let expectedHash: string | null = null;
+    let expectedSeq = 1;
+
+    for (const row of rows) {
+      if (row.sequence_number !== expectedSeq) {
+        return { valid: false, error: `Tool Integrity sequence gap at expected seq ${expectedSeq}, found ${row.sequence_number}`, count: expectedSeq - 1 };
+      }
+      if (row.previous_event_hash !== expectedHash) {
+        return { valid: false, error: `Tool Integrity hash chain broken at seq ${expectedSeq}. Expected prev: ${expectedHash}, got: ${row.previous_event_hash}`, count: expectedSeq - 1 };
+      }
+
+      const canonicalPayload = {
+        id: row.id,
+        sequence_number: row.sequence_number,
+        previous_event_hash: row.previous_event_hash,
+        created_at: row.created_at,
+        event_type: row.event_type,
+        server_identity: row.server_identity,
+        server_id: row.server_id,
+        tool_name: row.tool_name,
+        fingerprint: row.fingerprint,
+        previous_fingerprint: row.previous_fingerprint,
+        manifest_fingerprint: row.manifest_fingerprint,
+        state_before: row.state_before,
+        state_after: row.state_after,
+        reviewer: row.reviewer,
+        reason: row.reason,
+        definition_json: row.definition_json,
+      };
+
+      const computedHash = sha256(canonicalize(canonicalPayload));
+      if (computedHash !== row.event_hash) {
+        return { valid: false, error: `Tampering detected in Tool Integrity chain at seq ${expectedSeq}. Computed hash does not match stored event_hash.`, count: expectedSeq - 1 };
+      }
+
+      expectedHash = row.event_hash;
+      expectedSeq++;
+    }
+
+    return { valid: true, count: rows.length };
+  }
+
+  private rowToToolIntegrityEvent(row: Record<string, unknown>): ToolIntegrityEvent {
+    return {
+      id: row.id as string,
+      sequence_number: row.sequence_number as number,
+      previous_event_hash: row.previous_event_hash as string | null,
+      event_hash: row.event_hash as string,
+      canonical_payload_version: (row.canonical_payload_version as string | undefined) ?? '1',
+      created_at: row.created_at as string,
+      event_type: row.event_type as ToolIntegrityEvent['event_type'],
+      server_identity: row.server_identity as string,
+      server_id: row.server_id as string,
+      tool_name: row.tool_name as string | null,
+      fingerprint: row.fingerprint as string | null,
+      previous_fingerprint: row.previous_fingerprint as string | null,
+      manifest_fingerprint: row.manifest_fingerprint as string | null,
+      state_before: row.state_before as ToolIntegrityEvent['state_before'],
+      state_after: row.state_after as ToolIntegrityEvent['state_after'],
+      reviewer: row.reviewer as string | null,
+      reason: row.reason as string | null,
+      definition_json: row.definition_json as string | null,
+    };
+  }
+
+  private rowToToolIntegrityState(row: Record<string, unknown>): ToolIntegrityState {
+    return {
+      server_identity: row.server_identity as string,
+      server_id: row.server_id as string,
+      tool_name: row.tool_name as string,
+      status: row.status as ToolIntegrityState['status'],
+      current_fingerprint: row.current_fingerprint as string | null,
+      trusted_fingerprint: row.trusted_fingerprint as string | null,
+      candidate_fingerprint: row.candidate_fingerprint as string | null,
+      candidate_id: row.candidate_id as string | null,
+      trusted_definition_json: row.trusted_definition_json as string | null,
+      candidate_definition_json: row.candidate_definition_json as string | null,
+      first_seen_at: row.first_seen_at as string,
+      last_seen_at: row.last_seen_at as string,
+      last_scan_at: row.last_scan_at as string,
+      updated_at: row.updated_at as string,
+    };
   }
 
   // ─── Row Mappers ─────────────────────────────────────────────────────────────

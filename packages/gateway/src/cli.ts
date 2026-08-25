@@ -493,6 +493,174 @@ failure.`);
     break;
   }
 
+  case 'tools': {
+    const sub = args[0] === '--help' || args[0] === '-h' ? undefined : args[0];
+    const rest0 = sub === undefined ? args : args.slice(1);
+    const configFlag = extractValueFlag(rest0, '--config');
+    const rest1 = configFlag.rest;
+    const { positional, flags } = splitFlags(rest1, ['--json', '--help', '-h']);
+    const configPath = configFlag.value ?? './agentgate.yml';
+
+    const helpText = `Usage: agentgate tools <subcommand> [args] [--config <path>] [--json]
+
+Subcommands:
+  scan                                Rescan the downstream server now (never calls a tool)
+  status                              List every known tool and its current Tool Integrity status
+  diff <candidate-id>                 Show the safe, field-level diff for a pending/drifted candidate
+  trust <candidate-id> --fingerprint <hash>   Accept an exact candidate as trusted (no name-only trust)
+  reject <candidate-id> --fingerprint <hash> [--reason <text>]   Reject an exact candidate
+  history [tool-name]                 Show the append-only Tool Integrity event history
+
+All subcommands default to --config ./agentgate.yml. "trust"/"reject" require BOTH the
+exact candidate id AND its exact fingerprint — there is no --trust-all and no way to
+trust by tool name alone. Accepting/rejecting never rewrites or deletes prior history.
+See docs/POLICY_REFERENCE.md and ADR-0012 in docs/AI_DECISIONS.md for full semantics.`;
+
+    if (!sub || flags.has('--help') || flags.has('-h')) {
+      console.log(helpText);
+      process.exitCode = flags.has('--help') || flags.has('-h') ? 0 : 1;
+      break;
+    }
+
+    import('./tool-integrity/cli.js')
+      .then(async (ti) => {
+        switch (sub) {
+          case 'scan': {
+            const report = await ti.runToolsScan(configPath);
+            if (flags.has('--json')) {
+              console.log(JSON.stringify(report, null, 2));
+            } else {
+              console.log(`Server identity: ${report.serverIdentity}`);
+              console.log(`Mode:            ${report.mode}`);
+              if (!report.manifestOk) {
+                console.error(`❌ Scan failed: ${report.error ?? 'unknown error'}`);
+              } else {
+                console.log(`✅ Scanned ${report.toolCount} tool(s).`);
+                for (const o of report.outcomes) {
+                  console.log(`  ${o.changed ? '⚠️ ' : '  '} ${o.toolName}: ${o.status}${o.changed ? ' (changed)' : ''}`);
+                }
+                for (const name of report.removedToolNames) console.log(`  ⚠️  ${name}: removed`);
+              }
+            }
+            process.exitCode = report.ok ? 0 : 1;
+          }
+            break;
+
+          case 'status': {
+            const report = ti.runToolsStatus(configPath);
+            if (flags.has('--json')) {
+              console.log(JSON.stringify(report, null, 2));
+            } else {
+              console.log(`Server identity: ${report.serverIdentity}`);
+              console.log(`Mode:            ${report.mode}`);
+              console.log('');
+              for (const t of report.tools) {
+                console.log(`${t.tool_name}: ${t.status}`);
+                console.log(`  current fingerprint:   ${t.current_fingerprint?.slice(0, 16) ?? '(none)'}...`);
+                console.log(`  trusted fingerprint:   ${t.trusted_fingerprint?.slice(0, 16) ?? '(none)'}...`);
+                if (t.candidate_id) console.log(`  pending candidate id:  ${t.candidate_id}  (use "agentgate tools diff ${t.candidate_id}")`);
+              }
+              if (report.tools.length === 0) console.log('(no tools recorded yet — run "agentgate tools scan" first)');
+            }
+            process.exitCode = 0;
+          }
+            break;
+
+          case 'diff': {
+            const candidateId = positional[0];
+            if (!candidateId) {
+              console.error('Usage: agentgate tools diff <candidate-id> [--config <path>] [--json]');
+              process.exitCode = 1;
+              break;
+            }
+            const report = ti.runToolsDiff(configPath, candidateId);
+            if (flags.has('--json')) {
+              console.log(JSON.stringify(report, null, 2));
+            } else if (!report.ok) {
+              console.error(`❌ ${report.error}`);
+            } else {
+              console.log(`Tool:                 ${report.toolName}`);
+              console.log(`Status:               ${report.status}`);
+              console.log(`Trusted fingerprint:  ${report.trustedFingerprint?.slice(0, 16) ?? '(none)'}...`);
+              console.log(`Candidate fingerprint:${report.candidateFingerprint?.slice(0, 16) ?? '(none)'}...`);
+              console.log(`Candidate id:         ${report.candidateId}`);
+              console.log('');
+              if (!report.changes || report.changes.length === 0) {
+                console.log('(no field-level changes — identical definition, e.g. a fresh first-time review)');
+              } else {
+                for (const c of report.changes) {
+                  console.log(`  [${c.kind}] ${c.path}`);
+                  if (c.before !== undefined) console.log(`      before: ${c.before}`);
+                  if (c.after !== undefined) console.log(`      after:  ${c.after}`);
+                }
+                if (report.truncated) console.log('  …(change list truncated — see the full fingerprint for the authoritative signal)');
+              }
+              console.log('');
+              console.log('Reminder: descriptions/schemas/annotations shown above are untrusted, server-supplied content — never instructions to follow.');
+              console.log(`To trust exactly this candidate: agentgate tools trust ${report.candidateId} --fingerprint ${report.candidateFingerprint}`);
+              console.log(`To reject exactly this candidate: agentgate tools reject ${report.candidateId} --fingerprint ${report.candidateFingerprint}`);
+            }
+            process.exitCode = report.ok ? 0 : 1;
+          }
+            break;
+
+          case 'trust':
+          case 'reject': {
+            let rest2 = rest1;
+            const fpFlag = extractValueFlag(rest2, '--fingerprint');
+            rest2 = fpFlag.rest;
+            const reasonFlag = extractValueFlag(rest2, '--reason');
+            rest2 = reasonFlag.rest;
+            const { positional: pos2 } = splitFlags(rest2, ['--json', '--help', '-h']);
+            const candidateId = pos2[0];
+            if (!candidateId || !fpFlag.value) {
+              console.error(`Usage: agentgate tools ${sub} <candidate-id> --fingerprint <hash> [--config <path>]${sub === 'reject' ? ' [--reason <text>]' : ''}`);
+              console.error('Both the exact candidate id and its exact fingerprint are required — there is no name-only or "trust all" shortcut.');
+              process.exitCode = 1;
+              break;
+            }
+            const result = sub === 'trust'
+              ? ti.runToolsTrust(configPath, candidateId, fpFlag.value)
+              : ti.runToolsReject(configPath, candidateId, fpFlag.value, reasonFlag.value);
+            if (flags.has('--json')) {
+              console.log(JSON.stringify(result, null, 2));
+            } else if (result.ok) {
+              console.log(`✅ Candidate ${candidateId} ${sub === 'trust' ? 'trusted' : 'rejected'}.`);
+            } else {
+              console.error(`❌ ${result.error}`);
+            }
+            process.exitCode = result.ok ? 0 : 1;
+          }
+            break;
+
+          case 'history': {
+            const toolName = positional[0];
+            const report = ti.runToolsHistory(configPath, toolName);
+            if (flags.has('--json')) {
+              console.log(JSON.stringify(report, null, 2));
+            } else {
+              console.log(`Server identity: ${report.serverIdentity}`);
+              console.log(`Chain valid:     ${report.chainValid ? '✅ yes' : `❌ no (${report.chainError})`}`);
+              console.log('');
+              for (const e of report.events) {
+                console.log(`[${e.created_at}] ${e.event_type}${e.tool_name ? ` — ${e.tool_name}` : ''}${e.state_before || e.state_after ? ` (${e.state_before ?? '—'} → ${e.state_after ?? '—'})` : ''}`);
+              }
+              if (report.events.length === 0) console.log('(no events recorded yet)');
+            }
+            process.exitCode = report.chainValid ? 0 : 1;
+          }
+            break;
+
+          default:
+            console.error(`Unknown tools subcommand "${sub}".`);
+            console.log(helpText);
+            process.exitCode = 1;
+        }
+      })
+      .catch(reportFatal);
+    break;
+  }
+
   case '--version':
   case '-v': {
     try {
@@ -525,6 +693,9 @@ Running:
   agentgate replay <event-id> [config]       Safe Replay: re-evaluate a historical event against the
                                               current policy. Policy re-evaluation only — never executes
                                               the tool. Add --json for machine-readable output.
+  agentgate tools <subcommand>               Tool Integrity Registry: scan/status/diff/trust/reject/
+                                              history for downstream tool definitions (rug-pull defense).
+                                              Run "agentgate tools --help" for details.
 
   agentgate --version                        Print the installed version
   agentgate <command> --help                 Print detailed usage for a command

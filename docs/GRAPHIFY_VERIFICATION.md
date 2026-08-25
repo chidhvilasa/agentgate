@@ -298,25 +298,99 @@ positive documented in Milestone 4), and the two "real path" results are legitim
 whose safety depends on *configuration* (verified by reading source), not on the mere existence of the call
 edge itself — exactly the same caveat this document has carried since Milestone 4's findings.
 
+## Milestone 6 incremental update (2026-08-25) — Tool Integrity Registry and Rug-Pull Defense
+
+After implementing the Tool Integrity Registry (ADR-0012: `packages/gateway/src/tool-integrity/*`, the six new
+`agentgate tools` CLI subcommands, seven new Control API routes, the Control Center's `ToolIntegrity.tsx` page,
+and `examples/tool-rug-pull/demo.mjs`), `graphify update .` was re-run:
+
+```text
+$ graphify update .
+Re-extracting code files in . (no LLM needed)...
+  AST extraction: 101/101 uncached files (100%) [22 workers]
+[graphify watch] Rebuilt: 1218 nodes, 1744 edges, 85 communities
+[graphify watch] graph.json, graph.html and GRAPH_REPORT.md updated in graphify-out
+```
+
+1017 → 1218 nodes and 1322 → 1744 edges (the Milestone 5 baseline recorded above), reflecting the eight new
+`tool-integrity/*.ts` modules, the CLI/Control API/Control Center additions, the rug-pull demo and its dynamic
+fixture server, and eleven new test files.
+
+**Required verification queries** (per the governing prompt, each cross-checked against source):
+
+1. *"how does tool discovery flow from canonicalization to fingerprint to registry"* → correctly surfaced
+   `scan.ts`, `canonicalize.ts` (`canonicalizeToolDefinition()`/`canonicalizeManifest()`), `registry.ts`
+   (`applyScanToRegistry()`), `storage.ts`, and the relevant test files as the top-connected nodes — an accurate,
+   scoped orientation to the real discovery→fingerprint→registry pipeline.
+2. *"how does upstream tool list filtering and direct call quarantine enforcement work in the gateway"* →
+   surfaced `startStdioProxy() --calls--> applyScanToRegistry()` (confirmed accurate: `stdio.ts:L61`) directly,
+   but did not surface `filterTrustedTools()`/`checkCallAllowed()` as edges within the query's token budget
+   (both exist as separate, real edges — see the targeted `graphify explain` follow-up below, which found them).
+3. `graphify explain "filterTrustedTools"` and `graphify explain "checkCallAllowed"` → both correctly show
+   `startStdioProxy() --calls--> filterTrustedTools()` at `stdio.ts:L90` and
+   `startStdioProxy() --calls--> checkCallAllowed()` at `stdio.ts:L104`. **Cross-checked directly against
+   source** (`sed -n '85,108p' packages/gateway/src/transport/stdio.ts`): both line numbers and call sites match
+   exactly — `filterTrustedTools()` is called inside the `ListToolsRequestSchema` handler (attributed to the
+   enclosing `startStdioProxy()` function, which is correct AST-level attribution since the handler is an inline
+   closure, not a separately named function) and `checkCallAllowed()` inside the `CallToolRequestSchema` handler,
+   exactly as ADR-0012 describes.
+4. *"Control Center Tool Integrity page calling the Control API accept and reject routes with exact
+   fingerprint"* → correctly surfaced `apps/control-center/src/api.ts`, `ToolIntegrity.tsx`, `control.ts`,
+   `acceptCandidate()`, and `rejectCandidate()` all in the same result set, confirming the graph does connect
+   the Control Center → Control API → registry path at the file/community level.
+5. `graphify path "src/cli.ts" "tool-integrity/registry.ts"` → **2 hops**:
+   `src/cli.ts --dynamic_import--> tool-integrity/cli.ts --imports_from--> tool-integrity/registry.ts`.
+   **Confirmed accurate**: `cli.ts`'s `tools` command handler does `import('./tool-integrity/cli.js')`
+   (dynamic import, matching the established lazy-load pattern already used for every other CLI subcommand in
+   this codebase), and `tool-integrity/cli.ts` does statically `import { ... } from './registry.js'`.
+
+**New false-path/coverage-gap findings this milestone** (both cross-checked against source, both confirmed to be
+the SAME class of pre-existing extractor limitation already documented in Milestones 4–5, not new defects):
+
+1. `graphify explain "toolIntegrityAccept"` → **"No node matching found."** `toolIntegrityAccept` (and every
+   other `api.ts` client method added this milestone — `toolIntegritySummary`, `toolIntegrityDiff`, etc.) is
+   defined as an arrow-function VALUE inside an object literal (`export const api = { toolIntegrityAccept:
+   (candidateId, fingerprint) => ... }`), not a standalone named function declaration. **Verified this is a
+   pre-existing, systemic limitation, not new**: `graphify explain "replay"` (the Milestone 4 `api.replay`
+   method, defined identically) returns 8 AMBIGUOUS matches across other files but never the `api.ts` method
+   itself either — confirming the AST extractor does not attribute object-literal arrow-function properties as
+   distinct callable nodes, for old code and new code alike.
+2. `graphify explain "bumpCallCounter"` (rug-pull fixture) → shows only a `contains` edge (degree 1), missing
+   the real call edge from the `CallToolRequestSchema` inline handler that actually invokes it on every real
+   tool call. **Verified this is the same class of limitation**: the call site is inside an anonymous arrow
+   function passed directly as a `server.setRequestHandler(...)` argument, not a named function — the extractor
+   does not attribute calls made from an inline/anonymous callback body to a symbol. The real, correct behavior
+   (the counter increments exactly once per real `read_file` call and never during discovery) is independently
+   proven by the passing executable tests and the rug-pull demo's own counter assertions
+   (`tests/tool-integrity-gateway-enforcement.test.ts`, `examples/tool-rug-pull/demo.mjs`), not by the graph.
+
+**Net assessment**: every query and path test this milestone was cross-checked against real source before being
+trusted. Two genuine positive results were confirmed byte-accurate against source (`filterTrustedTools()`/
+`checkCallAllowed()` call sites, the CLI→registry dynamic-import path). Two coverage gaps were found and both
+confirmed to be instances of an already-documented limitation class (object-literal/inline-callback function
+attribution), not new tool defects or new blind spots specific to Tool Integrity — no source change was made
+solely because Graphify reported (or failed to report) a path without independently confirming it first.
+
 ## Conclusion
 
 Graphify is genuinely functional against AgentGate: it builds a graph from this repository in seconds with no
 API key (511 nodes at Milestone 1 → 702 at the end of Milestone 2 → 813 after Milestone 3 → 903 after Milestone
-4 → 1017 after Milestone 5), its god-node and surprising-connection analysis independently rediscovers the real
-architectural hubs, targeted queries consistently return directly useful and source-accurate vocabulary for
-orientation, `path` produces correct traces for anything actually connected by a relative-import edge in source,
-and incremental `update` calls after further code changes (now exercised five times across four milestones)
-reliably reflect those changes. Its limitations, confirmed in Milestone 4 and *not re-triggered* in Milestone 5
-(the new onboarding modules' import graphs happened not to exercise either false-positive/false-negative
-pattern — a useful data point in itself, not evidence the limitations went away): it cannot trace a relationship
-with no
-static source-level edge at all (a frontend/backend HTTP boundary, confirmed again); its `imports_from`/`contains`
-edges are file-level, not per-named-export, which can produce a misleading transitive "path" between a file and
-a symbol the importing file never actually imports (newly confirmed this milestone, always verified against
-source before being trusted); and it does not resolve cross-workspace-package (`@agentgate/policy`-style) import
-edges the way it resolves relative imports (also newly confirmed this milestone). None of these are tool defects
-in the sense of Graphify malfunctioning — they are the accurate behavior of an AST-only, no-LLM-required tool,
-and every finding in this document was checked against real source before being trusted or acted on. It remains
-adopted as **optional local developer tooling** (see `docs/DEVELOPMENT.md`), not a build or CI dependency, and
-specifically **not** a substitute for the executable tests that actually prove Safe Replay's no-execution
-invariant.
+4 → 1017 after Milestone 5 → 1218 after Milestone 6), its god-node and surprising-connection analysis
+independently rediscovers the real architectural hubs, targeted queries consistently return directly useful and
+source-accurate vocabulary for orientation, `path` produces correct traces for anything actually connected by a
+relative-import edge in source, and incremental `update` calls after further code changes (now exercised six
+times across five milestones) reliably reflect those changes. Its limitations, confirmed across Milestones 4–6:
+it cannot trace a relationship with no static source-level edge at all (a frontend/backend HTTP boundary,
+confirmed again); its `imports_from`/`contains` edges are file-level, not per-named-export, which can produce a
+misleading transitive "path" between a file and a symbol the importing file never actually imports; it does not
+resolve cross-workspace-package (`@agentgate/policy`-style) import edges the way it resolves relative imports;
+and — newly characterized precisely in Milestone 6, though observed in earlier milestones too — it does not
+attribute a call made from an object-literal arrow-function property or an anonymous inline callback body to its
+enclosing symbol, undercounting real call edges for code written in that style (which this project uses for
+both the Control Center's `api` client object and every MCP SDK `setRequestHandler(...)` callback). None of
+these are tool defects in the sense of Graphify malfunctioning — they are the accurate behavior of an AST-only,
+no-LLM-required tool, and every finding in this document was checked against real source before being trusted or
+acted on. It remains adopted as **optional local developer tooling** (see `docs/DEVELOPMENT.md`), not a build or
+CI dependency, and specifically **not** a substitute for the executable tests that actually prove Tool
+Integrity's enforcement invariants (`tests/tool-integrity-gateway-enforcement.test.ts`,
+`examples/tool-rug-pull/demo.mjs`) or Safe Replay's no-execution invariant.

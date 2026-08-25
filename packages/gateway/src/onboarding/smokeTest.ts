@@ -76,6 +76,12 @@ export async function runSmokeTest(): Promise<SmokeTestReport> {
       ],
       retention: { max_days: 30, max_events: 100000 },
       output_security: { mode: 'redact', opaque_content: 'allow_uninspected', max_depth: 8, max_text_bytes: 1_000_000 },
+      // Milestone 6: monitor mode — the smoke test is about the policy
+      // engine and audit trail, not Tool Integrity; monitor mode records
+      // drift without blocking, matching this project's documented default
+      // (see ADR-0012) and keeping the smoke test's existing behavior
+      // unchanged.
+      tool_integrity: { mode: 'monitor' },
     };
 
     storage = new AuditStorage(dbPath);

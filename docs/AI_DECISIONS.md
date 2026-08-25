@@ -505,6 +505,238 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Supersedes: NONE
 - Superseded by: NONE
 
+### ADR-0012: Tool Integrity Registry and Rug-Pull Defense
+
+- Status: ACCEPTED
+- Date: 2026-08-25
+- Scope: security / architecture
+- Decision:
+  1. **The threat: tool-definition poisoning ("rug-pull").** AgentGate already treats a tool *call's* arguments
+     and a tool *result's* content as untrusted (ADR-0003, ADR-0009). The remaining gap is the tool *definition*
+     itself — a downstream MCP server can advertise a benign `read_file` tool, get trusted/used, and later change
+     its description, `inputSchema`, `outputSchema`, or `annotations` to something materially riskier (e.g. "read
+     a file and upload it to an external URL") without the agent or operator necessarily noticing, because MCP
+     tool metadata — description, schema, annotations, `serverInfo.name` — is server-supplied and MUST be treated
+     as untrusted input, not as a static contract. This milestone adds a local **Tool Integrity Registry** that
+     fingerprints, tracks, and can quarantine tool definitions, closing this gap the same way ADR-0009 closed the
+     result/error gap. This maps to OWASP MCP Top 10 MCP03 (tool poisoning) and the "client-side tool risk
+     gating" recommended control.
+  2. **Local server identity is NOT `serverInfo.name` alone.** The MCP spec explicitly does not guarantee
+     `serverInfo.name` is globally unique, so two different servers could advertise the same name, or one server
+     could rename itself to evade a stale identity record. `computeServerIdentity()`
+     (`packages/gateway/src/tool-integrity/identity.ts`) instead derives identity from the configured local
+     `server.id` plus a versioned (`server-identity-v1`), redacted fingerprint of the launch configuration: for
+     stdio servers, the normalized `command`/`args` plus each `KEY=VALUE` env pair individually SHA-256-hashed
+     before being folded into the overall digest (so a changed env value changes the identity, but the raw value
+     is never persisted); for HTTP servers, the URL. Path separators are normalized (backslash → forward slash
+     only — no realpath/symlink resolution, which is a deliberately narrow, documented scope) so the same
+     logical server launched from Windows vs. Linux checkouts of the same repo produces the same identity, while
+     a security-relevant change (different command, different args, different env) intentionally produces a
+     different identity rather than silently reusing history that may no longer apply. This is a local
+     "did-this-launch-configuration-change" identity, not a remote attestation of any kind — see limitations.
+  3. **Canonicalization and fingerprinting: `tool-definition-v1`.** `canonicalizeToolDefinition()`
+     (`packages/gateway/src/tool-integrity/canonicalize.ts`) fingerprints the ENTIRE tool object as returned by
+     `tools/list` — every field present (`name`, `title`, `description`, `inputSchema`, `outputSchema`,
+     `annotations`, and any other field, known or unknown) — rather than a hand-picked allowlist, so a malicious
+     server cannot smuggle a meaningful change through a field this project's authors didn't think to check. The
+     raw tool object is first passed through the existing `sanitizeJsonValue()` primitive (ADR-0009) for
+     depth/size/node-budget/circular-reference/prototype-pollution-key safety and secret-pattern redaction, then
+     object keys are recursively sorted (arrays keep their original order, since order is semantically meaningful
+     for JSON Schema `required`/`enum` and similar), then the canonical JSON is SHA-256-hashed together with the
+     algorithm version string. A whole-manifest fingerprint (`canonicalizeManifest()`) additionally sorts tools
+     by name and fails closed on an exact-case or case-confusable duplicate tool name (e.g. `"Foo"`/`"foo"`),
+     since MCP tool names are case-sensitive and a server advertising both is a suspicious condition worth
+     surfacing rather than silently accepting. This is a fingerprint, not a signature: it proves local
+     byte-for-byte (post-canonicalization) equality to a previously observed definition; it says nothing about
+     authorship or runtime behavior. One narrow, deliberate trade-off: a change confined ENTIRELY to a redacted
+     secret's characters, with everything else byte-identical, does not by itself change the fingerprint, because
+     the redaction pass runs before hashing — this is documented, not hidden, and is the same trade-off ADR-0009
+     already accepted for result/error sanitization.
+  4. **Enrollment/trust modes, and the actual default.** `tool_integrity.mode` in `GatewayConfigSchema`
+     (`packages/gateway/src/config/registry.ts`) is one of:
+     - `explicit` — every new or changed definition is quarantined until a human explicitly accepts its exact
+       fingerprint. Recommended, high-security mode.
+     - `tofu` — a tool's first-ever observed definition is trusted automatically ("trust on first use"); any
+       LATER change to an already-trusted tool is quarantined exactly like `explicit`.
+     - `monitor` — drift is still detected, classified, and recorded (visible in `agentgate tools status`, the
+       Control API, and the Control Center), but never blocks discovery or calls. Reporting only, and the config
+       schema's own doc comment and all UI/CLI copy referring to this mode say so explicitly — it is never
+       described as protection.
+     - `disabled` — the registry is not consulted for enforcement at all; behavior is identical to every
+       AgentGate version before this milestone.
+     **`monitor` is the default** when `tool_integrity` is omitted entirely. This is a deliberate backwards-
+     compatibility trade-off, made honestly rather than silently: the milestone's own instructions require
+     "explicit enrollment" to be the *recommended* high-security mode, which it is — `monitor` is the *default*
+     specifically so that every config file and every one of the 211 tests/3 demos/smoke-test that predate this
+     milestone keep working unmodified with zero new blocking behavior on upgrade, instead of every existing
+     AgentGate user's tools silently going quarantined (and every existing demo/test breaking) the moment they
+     pull this change. A user who wants the stronger guarantee opts in with one line
+     (`tool_integrity: { mode: explicit }`) — see docs/POLICY_REFERENCE.md for the exact migration guidance this
+     ADR requires be documented honestly alongside the default.
+  5. **Quarantine is enforced in the gateway request path in BOTH directions, not just shown in the UI.**
+     `packages/gateway/src/transport/stdio.ts` wires two independent gates from
+     `packages/gateway/src/tool-integrity/enforcement.ts`:
+     - `filterTrustedTools()` — the `tools/list` handler exposes only tools whose CURRENT registry state is
+       `trusted` with `current_fingerprint === trusted_fingerprint`, in an enforcing mode (`explicit`/`tofu`).
+       Annotations on the raw tool object (e.g. `readOnlyHint`, `destructiveHint`) are never consulted for this
+       decision — the MCP spec and OWASP guidance both say annotations are untrusted hints, not enforcement
+       guarantees, so trusting them to lower risk would defeat the entire point of this milestone.
+     - `checkCallAllowed()` — the `tools/call` handler checks this gate BEFORE any policy evaluation or
+       `runPipeline()`/`executeDownstream()` call, for every incoming call regardless of whether the calling
+       client's `tools/list` response ever included the tool. This specifically defeats the "client cached an
+       old/wrong tool list and calls it directly by name anyway" bypass the milestone named as a non-negotiable
+       invariant. A tool AgentGate has never scanned at all fails closed (blocked, not "assume trusted because we
+       have no record"). `packages/gateway/tests/tool-integrity-gateway-enforcement.test.ts` is the executable
+       proof: it spawns the real compiled gateway binary, connects a real MCP `Client` over stdio (exactly as a
+       real agent would), confirms `tools/list` is empty pre-review, confirms a direct `tools/call` by name is
+       blocked with an external, process-independent proof the downstream fixture server's call counter stayed at
+       `0`, then accepts the exact candidate out-of-process (mirroring the CLI/Control API/UI) and confirms the
+       SAME already-open client connection can now call the tool successfully and the counter becomes `1` —
+       proving enforcement re-reads registry state fresh on every call rather than caching a startup-time
+       decision.
+  6. **Scan timing: mandatory scan at every gateway startup, plus on-demand rescan — no dependency on
+     `notifications/tools/list_changed`.** AgentGate's documented MCP compatibility boundary is legacy-2025 stdio
+     only (ADR-0005); this milestone does not change that boundary or claim newer protocol support merely because
+     newer MCP spec pages were consulted for security design. A server MAY send
+     `notifications/tools/list_changed`, but detection must not depend solely on receiving one — so AgentGate
+     does not attempt to handle that notification at all in this milestone. Instead, `scanDownstreamServer()`
+     (`packages/gateway/src/tool-integrity/scan.ts` — the ONLY Tool Integrity module that ever connects to a
+     downstream server, proven structurally by
+     `packages/gateway/tests/tool-integrity-no-execution.test.ts`) runs unconditionally at gateway startup (a
+     safe, mandatory lifecycle point independent of any notification), with pagination handling for
+     `tools/list`'s `nextCursor` (the installed SDK's `Client.listTools()` does not auto-paginate — confirmed by
+     reading the SDK source directly — this was also a real, pre-existing single-page-only bug in the prior
+     discovery code, fixed as part of this milestone rather than left to diverge from the new registry's
+     paginated model) capped at `MAX_PAGES = 200` to fail closed against a malicious/misbehaving server. An
+     operator or the Control Center can trigger an out-of-band rescan at any time via `agentgate tools scan`, the
+     `POST /api/tool-integrity/rescan` Control API route, or the Control Center's "Rescan now" button — none of
+     which ever call a tool (only `initialize`+`tools/list`).
+  7. **Residual scan-to-call TOCTOU is not eliminated, and is documented, not hidden.** Between one scan and the
+     next tool call, a downstream server could in principle change its definition and the gateway would still
+     enforce against the last-scanned fingerprint until the next scan/rescan observes the change. This is a real,
+     acknowledged limitation of a scan-based (vs. per-call-reverification) model, traded off deliberately against
+     the cost of re-fetching and re-canonicalizing the full tool manifest on every single call, which would make
+     ordinary tool use far more latent for a benefit (closing a narrow timing window) that a rescan already
+     narrows to "since the last scan" rather than "ever." Full elimination would require either revalidating on
+     every call (a real, available, but not-yet-made design choice for a future milestone) or genuine remote
+     attestation, which is out of scope — see limitations below.
+  8. **Exact-fingerprint acceptance/rejection prevents stale-approval races.** Every review action
+     (`acceptCandidate()`/`rejectCandidate()` in `packages/gateway/src/tool-integrity/registry.ts`, and every CLI
+     `trust`/`reject` command and Control API `accept`/`reject` route built on top of them) requires an EXACT
+     match of both a deterministic `candidate_id` (`sha256(serverIdentity:toolName:fingerprint).slice(0,16)`) AND
+     the `fingerprint` itself against the CURRENTLY stored candidate for that tool. If the tool has drifted again
+     since the reviewer last looked (candidate B superseding candidate A), an attempt to accept/reject using
+     stale candidate A's id/fingerprint is rejected outright (`"Stale or unknown candidate..."`), never silently
+     applied against whatever the current candidate happens to be. There is deliberately no name-only or
+     "trust-all" acceptance path anywhere in the CLI, Control API, or Control Center — every accept/reject call
+     site in this codebase requires both values. `tests/tool-integrity-registry.test.ts`,
+     `tests/tool-integrity-cli.test.ts`, and `tests/tool-integrity-api.test.ts` each include a dedicated stale-
+     approval-race test proving this.
+  9. **Append-only history + mutable current-state projection (two-table pattern, matching ADR-0004, not
+     ADR-0010).** `tool_integrity_events` is a hash-chained, append-only table (mirroring the existing
+     `audit_events`/replay-evaluation hash-chain pattern — `insertToolIntegrityEvent()`/
+     `verifyToolIntegrityChain()` in `packages/gateway/src/storage.ts` follow the exact same chaining and
+     verification approach already used for the audit and replay chains). `tool_integrity_state` is a separate,
+     explicitly-documented MUTABLE projection over that log — one row per `(server_identity, tool_name)` —
+     needed because gateway enforcement (every `tools/list` and every `tools/call`) needs a cheap, fast
+     "is this trusted right now" lookup that a full event-log replay on every request would make prohibitively
+     slow. This is the same two-table design ADR-0004 chose for `audit_events`/`audit_lifecycle_records`, and
+     deliberately NOT the single-table pattern ADR-0010 chose for `replay_evaluations` — replay evaluations have
+     no meaningful "current state" to project, but tool trust status does. Accepting a candidate never rewrites
+     or deletes the prior trusted baseline's row in the append-only log; it only updates the projection and
+     appends a new `accepted` event. Rejecting a candidate leaves `trusted_fingerprint` untouched entirely.
+     Reappearance after `removed` ALWAYS requires fresh review (`pending_review`), even if the fingerprint
+     exactly matches the old trusted baseline — a server disappearing and reappearing is itself treated as a
+     signal worth a human look, a deliberate conservative choice, not an oversight. A rejected tool that
+     reappears with the SAME rejected fingerprint stays `rejected` (not silently reset); a GENUINELY different
+     fingerprint opens a fresh `drifted` review cycle rather than being permanently stuck.
+  10. **Bounded, safe diff — never a rendering/execution surface.** `packages/gateway/src/tool-integrity/diff.ts`
+      is a pure, side-effect-free module (no I/O, no MCP SDK — proven by the same structural no-execution test as
+      the rest of Tool Integrity) that walks two already-canonicalized definitions in lockstep and produces a
+      deterministic, depth-bounded (`MAX_DEPTH = 12`), count-bounded (`MAX_CHANGES = 200`), string-truncated
+      (`MAX_VALUE_PREVIEW_CHARS = 300`) list of `{path, kind, before?, after?}` records. It never executes,
+      interprets, or renders anything beyond returning plain string data — hostile content (prompt-injection
+      phrasing, HTML/`<script>` tags, ANSI escape sequences, prototype-pollution-shaped keys, embedded secret-
+      shaped strings, deeply nested or huge schemas) is preserved as inert string data all the way through the
+      diff, CLI, Control API, and Control Center, which renders it only as plain React text (never
+      `dangerouslySetInnerHTML`) with an explicit on-page warning that everything shown is untrusted, server-
+      supplied content. Secret-shaped substrings are redacted upstream by `canonicalizeToolDefinition()` before
+      the diff ever sees them (ADR-0009's existing redaction path), so the diff module's own hostile-input tests
+      focus on boundedness/safety rather than redaction (which is not its job).
+  11. **Fail-closed everywhere a decision cannot be made safely.** A scan failure, malformed/oversized/deeply-
+      nested schema, duplicate or case-confusable tool name, unknown/never-scanned tool, or Tool Integrity storage
+      lookup failure all resolve to "not callable" in an enforcing mode — never to "assume trusted since we don't
+      know better." A scan failure is itself recorded as a `scan_failed` event (visible in history), not silently
+      dropped to a console warning only.
+- Reason: AgentGate's stated purpose is to be the trust boundary between an AI agent and the tools it can call.
+  ADR-0003/ADR-0009 already established that a tool CALL's arguments and a tool RESULT's content must be treated
+  as untrusted; leaving the tool DEFINITION itself unverified after first use would have left the single largest
+  remaining gap in that boundary unaddressed, and directly matches a named, real-world MCP attack pattern (OWASP
+  MCP03) rather than a hypothetical one.
+- Evidence: `packages/gateway/src/tool-integrity/*` (new: `identity.ts`, `canonicalize.ts`, `scan.ts`,
+  `registry.ts`, `enforcement.ts`, `diff.ts`, `cli.ts`, `types.ts`), `packages/gateway/src/{storage,server,cli,
+  transport/stdio}.ts`, `packages/gateway/src/{config/registry,onboarding/smokeTest}.ts`,
+  `packages/gateway/src/api/control.ts`, `apps/control-center/src/{api.ts,pages/ToolIntegrity.tsx,App.tsx,
+  index.css}`, every `packages/gateway/tests/tool-integrity-*.test.ts` file (canonicalization golden fixtures,
+  identity, registry state machine, diff hostile fixtures, no-execution structural proof, CLI lifecycle, Control
+  API security/concurrency, and the real end-to-end gateway-path enforcement proof), and
+  `apps/control-center/src/pages/ToolIntegrity.test.tsx`. Exact counts and gate results are recorded in the
+  session log entries below.
+- Alternatives considered:
+  - Trusting `serverInfo.name` as server identity: rejected — the spec explicitly does not guarantee uniqueness;
+    see point 2.
+  - Hand-picking which tool-definition fields to fingerprint (e.g. only `description`+`inputSchema`): rejected —
+    creates a predictable blind spot (e.g. a change confined to `annotations` or a future SDK field would go
+    undetected); the whole object is fingerprinted instead.
+  - Defaulting new/existing configs to `explicit` mode: rejected as the DEFAULT for backwards compatibility (see
+    point 4), but documented as the recommended opt-in, with a one-line migration path.
+  - Implementing `notifications/tools/list_changed` handling: rejected for this milestone — AgentGate's
+    documented protocol boundary (ADR-0005) does not depend on it, and the spec itself says detection must not
+    depend solely on receiving it; a mandatory-scan-at-safe-lifecycle-points model was chosen instead.
+  - Re-verifying the tool definition on every single call (fully eliminating scan-to-call TOCTOU): rejected for
+    this milestone on latency-cost grounds — see point 7 — but left as a documented, viable future option rather
+    than dismissed.
+  - A single append-only table (ADR-0010's pattern) for Tool Integrity: rejected — tool trust state has a
+    meaningful "current state" that gateway enforcement needs to read cheaply on every request; see point 9.
+- Consequences:
+  - Positive: a real, demonstrated (see the rug-pull demo, `examples/tool-rug-pull/demo.mjs`) defense against
+    tool-definition poisoning now exists, enforced in the actual gateway request path, not only surfaced as a
+    dashboard warning; every review action is tied to an exact fingerprint, preventing stale-approval mistakes;
+    existing users are not silently broken on upgrade.
+  - Negative: the default (`monitor`) mode provides no blocking protection by itself — an operator must
+    explicitly opt in to `explicit`/`tofu` to get enforcement, which is a real adoption-friction trade-off, stated
+    honestly rather than glossed over; scan-to-call TOCTOU is not fully eliminated (point 7); a privileged local
+    administrator with direct database access could still tamper with or replace the Tool Integrity database,
+    exactly as ADR-0004 already states for the audit chain — this is local tamper EVIDENCE, not tamper-PROOF
+    security, and is not a stronger claim than ADR-0004 already makes for the rest of AgentGate's storage.
+- Limitations (stated explicitly, not implied):
+  - Fingerprints are cryptographic hashes of a canonicalized local representation, NOT signatures — they prove
+    local byte-for-byte equality to a previously observed definition, nothing about who authored it.
+  - A stable/unchanged fingerprint does NOT prove the server's actual runtime behavior matches its advertised
+    definition, or that the server is safe — a compromised downstream server can still return a poisoned tool
+    RESULT with an entirely unchanged tool DEFINITION; the existing ADR-0009 output-sanitization boundary remains
+    the relevant defense for that separate threat, and Tool Integrity does not replace or weaken it.
+  - Local server identity (point 2) is a local configuration-based identity, not remote attestation of any kind —
+    it cannot prove which physical/cloud process is actually running, only that the local launch configuration
+    used to reach it has not changed.
+  - Annotations (`readOnlyHint`, `destructiveHint`, etc.) are server-supplied, untrusted hints per the MCP spec
+    and are never used by enforcement to reduce risk, but the registry's storage of them is still exactly what
+    the server chose to advertise.
+  - Local tamper evidence (the hash chain) is not tamper-proof against a privileged local administrator with
+    direct database file access — identical in kind to the limitation ADR-0004 already states for the audit
+    chain.
+  - Scan-to-call TOCTOU is not fully eliminated (point 7).
+  - This milestone does not implement, and does not claim: full MCP supply-chain security, remote attestation,
+    cryptographic signing of tool definitions, sandboxing of downstream servers, verification of runtime
+    behavior, or zero false positives (a legitimate, security-irrelevant server update, e.g. a typo fix in a
+    description, still produces drift requiring review in an enforcing mode).
+- Affected files: `packages/gateway/src/tool-integrity/*` (new), `packages/gateway/src/{storage,server,cli,
+  config/registry,onboarding/smokeTest}.ts`, `packages/gateway/src/transport/stdio.ts`,
+  `packages/gateway/src/api/control.ts`, `apps/control-center/src/{api.ts,App.tsx,index.css,
+  pages/ToolIntegrity.tsx}`, `examples/tool-rug-pull/demo.mjs` (new), associated test files, `docs/*.md`.
+- Supersedes: NONE
+- Superseded by: NONE
+
 ## Superseded Decisions
 
 
@@ -1631,3 +1863,285 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Unresolved questions: none blocking.
 - Exact next action: none — Milestone 5 is locally complete and its final candidate commit's required CI/
   Security checks are green on the pushed remote HEAD. Produce the final report.
+
+### 2026-08-25 — Milestone 6, Phases 1–8 implementation + ADR-0012 (Tool Integrity Registry and Rug-Pull Defense)
+
+- Prompt objective: implement a local Tool Integrity Registry that fingerprints, tracks, and can quarantine
+  downstream MCP tool definitions, enforced in the actual gateway request path (not just surfaced as a UI
+  warning), covering server identity, canonicalization/fingerprinting, an append-only registry with a mutable
+  current-state projection, enrollment/trust modes with fail-closed enforcement, a safe field-level drift diff,
+  CLI commands, and Control API routes — with ADR-0012 written before the first commit.
+- Continuity check: confirmed starting local HEAD `5b9a49c36553e8438f8baa3460c46fe34b452334` matched
+  `origin/main` exactly (`git fetch origin` + `git rev-parse HEAD`/`git rev-parse origin/main`, both equal) before
+  any edit; re-read this ledger (all ADR-0001–0011, especially ADR-0004's two-table storage pattern, ADR-0005's
+  legacy-2025-only compatibility boundary, ADR-0009's `sanitizeJsonValue()`/secret-redaction primitive, and
+  ADR-0010's single-table append-only pattern and its "policy re-evaluation only, no execution" structural
+  no-execution test convention) before designing the registry.
+- Implementation completed this session (commands/results below):
+  - New module `packages/gateway/src/tool-integrity/identity.ts` — `computeServerIdentity()`, `server-identity-v1`.
+  - New module `packages/gateway/src/tool-integrity/canonicalize.ts` — `canonicalizeToolDefinition()`/
+    `canonicalizeManifest()`, `tool-definition-v1`, with 27 golden-fixture tests
+    (`tests/tool-integrity-canonicalize.test.ts`) proving key-reorder stability, list-reorder stability,
+    detection of every supported field-change type, duplicate/case-confusable name detection, Unicode/line-ending
+    determinism, and fail-closed behavior on hostile/oversized/malformed/cyclic input.
+  - New module `packages/gateway/src/tool-integrity/registry.ts` — the append-only state machine
+    (`applyScanToRegistry()`/`acceptCandidate()`/`rejectCandidate()`/`isFingerprintTrusted()`), with 21 tests
+    (`tests/tool-integrity-registry.test.ts`) covering every transition, the stale-approval race, reappearance-
+    after-removal, and rejected-then-redrifted behavior.
+  - New module `packages/gateway/src/tool-integrity/scan.ts` — the ONLY Tool Integrity module that connects to a
+    downstream server; paginated `tools/list` (fixing a real pre-existing single-page-only bug in the prior
+    inline discovery code, confirmed by reading the installed SDK's `Client.listTools()` source directly), capped
+    at `MAX_PAGES = 200`.
+  - New module `packages/gateway/src/tool-integrity/enforcement.ts` — `filterTrustedTools()`/
+    `checkCallAllowed()`, wired into `packages/gateway/src/transport/stdio.ts`'s `ListToolsRequestSchema`/
+    `CallToolRequestSchema` handlers (discovery-side and call-dispatch-side quarantine, the latter checked BEFORE
+    any policy evaluation or `runPipeline()` call).
+  - New module `packages/gateway/src/tool-integrity/diff.ts` — bounded, pure, side-effect-free field-level diff
+    (`MAX_DEPTH=12`, `MAX_CHANGES=200`, `MAX_VALUE_PREVIEW_CHARS=300`), with 29 tests
+    (`tests/tool-integrity-diff.test.ts`) including dedicated hostile fixtures (prompt injection, ANSI escapes,
+    HTML/`<script>`, embedded secrets, huge/deep schemas, confusable Unicode, prototype-pollution-shaped keys).
+  - New module `packages/gateway/src/tool-integrity/cli.ts` — thin, testable wrappers
+    (`runToolsScan`/`Status`/`Diff`/`Trust`/`Reject`/`History`) behind six new `agentgate tools <subcommand>` CLI
+    commands wired into `packages/gateway/src/cli.ts`, with 9 tests (`tests/tool-integrity-cli.test.ts`) run
+    against a real fixture downstream server, plus a manual end-to-end run of the built CLI binary confirming
+    `scan`→`status`→`diff`→`trust`(stale rejected, then exact-match accepted)→`history` all behave correctly and
+    exit with the correct codes.
+  - `packages/gateway/src/storage.ts` — new `tool_integrity_events` (append-only, hash-chained,
+    `insertToolIntegrityEvent()`/`verifyToolIntegrityChain()` mirroring the existing audit/replay chain pattern
+    exactly) and `tool_integrity_state` (mutable current-state projection) tables, added as the LAST migration in
+    the existing `MIGRATIONS` array (append-only-at-end preserved).
+  - `packages/gateway/src/config/registry.ts` — new `tool_integrity.mode` config field
+    (`explicit`/`tofu`/`monitor`/`disabled`), defaulting to `monitor` for backwards compatibility (see ADR-0012
+    point 4 for the full honest reasoning).
+  - `packages/gateway/src/api/control.ts` — 7 new authenticated `/api/tool-integrity/*` routes (summary, tools,
+    history, diff, rescan, accept, reject) reusing the existing loopback/token/Host/Origin/CORS/safe-error
+    middleware unchanged; strict body-schema validation rejecting unknown/execution-like fields; 19 tests
+    (`tests/tool-integrity-api.test.ts`) covering auth failure, hostile Host/Origin, malformed candidate ids,
+    stale-fingerprint (409), double-submit (candidate consumed → 404 on retry), concurrent accept-vs-reject (one
+    wins, the other is rejected as stale, never both), no-secret/no-token/no-path leakage in error responses, and
+    a real rescan against the fixture server.
+  - `packages/gateway/src/server.ts` — passes `{ server: config.servers[0], mode: config.tool_integrity.mode }`
+    into `buildControlApi()`.
+  - `packages/gateway/src/onboarding/smokeTest.ts` — added the required `tool_integrity: { mode: 'monitor' }`
+    field to its manually-constructed config literal (a real TS build error found and fixed this session).
+  - New structural no-execution test, `tests/tool-integrity-no-execution.test.ts` (6 tests), mirroring
+    `replay-no-execution.test.ts`'s import-statement-only-scan approach: proves `canonicalize.ts`/`identity.ts`/
+    `registry.ts`/`enforcement.ts`/`diff.ts` never import the MCP SDK or execution/approval modules, and that
+    `scan.ts` is the sole exception permitted to import the MCP client transport.
+  - New end-to-end test, `tests/tool-integrity-gateway-enforcement.test.ts` (1 test) — identified during this
+    session's Phase A audit as a real coverage gap: every other Tool Integrity test exercised the internal
+    functions directly, but nothing exercised the actual wired-up `ListToolsRequestSchema`/`CallToolRequestSchema`
+    handlers via a real MCP client talking to the real compiled gateway binary. This test spawns the real CLI,
+    connects a real `@modelcontextprotocol/sdk` `Client` over stdio, and proves: (1) `tools/list` returns `[]`
+    before any review, even though the downstream fixture server really advertises 4 tools; (2) a direct
+    `tools/call` for `echo` — as if the calling client had cached the name from an earlier session — is blocked
+    with an `[AgentGate] Tool Integrity:` error and `isError: true`; (3) the downstream fixture server's own
+    call-counter file (an external, process-independent artifact, not an in-process spy) remains `0` after the
+    blocked call, proving the downstream process was never contacted; (4) accepting the exact candidate
+    out-of-process (via `runToolsTrust()`, mirroring what the CLI/Control API/UI do against the same database)
+    then lets the SAME already-open client connection call `echo` successfully with no reconnect, the response
+    text is exactly `"hello"`, and the counter becomes `1` — proving `checkCallAllowed()` re-reads registry state
+    fresh on every call rather than caching a startup-time decision.
+  - Control Center: `apps/control-center/src/api.ts` gained 7 typed `toolIntegrity*` client methods and 5
+    exported response types; `apps/control-center/src/pages/ToolIntegrity.tsx` (new) — summary stat cards, a
+    per-tool status table, a diff/review panel (exact-fingerprint accept with a confirmation dialog stating what
+    is/isn't guaranteed, reject as the calmer default action with no confirmation, both disabled mid-request to
+    prevent double-submit), a monitor/disabled-mode warning banner, and a collapsible history panel; wired into
+    `App.tsx` navigation (with a live pending/drifted-count badge) and routing; ~100 lines of new, scoped CSS
+    appended to `index.css` (no existing rule modified). 31 new component tests
+    (`apps/control-center/src/pages/ToolIntegrity.test.tsx`) covering loading/empty/trusted/quarantined/drifted
+    states, all five diff-change classifications, truncation display, accept/reject with exact ids (asserted via
+    `toHaveBeenCalledWith`), confirmation-declined, stale-fingerprint (409-shaped) and already-consumed
+    (404-shaped) error surfaces, double-submit prevention for both accept and reject, rescan busy/error states,
+    history expand/collapse, hostile-content rendering (HTML/`<script>`, prompt-injection phrasing, ANSI escapes)
+    as inert text with zero `<script>` elements created, absence of any "trust all"/name-only-trust control, and
+    basic keyboard-focus/accessible-name checks.
+  - ADR-0012 written in full (see above) before this commit, documenting the actual implemented design (server
+    identity, canonicalization/fingerprint versioning, enrollment modes and the honest `monitor`-default
+    trade-off, bidirectional gateway-path enforcement, scan timing and the deliberate non-handling of
+    `list_changed`, the residual scan-to-call TOCTOU limitation, exact-fingerprint stale-approval prevention, the
+    two-table append-only + projection storage pattern, the bounded/safe diff design, and fail-closed behavior),
+    plus explicit limitations (fingerprints are not signatures, do not prove runtime behavior, local identity is
+    not remote attestation, annotations are untrusted, local tamper evidence is not tamper-proof, TOCTOU is not
+    fully eliminated, no supply-chain/attestation/signing/sandboxing/zero-false-positive claims).
+- Commands executed and results:
+  - `pnpm run build` (repo root) → clean across all 4 buildable packages, both before and after every change in
+    this session.
+  - `pnpm run lint` (repo root) → 0 errors throughout this session's work; each transient lint error introduced
+    while writing new code (unnecessary type assertions in `control.ts`/diff-panel test, an unused import) was
+    fixed immediately, confirmed by re-running lint; only the same 2 pre-existing, unrelated `no-explicit-any`
+    warnings from Milestone 4/5 remain (never addressed, by established convention).
+  - `pnpm run test` (repo root, all 3 packages) → **367 tests passed, 2 skipped (the two documented POSIX-only
+    lifecycle tests), 0 failed, across 31 test files** (`packages/policy`: 52 tests/3 files;
+    `apps/control-center`: 47 tests/2 files; `packages/gateway`: 268 tests/26 files, 2 skipped). This is the exact
+    count as of this entry — not the pre-Milestone-6 211-test baseline, which this entry does not treat as a
+    target to preserve verbatim.
+  - All 3 pre-existing demos (`secret-exfiltration`, `downstream-secret-result`, `policy-drift-replay`) re-run
+    manually after the `stdio.ts` refactor → all 3 **PASS unchanged**, confirming the new default `monitor` mode
+    and the paginated-scan-based discovery rewrite introduced no regression in end-to-end demo behavior.
+  - `node scripts/verify-packed-install.mjs` → **PASS** (tarball packing, packaging hygiene, clean-consumer
+    install, installed-CLI smoke-test all green) — confirms the new `tool_integrity` config field and the six new
+    CLI subcommands do not break the packed-install path.
+  - Manual end-to-end CLI walkthrough against a real spawned fixture server (`agentgate tools scan` → `status` →
+    `diff <id>` → `trust <id> --fingerprint <wrong>` [rejected, 409-equivalent] → `trust <id> --fingerprint
+    <exact>` [accepted] → `history`) → every step produced the expected output and exit code; verified manually
+    with `echo "exit=$?"` after each command.
+- Phase A audit against the milestone's named security invariants (see prompt) — reconciled against actual
+  source/tests, not assumed: quarantine-by-mode ✓ (registry tests); discovery-side filtering ✓ (enforcement.ts +
+  new gateway-path test); direct-cached-name-call block ✓ (new gateway-path test, the one genuine coverage gap
+  found and closed this session — see above); downstream not contacted on blocked path ✓ (external counter-file
+  proof in the same test); key/list-reorder stability ✓ (canonicalize golden fixtures); meaningful-change
+  detection for description/schema/annotations/title/metadata ✓ (canonicalize + diff fixtures); duplicate names
+  and malformed/oversized/deep definitions fail closed ✓ (canonicalize fixtures); annotations never lower
+  enforced risk ✓ (enforcement.ts explicitly never reads them, documented in its own comments); exact-fingerprint
+  accept/reject required, no stale-approval ✓ (registry/CLI/API stale-race tests); rejection persists across
+  rescan ✓ (registry + CLI tests); accept appends history without rewriting the prior baseline ✓ (registry
+  tests); migration + tamper verification ✓ (append-only-at-end `MIGRATIONS` entry, `verifyToolIntegrityChain()`);
+  hostile content bounded/redacted/escaped at every public boundary ✓ (canonicalize + diff hostile fixtures +
+  Control Center component tests); scan/status/diff never call a tool ✓ (by construction — `scan.ts` only calls
+  `initialize`/`tools/list`, proven structurally); legacy-MCP-only compatibility claim remains truthful ✓ (ADR-
+  0012 point 6 explicitly restates the ADR-0005 boundary and does not claim newer protocol support).
+- Files materially changed by this phase: see the Implementation section above; full list also captured in
+  ADR-0012's "Affected files."
+- Verification result: PASS on every item audited above; build/lint/full-test-suite/all-3-demos/packed-install
+  all green as of this entry. Not yet performed as of this entry: the rug-pull demo itself
+  (`examples/tool-rug-pull/demo.mjs`), documentation updates beyond ADR-0012, browser/screenshot verification,
+  Graphify re-indexing, the full adversarial gate list (hostile-fixture-at-CI-scale, DB-tampering/deletion/
+  reordering, Milestone-5-DB migration fixture, injected-failure cleanup proof), clean-clone verification, and
+  any commit/push/CI observation — none of this session's work has been committed yet.
+- Known limitations / follow-up risk: the scan-to-call TOCTOU window described in ADR-0012 point 7 remains
+  un-narrowed beyond "since the last scan/rescan"; the `monitor` default means a fresh `agentgate init` still
+  needs its generated template/documentation updated to steer new projects toward `explicit` mode (not yet done
+  as of this entry — tracked as outstanding); no dedicated migration-from-a-Milestone-5-database fixture test has
+  been run yet (tracked as outstanding for the adversarial-gates phase).
+- Unresolved questions: none blocking further implementation.
+- Exact next action: implement the deterministic rug-pull demo (`examples/tool-rug-pull/demo.mjs`), then complete
+  the remaining backend/CLI adversarial-gate coverage (migration fixture, DB-tampering tests, injected-failure
+  cleanup proof), then documentation, browser verification, Graphify, full gates, clean-clone, and commit/push/CI
+  observation.
+
+### 2026-08-25 — Milestone 6, Phase B (Control Center verification) + Phase C (rug-pull demo) — two real bugs found and fixed
+
+- Prompt objective: verify the Control Center build/lint/tests after the previously-uncommitted CSS addition, add
+  comprehensive `ToolIntegrity.tsx` component tests, then implement the deterministic rug-pull demo
+  (`examples/tool-rug-pull/demo.mjs`) as the milestone's central executable security proof.
+- Continuity check: confirmed working tree still matched the prior entry's state (`git status --short` — only the
+  same Tool Integrity files, `.claude/`, `CLAUDE.md` untracked); re-read ADR-0012 before starting.
+- **Phase B**: `pnpm run build`/`pnpm run lint` clean after the CSS addition (39 modules transformed, +1 CSS
+  chunk). Wrote `apps/control-center/src/pages/ToolIntegrity.test.tsx` — 31 tests covering loading/empty/
+  trusted-only/quarantine/drifted states, all five diff-change-kind renderings, truncation display, exact-
+  candidate-id+fingerprint accept (`toHaveBeenCalledWith` assertion) and reject, confirm-declined, 409-shaped
+  ("stale") and 404-shaped ("already consumed") error surfaces with the panel remaining open for retry, double-
+  submit prevention for both accept and reject, rescan busy/error states, history expand/collapse, hostile HTML/
+  script/prompt-injection/ANSI rendered as inert text (`document.querySelectorAll('script').length === 0`
+  asserted explicitly), absence of any "trust all" control, and keyboard-focus/accessible-name checks. Two tests
+  needed a fix after the first run (an ambiguous multi-match query resolved with `getByRole`/`within(panel)`
+  scoping) — both were test-authoring issues, not component defects. Final: 31/31 passing,
+  `apps/control-center` suite 47/47 passing (16 pre-existing + 31 new), 0 lint errors.
+- **Phase C — rug-pull demo build and two real bugs found and fixed**: wrote a new dynamic fixture MCP server
+  (`examples/tool-rug-pull/fixtures/rug-pull-fixture-server.mjs`) whose advertised `read_file` tool definition
+  changes based on a "generation" file re-read on every `tools/list` call (1 = benign baseline, 2 = malicious rug-
+  pull carrying a bundled synthetic secret/HTML-script/ANSI-escape/prompt-injection payload in its description, 3
+  = a distinct, legitimate benign v2 update), letting the SAME running downstream process model a real rug-pull
+  without restarting it. Wrote the 18-step demo script itself. **First run: 3 of ~40 assertions failed**,
+  surfacing two genuine, previously-uncovered defects (not demo-authoring mistakes) plus one demo-authoring
+  mistake and one demo-side false-negative in an assertion — all four investigated and fixed:
+  1. **Real bug — `tools/list` staleness**: `transport/stdio.ts`'s `ListToolsRequestSchema` handler captured its
+     filtered tool list ONCE at gateway startup (`exposedTools`, computed outside the handler closure) and never
+     recomputed it, so a tool trusted/rejected out-of-band via the CLI/Control API after startup would not appear
+     (or disappear) from `tools/list` until the gateway was restarted — even though `checkCallAllowed()` already
+     re-read live registry state on every `tools/call`. This inconsistency (call-side freshness vs. discovery-
+     side staleness) was a real correctness gap the demo's Step 3/Step 15 assertions caught. **Fix**: the raw,
+     unfiltered tool list from the startup scan is now kept in scope (`validRawTools`) and
+     `filterTrustedTools(...)` is called fresh, inline, inside the `ListToolsRequestSchema` handler on every
+     request — cheap (DB lookups against already-known tool objects), and never re-contacts the downstream server
+     (only an explicit rescan does that). Verified via the full test suite (no regression) and the demo (now
+     passing).
+  2. **Real bug — rejected-then-rescanned-unchanged incorrectly reopened as drift**: `registry.ts`'s
+     `applyScanToRegistry()` compared a rescanned fingerprint against `existing.trusted_fingerprint ??
+     existing.candidate_fingerprint` for ALL non-`removed` existing states, including `rejected`. For a tool that
+     had a REAL prior trusted baseline (e.g. generation 1, trusted) before later drifting and being rejected
+     (e.g. generation 2), `trusted_fingerprint` is non-null (still generation 1's), so this comparison used
+     generation 1's fingerprint as the reference even for a `rejected` tool — meaning re-scanning the SAME,
+     unchanged, already-rejected generation-2 definition would ALWAYS look like fresh drift (gen2 ≠ gen1 is
+     always true), silently reopening a review cycle for a definition a human had already explicitly rejected.
+     The existing `tool-integrity-registry.test.ts` coverage for "rejected tool rescanned" had only exercised a
+     tool that was NEVER trusted before rejection (`trusted_fingerprint` null), where the `??` fallback happened
+     to land on `candidate_fingerprint` — the correct value — masking this bug in a narrower scenario. The rug-
+     pull demo's Step 12 (trust v1 → reject v2 → rescan v2 unchanged → must stay rejected) is a strictly broader
+     scenario that exposed it. **Fix**: added a dedicated `existing.status === 'rejected'` branch in
+     `applyScanToRegistry()` that compares against `existing.candidate_fingerprint` specifically (the fingerprint
+     that was actually rejected) — unchanged stays `rejected`; a genuinely different fingerprint opens a fresh
+     `drifted` cycle with a clear reason string. Verified via the full test suite (268→270 gateway tests, no
+     regression) and the demo.
+  3. **Demo-authoring mistake**: Step 17 asserted a `baseline_accepted` event for generation 1's acceptance, but
+     `baseline_accepted` is emitted only by `tofu` mode's automatic first-use trust — this demo runs in
+     `explicit` mode throughout, where a first-time human review emits `accepted`, not `baseline_accepted`.
+     Fixed the assertion, not the code (the code was correct; the demo's expectation was wrong).
+  4. **Demo-side test bug (double-encoding), not a product bug**: Step 18's hostile-ANSI assertion built its
+     comparison text via `JSON.stringify(changes)` (re-serializing an already-parsed diff array), which encodes a
+     raw ESC control byte as the six literal characters `` in the resulting JSON text — a
+     literal-byte `.includes()` check against that re-encoded text can never match the real control character,
+     regardless of whether the real product behavior was correct. Independently verified via a direct
+     `canonicalizeToolDefinition()` script run against the exact hostile description that the raw ANSI byte, the
+     HTML/script tag, and the prompt-injection phrase are ALL preserved correctly end-to-end through
+     canonicalization (only the AWS-key-shaped substring is redacted, exactly as intended) — confirming this was
+     purely a demo-script assertion bug. Fixed by checking the actual parsed `after` string value directly
+     instead of a re-stringified copy.
+  - Also found and fixed, while auditing hostile-content handling for this phase: `tests/tool-integrity-
+    diff.test.ts` used a synthetic AWS-key-shaped literal (`AKIA` + a different 16-character filler than the
+    project's standard placeholder) that is NOT on
+    `.github/workflows/security.yml`'s exact-match secret-scan allowlist (only `AKIAIOSFODNN7EXAMPLE` and four
+    other specific literals are allowlisted) — this would have failed the Security workflow's tracked-file scan
+    on push despite being an obviously-fake value. Replaced it with the already-allowlisted
+    `AKIAIOSFODNN7EXAMPLE` literal (same test intent, zero behavior change); re-ran the exact CI regex/allowlist
+    logic locally against the full tree (excluding `node_modules`/`dist`/`.git`) and confirmed clean.
+  - Added a deterministic fault-injection hook to the demo itself (`RUG_PULL_INJECT_FAILURE=after-step-3`,
+    documented in the script as a no-op unless explicitly set) and a new companion test,
+    `packages/gateway/tests/tool-rug-pull-demo-cleanup.test.ts`, spawning the real demo as a child process with
+    that env var set and proving — as executable evidence, not a `finally` block inspected by eye — that (a) the
+    process exits non-zero with the expected injected-failure message, (b) no `agentgate-rug-pull-*` temp
+    directory is left in the OS temp dir afterward, and (c) the gateway's control port (4344) is no longer
+    listening. A second test confirms the hook is a true no-op when unset (the normal demo still passes end to
+    end). Both pass.
+- Commands executed and results:
+  - `pnpm run build` → clean, both before writing the demo and after every subsequent fix.
+  - `pnpm run lint` → 0 errors after each fix (three transient errors introduced while writing new test/demo code
+    — an unused `fs` import, an `any`-typed callback parameter, an unused `stderrBuffer` — each fixed immediately
+    and reconfirmed).
+  - `pnpm run test` (all 3 packages) → **369 tests passed, 2 skipped, across 32 test files** (`packages/policy`:
+    52/3; `apps/control-center`: 47/2; `packages/gateway`: 270/27, 2 skipped) — the 2 new gateway test files this
+    phase added (the rug-pull cleanup proof) plus the 2 real bugs fixed produced +2 files/+2 tests over the prior
+    entry's 367/31.
+  - `node examples/tool-rug-pull/demo.mjs`, run 3 times consecutively → **all 3 runs: exit code 0, all ~40
+    PASS lines, no FAIL lines** — deterministic.
+  - `node examples/{secret-exfiltration,downstream-secret-result,policy-drift-replay}/demo.mjs` (re-run after the
+    `stdio.ts`/`registry.ts` fixes) → all 3 **PASS unchanged**, confirming no regression to pre-existing demo
+    behavior from either fix.
+  - `node scripts/verify-packed-install.mjs` → **PASS** (unchanged).
+  - `git status --short` after every demo run → clean (only the intended tracked-file modifications/new files;
+    no residue).
+  - Manual full-tree secret-pattern scan using the exact `security.yml` regex/allowlist (excluding
+    `node_modules`/`dist`/`.git`) → clean.
+- Files materially changed by this phase: `apps/control-center/src/pages/ToolIntegrity.test.tsx` (new),
+  `packages/gateway/src/transport/stdio.ts` (bug fix — fresh per-request discovery filtering),
+  `packages/gateway/src/tool-integrity/registry.ts` (bug fix — rejected-state reference fingerprint),
+  `packages/gateway/tests/tool-integrity-diff.test.ts` (secret-literal swap to the allowlisted value),
+  `examples/tool-rug-pull/` (new: `demo.mjs`, `fixtures/rug-pull-fixture-server.mjs`),
+  `packages/gateway/tests/tool-rug-pull-demo-cleanup.test.ts` (new), `.github/workflows/ci.yml` (new step in both
+  the Ubuntu and Windows jobs, immediately after the policy-drift-replay demo step).
+- Verification result: PASS on every item above. The rug-pull demo is the milestone's required executable proof
+  that a benign-to-malicious tool-definition change is detected, quarantined, and blocked before downstream
+  execution, and that a later, genuinely distinct benign update is trusted independently — all demonstrated end
+  to end against production-built packages, not mocked.
+- Known limitations / follow-up risk: this phase's two real bug fixes (discovery-list staleness, rejected-state
+  reference fingerprint) were found ONLY because the demo exercised broader state-transition sequences than the
+  pre-existing unit tests did — this is a concrete argument for treating the demo as adversarial verification in
+  its own right, not merely a presentation artifact, and is noted here in case a future milestone's own unit
+  tests should be broadened to cover these same sequences directly (currently covered end-to-end by the demo and
+  the new gateway-enforcement test, but not by an additional narrow registry-level unit test for the specific
+  "trusted-then-rejected-then-rescanned-unchanged" sequence — worth adding as a follow-up, not blocking).
+- Unresolved questions: none blocking.
+- Exact next action: remaining backend/CLI adversarial-gate coverage (Milestone-5 DB migration fixture, DB-
+  tampering/deletion/reordering tests, further hostile-fixture coverage), then documentation, browser
+  verification, Graphify, full gates, clean-clone, and commit/push/CI observation.

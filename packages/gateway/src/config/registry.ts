@@ -70,6 +70,38 @@ const OutputSecuritySchema = z.object({
 });
 export type OutputSecurityConfig = z.infer<typeof OutputSecuritySchema>;
 
+// ─── Tool Integrity (Milestone 6, ADR-0012) ────────────────────────────────────
+
+/**
+ * Governs the Tool Integrity Registry — rug-pull / tool-definition-poisoning
+ * defense. See docs/AI_DECISIONS.md (ADR-0012) and docs/THREAT_MODEL.md.
+ *
+ * - `explicit`   : every new or changed tool definition is quarantined until
+ *                  a human explicitly accepts its exact fingerprint. The
+ *                  recommended, high-security mode.
+ * - `tofu`       : a tool's *first-ever* observed definition is trusted
+ *                  automatically ("trust on first use"); any LATER change to
+ *                  an already-trusted tool is still quarantined exactly like
+ *                  `explicit` mode.
+ * - `monitor`    : drift is still detected, classified, and recorded, but
+ *                  never blocks discovery or calls. Reporting only — never
+ *                  described as protection. This is the default when
+ *                  `tool_integrity` is omitted entirely, for backwards
+ *                  compatibility with configs written before this milestone
+ *                  (see ADR-0012 for why this specific trade-off was made).
+ * - `disabled`   : the registry is not consulted at all; behavior is
+ *                  identical to every version of AgentGate before this
+ *                  milestone. Only for compatibility; removes this defense
+ *                  entirely and is documented as doing so.
+ */
+const ToolIntegrityModeSchema = z.enum(['explicit', 'tofu', 'monitor', 'disabled']);
+export type ToolIntegrityMode = z.infer<typeof ToolIntegrityModeSchema>;
+
+const ToolIntegritySchema = z.object({
+  mode: ToolIntegrityModeSchema.default('monitor'),
+});
+export type ToolIntegrityConfig = z.infer<typeof ToolIntegritySchema>;
+
 // ─── Gateway Runtime Config ────────────────────────────────────────────────────
 
 const GatewayConfigSchema = z.object({
@@ -100,6 +132,9 @@ const GatewayConfigSchema = z.object({
 
   /** Downstream result/error sanitization. See ADR-0009. */
   output_security: OutputSecuritySchema.default({}),
+
+  /** Tool Integrity Registry — rug-pull defense. See ADR-0012. */
+  tool_integrity: ToolIntegritySchema.default({}),
 });
 
 export type GatewayConfig = z.infer<typeof GatewayConfigSchema>;

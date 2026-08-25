@@ -94,6 +94,65 @@ returned to the client. Raw results are never persisted regardless of mode (see
 - This is **not** a general data-loss-prevention (DLP) system, PII detector, malware scanner, or compliance
   control — it recognizes a fixed set of credential-shaped patterns and nothing else.
 
+## Tool-definition poisoning (rug-pull, ADR-0012)
+
+**Threat:** a downstream MCP server advertises a benign tool definition, gets used and trusted by an operator/
+agent, and later — without ever restarting or reconnecting in an attacker-visible way — starts advertising a
+materially different, riskier definition for the SAME tool name (a changed description implying new/undisclosed
+behavior, an added input property like an exfiltration destination, a changed output schema, or flipped
+annotations). Because MCP tool metadata is server-supplied and the previous section already establishes it must
+be treated as untrusted, an agent (or a human skimming a tool list) can be misled into trusting a tool whose
+contract has silently changed. This maps to OWASP MCP Top 10 MCP03 (tool poisoning) and the "client-side tool
+risk gating" recommended control. Distinct from the previous section: that section is about a malicious *result*
+from an unchanged tool call; this section is about the tool *definition itself* changing.
+
+**Mitigation implemented:** the Tool Integrity Registry (`packages/gateway/src/tool-integrity/*`) fingerprints
+the entire tool definition object (not a hand-picked subset) against a stable local server identity, and — in
+`explicit`/`tofu` mode — quarantines a new or changed definition in BOTH directions: it is not exposed via
+`tools/list` (`filterTrustedTools()`), and a direct `tools/call` for that tool name is blocked BEFORE any policy
+evaluation or downstream contact (`checkCallAllowed()`), even if the calling client cached an older tool list or
+never called `tools/list` in the current session at all. A human reviews a bounded, safe, field-level diff and
+either accepts the EXACT fingerprint (trusting only that specific version) or rejects it; a stale accept/reject
+attempt against a since-superseded candidate fails closed rather than silently applying. See ADR-0012 in
+`docs/AI_DECISIONS.md` for the full design, and `examples/tool-rug-pull/demo.mjs` for an executable, end-to-end
+proof (a real benign tool, a real rug-pull to a riskier definition, a blocked direct call with the downstream
+fixture's own call counter proving it was never contacted, and a distinct later benign update trusted
+independently).
+
+**Deferred / limitations:**
+- **Fingerprints are not signatures.** A fingerprint proves local byte-for-byte equality (after safe
+  canonicalization) to a previously observed definition — it says nothing about who authored the definition or
+  whether the server is trustworthy.
+- **A stable/unchanged fingerprint does not prove runtime behavior matches the definition.** A compromised
+  downstream server can still return a poisoned *result* through an entirely unchanged tool *definition* — the
+  [Malicious downstream MCP server](#malicious-downstream-mcp-server) mitigations above remain the relevant
+  defense for that, and Tool Integrity does not replace or weaken them.
+- **Local server identity is not remote attestation.** It is derived from the configured local server id plus a
+  redacted fingerprint of the local launch configuration (command/args/env) — it proves the local launch
+  configuration hasn't changed, not which physical/cloud process is actually running.
+- **Annotations are untrusted, server-supplied hints** and are never consulted by enforcement to reduce risk — a
+  server cannot self-declare its way past quarantine.
+- **The registry's hash chain is local tamper evidence, not tamper-proof**, identical in kind to the audit chain
+  limitation in [Database replacement by a local administrator](#database-replacement-by-a-local-administrator)
+  below — a privileged local administrator with direct database file access could still tamper with or replace
+  it.
+- **Scan-to-call TOCTOU is not fully eliminated.** Between one scan and the next call, a downstream server could
+  in principle change its definition again; enforcement checks against the last-scanned fingerprint until the
+  next scan/rescan observes the change. A rescan is available on demand (CLI/Control API/Control Center) and
+  narrows this window, but does not eliminate it.
+- **No dependency on, or support for, `notifications/tools/list_changed`.** AgentGate's documented MCP
+  compatibility boundary (ADR-0005) remains legacy-2025 stdio only; detection relies on a mandatory scan at
+  gateway startup plus on-demand rescans, not on receiving a notification the spec itself says cannot be relied
+  upon.
+- **`monitor` mode (the default when `tool_integrity` is omitted) provides no blocking protection** — drift is
+  recorded but discovery and calls are never blocked. This is a stated backwards-compatibility tradeoff (ADR-0012),
+  not a claim of protection; see [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md#tool-integrity) for the
+  one-line migration to `explicit`.
+- This is **not** full MCP supply-chain security, remote attestation, cryptographic signing of tool definitions,
+  sandboxing of downstream servers, verification of runtime behavior, or a claim of zero false positives (a
+  security-irrelevant change, e.g. a typo fix in a description, still produces drift requiring review in an
+  enforcing mode).
+
 ## Path traversal and normalization mismatch
 
 **Threat:** an agent supplies a path like `../../etc/passwd` or a Windows-style path that evades a naive string
@@ -404,6 +463,12 @@ port between the check and a later `agentgate start`, same as any such check in 
   never touches a real file, and its explicit `--apply` opt-in always backs up, writes atomically, and
   preserves unrelated content; only documentation-verified client integration formats are presented as
   supported, with an unverified option explicitly labeled as such.
+- **Tool Integrity Registry** (ADR-0012, this milestone): whole-object fingerprinting of downstream tool
+  definitions against a stable local server identity; bidirectional quarantine enforcement in the actual gateway
+  request path (discovery filtering AND direct-call blocking, not merely a UI warning); exact-fingerprint
+  accept/reject with stale-review protection; append-only, hash-chained registry history verified alongside the
+  audit chain; bounded, safe, field-level drift diff with hostile-content handling; fail-closed on scan failure,
+  malformed/oversized/duplicate definitions, or an unknown tool.
 
 ## Mitigations deferred (summary)
 
@@ -424,6 +489,9 @@ port between the check and a later `agentgate start`, same as any such check in 
 - Safe Replay always evaluates against the *current* policy — there is no historical policy snapshot, so replay
   cannot reconstruct "what would this decision have been at some specific past moment," only "what would it be
   right now" (see [Safe Replay](#safe-replay-adr-0010) above).
+- Tool Integrity's `monitor` mode (the default when `tool_integrity` is omitted) provides no blocking protection;
+  scan-to-call TOCTOU is not fully eliminated; there is no `notifications/tools/list_changed` handling — see
+  [Tool-definition poisoning](#tool-definition-poisoning-rug-pull-adr-0012) above.
 
 ## Non-goals
 
@@ -443,3 +511,7 @@ port between the check and a later `agentgate start`, same as any such check in 
   for inbound arguments — it is not, and is not claimed to be, a general-purpose content-security product.
 - **Scanning opaque binary content** (images, audio, arbitrary blobs) for secrets, in any direction, in this
   milestone (ADR-0009) — see [Malicious downstream MCP server](#malicious-downstream-mcp-server).
+- **Remote attestation, cryptographic signing of tool definitions, sandboxed downstream execution, verification
+  of runtime behavior, or supply-chain security of any kind** (ADR-0012). Tool Integrity fingerprints are local
+  hashes proving definition equality over time, not a substitute for any of these — see
+  [Tool-definition poisoning](#tool-definition-poisoning-rug-pull-adr-0012) above.

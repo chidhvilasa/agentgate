@@ -4,6 +4,58 @@ All notable changes to this project are documented in this file. Format loosely 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). AgentGate has not yet published a versioned release or
 npm package — see [Project status](README.md#project-status).
 
+## [Unreleased] — Milestone 6: Tool Integrity Registry and rug-pull defense
+
+### Added
+- **Tool Integrity Registry**: fingerprints the entire downstream tool definition (name, description, input/
+  output schema, annotations — not a hand-picked subset) against a stable local server identity, tracks it in a
+  new append-only, hash-chained `tool_integrity_events` table plus a mutable `tool_integrity_state` projection,
+  and quarantines a new or changed definition until a human explicitly accepts its exact fingerprint.
+- **Gateway-path enforcement, not just a UI warning**: a quarantined tool is filtered out of `tools/list`
+  (re-evaluated fresh on every request) AND blocked from direct `tools/call` dispatch — even by a cached tool
+  name a client never re-listed — BEFORE policy evaluation or any downstream contact.
+- **`tool_integrity.mode` config**: `explicit` (recommended; new projects via `agentgate init` default to this),
+  `tofu` (trust-on-first-use, later drift still quarantined), `monitor` (reporting only — the backwards-
+  compatible default when this section is omitted), `disabled` (identical to pre-Milestone-6 behavior).
+- **`agentgate tools scan|status|diff|trust|reject|history [--config <path>]`**: six new CLI subcommands. `scan`
+  never calls a tool; `trust`/`reject` require an EXACT candidate id AND fingerprint (no name-only or
+  "trust-all" shortcut anywhere).
+- **7 new Control API routes** (`/api/tool-integrity/{summary,tools,history,rescan}` and per-candidate
+  `{diff,accept,reject}`), same loopback/token/Host/Origin/CORS/safe-error model as every other route; strict
+  body-schema validation rejecting unknown/execution-like fields.
+- **Control Center "Tool Integrity" page**: status table, exact-fingerprint accept (with a confirmation dialog
+  stating what is/isn't guaranteed)/reject (the calmer default action) review flow, bounded field-level diff
+  view, history, and a live pending/drifted-count nav badge. Hostile server-supplied content (HTML/script,
+  prompt injection, ANSI escapes) is rendered as plain, inert text only — never `dangerouslySetInnerHTML`.
+- **`examples/tool-rug-pull/demo.mjs`**: a real gateway (`explicit` mode) and a real, dynamic fixture MCP server
+  proving, end to end: trust a benign tool → one real call → the same running server starts advertising a
+  materially riskier definition for the same tool name → rescan detects drift → safe diff shown → quarantined
+  and no longer exposed as trusted → a direct cached-name call is blocked, with the fixture's own call counter
+  proving the downstream server was never contacted → reject → rescan does not silently re-trust → a stale
+  acceptance attempt fails closed → a distinct, later, genuinely benign update is trusted independently →
+  synthetic secret/HTML/prompt-injection/ANSI content in the malicious definition never appears raw in any
+  output. Wired into CI (both the Ubuntu and Windows jobs). A deterministic fault-injection hook plus a
+  dedicated test prove its cleanup runs on a real injected mid-run failure, not merely a `finally` block
+  inspected by eye.
+- New ADR-0012 (Tool Integrity Registry and Rug-Pull Defense).
+
+### Fixed
+- **`tools/list` staleness**: the gateway's tool-list handler used to compute its filtered/exposed tool list once
+  at startup and never refresh it, so an out-of-band trust/reject/rescan (CLI, Control API, Control Center) would
+  not be reflected in `tools/list` until a full gateway restart, even though direct-call enforcement already
+  re-checked live state on every call. Discovery now re-filters fresh on every `tools/list` request.
+  Found by the rug-pull demo, not a pre-existing unit test.
+
+  This also fixes a **real, independently pre-existing bug** in tool discovery: the prior inline `tools/list`
+  call had never handled MCP pagination (`nextCursor`) at all — only page 1 of a paginated downstream server's
+  tools was ever visible to AgentGate. Discovery is now paginated (capped at 200 pages, failing closed beyond
+  that), and is also the same scan the Tool Integrity Registry itself uses, so the two can never disagree.
+- **Rejected-tool re-drift false positive**: a tool that had a real prior trusted baseline (e.g. v1) before later
+  drifting and being rejected (e.g. v2) would incorrectly show fresh "drift" on every subsequent rescan of the
+  SAME unchanged, already-rejected v2 definition, because the registry compared against the trusted baseline's
+  fingerprint instead of the actually-rejected candidate's fingerprint. Fixed with a dedicated `rejected`-state
+  comparison branch. Found by the rug-pull demo (a scenario broader than existing unit-test coverage).
+
 ## [Unreleased] — Milestone 5: Zero-friction adoption, diagnostics, and release readiness
 
 ### Added

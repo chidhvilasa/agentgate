@@ -141,6 +141,60 @@ inbound arguments. There is no per-tool or per-pattern exception list in this mi
 legitimate output regularly false-positives, the only mitigations today are switching that deployment to
 `redact` mode (if not already) or accepting the redaction.
 
+## Tool Integrity
+
+This is also a **gateway config field, not a policy field** — rug-pull / tool-definition-poisoning defense (see
+ADR-0012 in `docs/AI_DECISIONS.md` and [`docs/THREAT_MODEL.md`](THREAT_MODEL.md#tool-definition-poisoning-rug-pull-adr-0012)).
+It governs whether a new or changed downstream tool *definition* is quarantined, independent of everything else
+on this page, which governs individual tool *calls*.
+
+Schema (`packages/gateway/src/config/registry.ts`, `ToolIntegritySchema`):
+
+```yaml
+tool_integrity:
+  mode: explicit    # "explicit" | "tofu" | "monitor" | "disabled" — default "monitor" if omitted entirely
+```
+
+| Mode | Behavior | Recommended for |
+|---|---|---|
+| `explicit` | Every new or changed tool definition is quarantined (`pending_review`/`drifted`) until a human accepts its EXACT fingerprint via the CLI, Control API, or Control Center. Blocks both `tools/list` exposure and direct `tools/call` dispatch. | New projects — this is what `agentgate init` generates. High-security deployments. |
+| `tofu` | A tool's first-ever observed definition is trusted automatically ("trust on first use"). Any LATER change to an already-trusted tool is still quarantined exactly like `explicit`. | A deployment that wants zero manual review for a server's initial tool set, but still wants drift blocked. |
+| `monitor` | Drift is still detected, classified, and recorded (visible in `agentgate tools status`, the Control API, the Control Center) but **never blocks** discovery or calls. | **The default when `tool_integrity` is omitted.** Kept as the default specifically so a config file written before this feature existed keeps working, unmodified, with zero new blocking behavior on upgrade — see "Migration" below. Never described anywhere in this codebase as protection; it is reporting only. |
+| `disabled` | The registry is not consulted for enforcement at all. Identical to every AgentGate version before this feature. | Backwards-compatibility only. Using this removes the defense entirely. |
+
+**Migration**: if you have an existing `agentgate.yml` without a `tool_integrity` section, it already behaves as
+`monitor` (no new blocking behavior) — you do not need to change anything for AgentGate to keep working exactly
+as before. To adopt the recommended, blocking behavior, add:
+
+```yaml
+tool_integrity:
+  mode: explicit
+```
+
+then run `agentgate tools scan --config agentgate.yml` followed by `agentgate tools status --config agentgate.yml`
+to review and `agentgate tools trust <candidate-id> --fingerprint <hash> --config agentgate.yml` to accept each
+currently-in-use tool's definition once, before restarting the gateway (a currently-untrusted tool is quarantined
+immediately once `explicit`/`tofu` mode is active).
+
+**What is fingerprinted**: the entire tool definition object as returned by the downstream server's `tools/list`
+— every field present (`name`, `title`, `description`, `inputSchema`, `outputSchema`, `annotations`, and any
+other field, known or unknown), not a hand-picked subset. Object keys are sorted before hashing (so re-ordering a
+server's own JSON output never creates false drift); array order is preserved (so a real ordering change, e.g. in
+`required`, does count as drift). A secret-shaped substring found anywhere in the definition is redacted before
+hashing (reusing the same detector as [Output security](#output-security-gateway-level) above), which means a
+change confined ENTIRELY to a redacted secret's own characters — with everything else byte-identical — would not
+by itself change the fingerprint; this is a documented, narrow tradeoff, not an oversight.
+
+**What annotations do and do not affect**: `readOnlyHint`/`destructiveHint`/etc. are stored and shown (they are
+part of what gets fingerprinted, so a server changing them does count as drift), but they are **never consulted
+by enforcement** to reduce risk — a server can't self-declare its way past quarantine by claiming to be
+`readOnlyHint: true`.
+
+**Reviewing and trusting/rejecting** always requires the EXACT `candidate_id` AND `fingerprint` currently on
+record for that tool — there is no name-only or "trust all" shortcut anywhere (CLI, Control API, or Control
+Center). If the tool has drifted again since you last looked, an attempt to accept/reject using the stale
+id/fingerprint fails outright rather than silently applying to whatever the current candidate happens to be.
+
 ## Decision: `allow`
 
 ```yaml
@@ -281,6 +335,9 @@ rules:
 - **Putting `output_security` inside a policy rule.** It is not a policy field at all — it is a top-level gateway
   config block (see [Output security (gateway-level)](#output-security-gateway-level)) and has no effect if
   nested under `rules:`.
+- **Putting `tool_integrity` inside a policy rule, or expecting a policy `allow` rule to bypass quarantine.** Tool
+  Integrity is a separate, earlier gate — a quarantined tool is blocked before policy evaluation ever runs, so no
+  `allow`/`decision` in a policy rule can override it. See [Tool Integrity](#tool-integrity) above.
 
 ## CLI
 

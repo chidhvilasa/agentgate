@@ -64,6 +64,37 @@ Two common, non-bug causes:
   always has everything replay needs. Replay deliberately fails closed here rather than guessing — see
   [ADR-0010](AI_DECISIONS.md).
 
+## A tool call fails with `[AgentGate] Tool Integrity: ...`
+
+Your `tool_integrity.mode` is `explicit` or `tofu` and the tool is not currently trusted. The specific reason is
+in the message:
+
+- **"has not been scanned/reviewed"**: run `agentgate tools scan --config agentgate.yml`, then
+  `agentgate tools status --config agentgate.yml` to see it, then `agentgate tools trust <id> --fingerprint
+  <hash> --config agentgate.yml` (using the EXACT id/fingerprint from `status`) to accept it.
+- **"is a new, unreviewed definition — quarantined pending explicit review"** / **"...definition changed since
+  it was last trusted"**: the tool is `pending_review` or `drifted` — review it with
+  `agentgate tools diff <id> --config agentgate.yml`, then `trust` or `reject`.
+- **"was explicitly rejected and has not been re-reviewed"**: someone rejected this exact fingerprint. If the
+  server's definition has genuinely changed again since, rescan (`agentgate tools scan`) — a NEW fingerprint
+  opens a fresh review cycle; the SAME rejected fingerprint stays rejected.
+- **"is no longer advertised by the downstream server"**: it was `removed` in the last scan. If it reappears in
+  a later scan, it goes back to `pending_review` for a fresh look, even if its fingerprint matches an old
+  trusted baseline (deliberate, conservative — a server disappearing and reappearing is itself worth a second
+  look).
+
+If this is unexpected and you don't want this defense right now, either add `tool_integrity: { mode: monitor }`
+(reporting only, matches AgentGate's own default for a config omitting this section) or `mode: disabled` to your
+config — see [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md#tool-integrity).
+
+## `agentgate tools trust`/`reject` fails with "Stale or unknown candidate"
+
+The `--fingerprint` (and/or the candidate id) you passed no longer matches the CURRENT candidate on record for
+that tool — either it drifted again since you last checked, or you copy-pasted an old value. Re-run
+`agentgate tools status --config agentgate.yml --json` (or `tools diff <id>`) to get the CURRENT exact
+id/fingerprint, then retry. This is deliberate fail-closed behavior (ADR-0012), not a bug — accepting a stale
+fingerprint could otherwise silently trust a definition different from the one you actually reviewed.
+
 ## A downstream result comes back with `[REDACTED]` in it unexpectedly
 
 The result matched one of `SECRET_PATTERNS` (`packages/policy/src/transformation.ts`) — the same conservative,

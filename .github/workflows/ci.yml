@@ -66,6 +66,9 @@ jobs:
       - name: Policy-drift Safe Replay demo (ADR-0010)
         run: node examples/policy-drift-replay/demo.mjs
 
+      - name: Tool Integrity rug-pull demo (ADR-0012)
+        run: node examples/tool-rug-pull/demo.mjs
+
       - name: Packed-package install verification (Milestone 5)
         run: node scripts/verify-packed-install.mjs
 
@@ -121,6 +124,9 @@ jobs:
 
       - name: Policy-drift Safe Replay demo (ADR-0010)
         run: node examples/policy-drift-replay/demo.mjs
+
+      - name: Tool Integrity rug-pull demo (ADR-0012)
+        run: node examples/tool-rug-pull/demo.mjs
 
       - name: Packed-package install verification (Milestone 5)
         run: node scripts/verify-packed-install.mjs

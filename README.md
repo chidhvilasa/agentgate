@@ -137,6 +137,10 @@ for human approval — is recorded before the call reaches (or is kept from reac
 - **Safe Replay — policy re-evaluation, never re-execution** — re-evaluate a historical, redacted event against
   the *current* policy to see whether the decision would change, with `executed` a fixed literal `false`; never
   contacts a downstream server, never creates an approval (see [Safe Replay](#safe-replay) below).
+- **Tool Integrity Registry — rug-pull / tool-definition-poisoning defense** — fingerprints every downstream tool
+  definition and quarantines a new or changed one until a human explicitly accepts its exact fingerprint;
+  enforced in the gateway request path itself, both for what is exposed via discovery and for a direct call by a
+  cached tool name (see [Tool Integrity](#tool-integrity) below).
 
 ## Example policy
 
@@ -186,6 +190,11 @@ agentgate audit verify [config]       # Independently re-verify the tamper-evide
 agentgate replay <event-id> [config]  # Safe Replay: re-evaluate a historical event against the current policy.
                                        # Policy re-evaluation only — never executes the tool. Add --json for
                                        # machine-readable output.
+
+agentgate tools scan|status|diff|trust|reject|history [--config <path>]
+                                       # Tool Integrity Registry: rescan the downstream server, list trust status,
+                                       # show a safe field-level diff, and accept/reject an EXACT candidate
+                                       # fingerprint. See "Tool Integrity" below.
 
 agentgate --version                   # Print the installed version
 agentgate <command> --help            # Print detailed usage for any command
@@ -354,6 +363,56 @@ agentgate replay evt_abc123 examples/agentgate.yml --json
   real audited tool call under policy A, then a policy change to policy B, replayed through both the Control
   API and the CLI, with the downstream server's call counter asserted unchanged throughout.
 
+## Tool Integrity
+
+**What it is:** a local registry that fingerprints every downstream tool definition (name, description, input/
+output schema, annotations — the entire object, not a hand-picked subset) and tracks it against a stable local
+server identity. A tool AgentGate has never seen, or one whose fingerprint has changed since it was last trusted,
+is quarantined: not exposed via `tools/list`, and not callable directly by name either, even if the calling
+client cached an older tool list. A human reviews the exact, field-level change and either accepts it (trusting
+that EXACT fingerprint only) or rejects it. This defends against **tool-definition poisoning ("rug-pull")** — a
+downstream MCP server that starts out benign, gets trusted, then silently changes its tool's description/schema
+to something riskier later. See [ADR-0012](docs/AI_DECISIONS.md) for the full design and
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md#tool-definition-poisoning-rug-pull-adr-0012) for what this does and
+does not protect against.
+
+![AgentGate Control Center — Tool Integrity page showing a drifted, quarantined tool after a rug-pull, with counts by status](docs/assets/control-center-tool-integrity-overview.png)
+
+![AgentGate Control Center — Tool Integrity review panel showing the safe, bounded, field-level diff for a quarantined candidate, with an untrusted-content warning](docs/assets/control-center-tool-integrity-diff.png)
+
+```yaml
+tool_integrity:
+  mode: explicit   # explicit (recommended) | tofu | monitor (default when omitted) | disabled
+```
+
+- `explicit` — every new/changed definition is quarantined until a human accepts its exact fingerprint.
+  `agentgate init` generates new projects with this mode.
+- `tofu` — a tool's first-ever observation is trusted automatically; any LATER change is still quarantined.
+- `monitor` — drift is detected and recorded, but never blocks discovery or calls. **Reporting only, never
+  protection.** This is the default when `tool_integrity` is omitted, so upgrading an existing config never
+  silently breaks it — see [`docs/POLICY_REFERENCE.md`](docs/POLICY_REFERENCE.md#tool-integrity) for the
+  honest tradeoff and the one-line migration to `explicit`.
+- `disabled` — the registry is not consulted at all; identical to every AgentGate version before this feature.
+
+```sh
+agentgate tools scan --config agentgate.yml      # rescan now — never calls a tool
+agentgate tools status --config agentgate.yml    # every known tool and its trust status
+agentgate tools diff <candidate-id> --config agentgate.yml   # safe, bounded, field-level drift
+agentgate tools trust  <candidate-id> --fingerprint <hash> --config agentgate.yml   # accept — exact match required
+agentgate tools reject <candidate-id> --fingerprint <hash> --config agentgate.yml   # reject — exact match required
+```
+
+There is no `--trust-all` and no way to trust by tool name alone — every accept/reject requires the exact
+candidate id AND fingerprint currently on record, so a stale review can never silently approve a definition that
+has since changed again. The same review flow (rescan, safe diff, exact-fingerprint accept/reject, history) is
+also available in the Control Center's **Tool Integrity** page.
+
+- Try it: `node examples/tool-rug-pull/demo.mjs` — a real gateway (`explicit` mode) and a real, dynamic fixture
+  MCP server: trust a benign `read_file` tool, make one real call, watch the same running server start
+  advertising a materially riskier definition for the same tool name, rescan, see it quarantined and no longer
+  callable by its cached name — with the fixture's own call counter proving the downstream server was never
+  contacted for the blocked call — reject it, and separately trust a later, genuinely distinct benign update.
+
 ## Security model and limitations
 
 AgentGate treats agent identity as **untrusted**: `declared_name`/`declared_version` are self-reported and used for
@@ -368,6 +427,18 @@ scratch. There is no external anchoring. See [`docs/THREAT_MODEL.md`](docs/THREA
 including indirect prompt injection, malicious downstream servers, approval replay, and denial-of-service risks
 this milestone does **not** yet mitigate.
 
+**What Tool Integrity does and does not prove:** a fingerprint is a local SHA-256 hash of a canonicalized
+definition — it proves byte-for-byte equality to a previously observed definition, nothing about who authored it.
+A stable, unchanged, trusted fingerprint does **not** prove the server's runtime behavior matches what it
+advertises — a compromised server can still return a poisoned tool *result* through an entirely unchanged tool
+*definition*; [Output security](#output-security) above remains the relevant defense for that. Local server
+identity is a local launch-configuration identity, not remote attestation. Annotations
+(`readOnlyHint`/`destructiveHint`/etc.) are untrusted, server-supplied hints and are never used to reduce
+enforced risk. The registry's hash chain is local tamper *evidence*, exactly like the audit chain above — not
+tamper-proof against a privileged local administrator. A definition can still change in the narrow window between
+one scan and the next call; this is not fully eliminated (see ADR-0012). This is not remote attestation, signed
+tools, sandboxing, runtime-behavior verification, or a claim of zero false positives.
+
 ## Architecture
 
 Component responsibilities, system and sequence diagrams, the audit data model, and trust boundaries:
@@ -379,9 +450,10 @@ Component responsibilities, system and sequence diagrams, the audit data model, 
 node examples/secret-exfiltration/demo.mjs       # inbound attack demo: secret in tool-call arguments (self-cleaning)
 node examples/downstream-secret-result/demo.mjs  # outbound demo: secret in a downstream result AND error (self-cleaning)
 node examples/policy-drift-replay/demo.mjs       # Safe Replay demo: policy drift, no execution (self-cleaning)
+node examples/tool-rug-pull/demo.mjs             # Tool Integrity demo: rug-pull blocked before execution (self-cleaning)
 node scripts/verify-packed-install.mjs           # packed-tarball install verification (self-cleaning)
 node packages/gateway/dist/cli.js smoke-test     # built-in harmless proof AgentGate works (self-cleaning)
-pnpm run test                                    # unit/integration tests (policy + gateway + control-center) — 206 tests
+pnpm run test                                    # unit/integration tests (policy + gateway + control-center)
 pnpm run lint                                    # type-aware lint gate across the whole workspace
 ```
 

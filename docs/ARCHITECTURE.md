@@ -20,6 +20,7 @@ where the two disagree, the code is correct and this file is stale; please file 
 | **Protocol package** | Shared TypeScript types for events, decisions, and the Control API contract, including the Safe Replay request/response contract — the only cross-package dependency all three consumers share. | `packages/protocol/src/{events,api}.ts` |
 | **CLI** | `agentgate start`/`validate`/`audit verify`/`replay`/`init`/`config validate`/`doctor`/`integrate`/`smoke-test`. | `packages/gateway/src/cli.ts` |
 | **Onboarding CLI modules** (Milestone 5) | Pure, testable logic behind the five onboarding commands — project scaffolding, config/policy validation (reusing the production loaders), read-only diagnostics, client-integration snippet generation, and a self-contained smoke test. | `packages/gateway/src/onboarding/{init,configValidate,doctor,integrate,smokeTest}.ts` |
+| **Tool Integrity Registry** (ADR-0012) | Rug-pull / tool-definition-poisoning defense: server identity, whole-object canonicalization/fingerprinting, an append-only state machine, gateway-path enforcement (discovery filtering + call-dispatch gating), and a bounded safe diff. See the dedicated section below. | `packages/gateway/src/tool-integrity/{identity,canonicalize,scan,registry,enforcement,diff,cli,types}.ts` |
 
 ## System diagram
 
@@ -336,6 +337,58 @@ output_security:
   and worked examples.
 - Every setting is Zod-validated; `loadGatewayConfig()` rejects a malformed `output_security` block the same way
   it rejects any other invalid config field.
+
+## Tool Integrity Registry (ADR-0012)
+
+Rug-pull / tool-definition-poisoning defense. Runs at two points: a mandatory scan at gateway startup, and an
+on-demand rescan (CLI/Control API/Control Center) — there is no dependency on
+`notifications/tools/list_changed` (AgentGate's protocol boundary remains legacy-2025 stdio only, ADR-0005).
+
+```mermaid
+flowchart LR
+    subgraph Scan["scan.ts — the only module that connects downstream"]
+        Downstream["Downstream MCP server\n(tools/list, paginated)"]
+    end
+    Downstream --> Canon["canonicalize.ts\nsanitizeJsonValue → sort keys → SHA-256\n(tool-definition-v1)"]
+    Canon --> Registry["registry.ts\napplyScanToRegistry()\nstate machine"]
+    Registry --> Storage[("tool_integrity_events\n(append-only, hash-chained)\n+ tool_integrity_state\n(mutable projection)")]
+    Storage --> Enforce["enforcement.ts\nfilterTrustedTools() / checkCallAllowed()"]
+    Enforce --> ListTools["tools/list handler\n(discovery filtering)"]
+    Enforce --> CallTool["tools/call handler\n(BEFORE policy/runPipeline)"]
+    Storage --> Diff["diff.ts\nbounded field-level diff\n(pure, no I/O)"]
+    Diff --> CLIAPI["CLI / Control API / Control Center\nexact-fingerprint accept/reject"]
+    CLIAPI --> Storage
+```
+
+- **Identity** (`identity.ts`): NOT `serverInfo.name` alone (not guaranteed unique per spec) — the configured
+  local `server.id` plus a versioned (`server-identity-v1`), redacted fingerprint of the launch configuration
+  (command/args normalized for path separators; each env `KEY=VALUE` pair individually SHA-256-hashed before
+  raw values are ever stored).
+- **Canonicalization/fingerprint** (`canonicalize.ts`, `tool-definition-v1`): the entire tool object, not a
+  hand-picked field subset; reuses `sanitizeJsonValue()` (ADR-0009) for bounded/safe traversal and secret
+  redaction before hashing; object keys sorted (array order preserved).
+- **Storage** (`storage.ts`): the same two-table pattern as `audit_events`/`audit_lifecycle_records` (ADR-0004),
+  not the single-table pattern used for `replay_evaluations` (ADR-0010) — `tool_integrity_events` is the
+  append-only, hash-chained source of truth (`insertToolIntegrityEvent()`/`verifyToolIntegrityChain()` mirror
+  the audit/replay chain implementation exactly); `tool_integrity_state` is an explicitly-documented mutable
+  projection, needed because gateway enforcement needs a cheap "is this trusted right now" lookup on every
+  `tools/list`/`tools/call`, not a full event-log replay.
+- **State machine** (`registry.ts`): `pending_review` → `trusted` (accept) / `rejected` (reject); `trusted` →
+  `drifted` (fingerprint change) → back to `trusted` (accept) or `rejected`; `removed` (absent from a scan) →
+  `pending_review` on reappearance (always, even if the fingerprint matches the old baseline — deliberately
+  conservative); a `rejected` tool re-scanned with the SAME fingerprint stays `rejected`, a genuinely different
+  fingerprint opens a fresh `drifted` cycle. Every accept/reject requires an EXACT `candidate_id` + `fingerprint`
+  match against the current stored candidate — a stale review fails closed rather than silently applying.
+- **Enforcement** (`enforcement.ts`, wired into `transport/stdio.ts`): in `explicit`/`tofu` mode,
+  `filterTrustedTools()` is called fresh on every `tools/list` request (not cached at startup — an out-of-band
+  accept/reject takes effect immediately without a gateway restart), and `checkCallAllowed()` gates every
+  `tools/call` BEFORE policy evaluation or `runPipeline()`. Annotations on the raw tool object are never
+  consulted by either function.
+- **Diff** (`diff.ts`): pure, side-effect-free, bounded (depth/count/string-length caps); classifies
+  `field_added`/`field_removed`/`value_changed`/`type_changed`/`array_length_changed`; hostile content (prompt
+  injection, HTML/script, ANSI escapes, prototype-pollution-shaped keys) is preserved as inert string data,
+  never executed or interpreted, and rendered as plain text (never `dangerouslySetInnerHTML`) in the Control
+  Center.
 
 ## Trust boundaries
 
