@@ -1473,3 +1473,109 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Unresolved questions: none blocking.
 - Exact next action: Phase 11/12 — confirm CI coverage for every new command, then run the complete local
   verification gate followed by a clean-room user journey and clean-clone verification.
+
+### 2026-08-25 — Milestone 5, Phase 11 (CI matrix confirmation) and Phase 12 (full verification + clean-clone)
+
+- Prompt objective: confirm CI already exercises every new command, then run the complete local gate, a
+  clean-room user journey using only committed documentation, and clean-clone verification at the exact
+  implementation candidate — repairing any real defect found before writing this entry.
+- Continuity check: re-read the Phase 1–10 session-log entries above and confirmed local HEAD was `ac710c2`
+  (Phase 10) with a clean tree before starting.
+- **Phase 11**: reviewed `.github/workflows/ci.yml` directly — `pnpm run test` already runs all 50 onboarding-CLI
+  unit tests plus the (then-new) `lifecycle.test.ts`, and `scripts/verify-packed-install.mjs` (wired into both
+  jobs in the Phase 1 commit) already exercises `agentgate smoke-test` from a genuinely installed package.
+  Concluded no additional CI wiring was needed. Added one more test —
+  `packages/gateway/tests/onboarding-smoke-test.test.ts`'s *"still cleans up its temp directory when an
+  injected internal failure throws mid-run"* — forcing a real exception (a mocked `fs.writeFileSync` throw)
+  mid-run and confirming the `try/finally` cleanup still fires, giving explicit executable evidence for the
+  "cleanup on injected failure" requirement beyond the structural JS guarantee alone. Committed as `f2d21fb
+  test(smoke-test): verify cleanup on an injected internal failure`.
+- **Phase 12, Step 1 (local candidate re-verification)** — commands actually run against local HEAD, in order,
+  with actual results:
+  - `pnpm install --frozen-lockfile` → up to date.
+  - `pnpm run build` → all four buildable packages clean, `copy-assets.mjs` copy confirmed in output.
+  - `pnpm run lint` → 0 errors, the same 2 pre-existing unrelated warnings.
+  - `pnpm run test` → **211 tests** (52 policy + 16 control-center + 143 gateway, 2 gateway tests correctly
+    platform-skipped on this Windows machine).
+  - All three demos (`secret-exfiltration`, `downstream-secret-result`, `policy-drift-replay`) and
+    `agentgate smoke-test` → all exit 0.
+  - `agentgate init` into a path containing spaces (`.../my project with spaces/`) → succeeded; a second `init`
+    into the same path without `--force` → correctly refused (exit 1, both files unchanged); `--force` → both
+    files rewritten.
+  - `agentgate config validate` (human and `--json`) and `agentgate doctor` (human and `--json`) against that
+    spaces-containing project, run from **three different working directories** (the project's own directory,
+    the repo root, and the OS temp-directory root) → identical, correct results each time; the `--json`
+    `db_path` field is now an absolute path — direct evidence the Phase-12-discovered config-resolution fix
+    (see below) is active in this build.
+  - **Config-resolution regression check, specifically**: launched a real gateway via a real MCP client
+    (`StdioClientTransport`) using the spaces-containing config, from `process.cwd() =
+    C:\Users\chidh\Downloads\agentgate` (deliberately not the project directory) — a real `echo` tool call
+    succeeded, proving the relative `policy`/`db_path` fields resolved correctly against the config file's own
+    directory rather than the launching process's cwd.
+  - `agentgate integrate claude-code|antigravity|generic` against the same project → all three produced valid
+    snippets; **Antigravity confirmed as a verified, cited-source client** (`https://antigravity.google/docs/
+    ide/mcp/`), not the generic fallback — explicit status recorded here per the prompt's requirement.
+  - `node scripts/verify-packed-install.mjs` → all 9 checks PASS (pack, tarball-content inspection, install all
+    three tarballs together into a fresh temp consumer, run the installed CLI's help/`--version`/`smoke-test`).
+  - `agentgate audit verify` against the spaces-project's real database (populated by the config-resolution
+    check's real tool call above) → both chains verified (3 audit records, 0 replay records — no replay was
+    performed in this session).
+  - The exact `security.yml` tracked-file secret-scan pattern, `git diff --check`, and a tracked-file grep for
+    `.sqlite`/`.log`/`token`/`.env`/`mcp*.json`/`.tgz`/`.tar.gz` patterns → all clean, nothing found.
+  - All scratch directories removed afterward; `git status --short` confirmed only `.claude/`/`CLAUDE.md`
+    untracked; a `netstat` check confirmed no lingering listeners on ports 4000/4001/5173.
+  - **No defect was found during this re-verification pass** — the config-resolution fix from the immediately
+    preceding session (commit `79d8fc0`) held up under every scenario tested above, including ones not
+    explicitly exercised when it was first written (the three-different-cwd `doctor`/`config validate` check,
+    and the real end-to-end MCP-client launch from the repo root with a spaces-containing project path).
+- **Phase 12, Step 2 (clean-clone verification)** — candidate commit **`79d8fc0625fcbb98c1e9f805bdac817f34174d71`**
+  (`fix(config): resolve relative policy/db_path against the config file's own directory`), the actual local
+  HEAD at the time this verification started. `git clone` of the local repository (not a working-directory
+  copy) into a fresh, ephemeral temp directory outside the repository (removed at the end of this phase — its
+  path is not recorded here beyond "an OS temp subdirectory," per the instruction not to leak an unnecessary
+  personal path). Confirmed via `git log -1`/`git status --short` inside the clone before running anything, and
+  confirmed `.claude/`, `CLAUDE.md`, and `graphify-out/` all absent (never tracked, so a fresh clone genuinely
+  does not have them). Full gate repeated inside the clone, using only the clone's own `node_modules`/`dist`
+  (never copied from the working tree):
+  - `pnpm install --frozen-lockfile` (fresh, 448 packages) → succeeded.
+  - `pnpm run build` → clean, identical output shape to the working-tree build.
+  - `pnpm run lint` → same 0 errors / 2 pre-existing warnings.
+  - `pnpm run test` → **211 tests**, identical count and composition to the working-tree run.
+  - All three demos and `agentgate smoke-test` (via the clone's own `dist/cli.js`) → all exit 0.
+  - `node scripts/verify-packed-install.mjs` (the clone's own copy, packing the clone's own packages) → all 9
+    checks PASS.
+  - `init` → `config validate` → `doctor` (human + JSON) → `integrate` for all three clients, all against a
+    fresh project generated inside the clone's own temp scratch area, using the clone's own `dist/cli.js`.
+  - **Config-resolution regression check, independently repeated inside the clone**: a real gateway launched
+    via the clone's own compiled CLI and the clone's own `@modelcontextprotocol/sdk` installation, with
+    `process.cwd()` set to the OS temp-directory root (neither the clone nor the generated project directory)
+    — a real `echo` tool call succeeded and the Control API's `/api/health` endpoint (queried with the
+    captured token) reported the correct absolute `db_path`, confirming the fix is genuinely part of the
+    committed, cloneable source — not an artifact of the original working tree's own already-built `dist/`.
+  - `agentgate audit verify` against the resulting database → both chains verified (3 audit records).
+  - The exact tracked-file secret scan → clean; `git status --short` inside the clone → empty (clean tree,
+    `dist`/`node_modules` gitignored as expected).
+  - A `netstat` check after the clone-side gateway was stopped → no lingering listeners.
+  - Every clone-side scratch directory removed, then the clone itself removed, then the *original* working
+    repository's own `git status --short` re-checked and confirmed unchanged (only `.claude/`/`CLAUDE.md`
+    untracked) — the clean-clone work never touched the working tree.
+  - **Clean-room documentation journey**: performed using only the commands actually printed by `init`'s own
+    "Next steps" output and documented in `README.md`/`docs/DEVELOPMENT.md` — install → init → validate →
+    doctor → integrate → launch (via the literal generated integration snippet) → inspect the Control API →
+    stop cleanly → remove the generated project directory. Every step matched documented behavior exactly; no
+    undocumented command or manual code inspection was required to complete it.
+  - **No defect was found in the clean clone either** — this candidate is proven at the exact commit that will
+    be pushed, not an earlier one.
+- Files materially changed by this phase: `packages/gateway/tests/onboarding-smoke-test.test.ts` (Phase 11,
+  already committed as `f2d21fb` before this entry). No other source files changed — Phase 12 was verification-
+  only and found nothing requiring repair.
+- Verification result: **PASS on every Phase 11 and Phase 12 item**, both in the working tree and independently
+  in an isolated clean clone at the exact same commit (`79d8fc0`).
+- Known limitations / follow-up risk: all local and clean-clone verification in this session ran on Windows
+  only — no Linux or macOS testing was performed locally in this phase. Linux (Ubuntu, Node 20 and 22) and a
+  second Windows confirmation are expected from GitHub Actions CI in Phase 13, not claimed here. The two
+  POSIX-only lifecycle tests remain correctly skipped in every local/clean-clone run recorded above, per the
+  documented platform limitation from the Phase 7 entry.
+- Unresolved questions: none blocking.
+- Exact next action: Phase 13 — pre-push audit, push `main` to `origin`, observe GitHub CI/Security to
+  completion for the exact pushed commit, repair any real failure found there, and produce the final report.
