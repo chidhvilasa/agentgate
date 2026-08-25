@@ -1579,3 +1579,55 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Unresolved questions: none blocking.
 - Exact next action: Phase 13 — pre-push audit, push `main` to `origin`, observe GitHub CI/Security to
   completion for the exact pushed commit, repair any real failure found there, and produce the final report.
+
+### 2026-08-25 — Milestone 5, Phase 13 (pre-push audit, push, and CI/Security observation)
+
+- Prompt objective: audit the exact commit range before pushing, push `main` normally, observe GitHub CI and
+  Security to completion for the exact pushed commit, and close out the ledger.
+- Continuity check: confirmed local HEAD `b57e7ab` (the just-committed Phase 11-12 ledger entry) with a clean
+  tree (`git status --short`: only `.claude/`/`CLAUDE.md` untracked) before starting.
+- **Pre-push audit** (against `origin/main` at `a6402d5`, the last previously-published commit):
+  - `git log --oneline origin/main..HEAD` → exactly 12 commits, all identifiable Milestone 5 work (packaging
+    fix, the onboarding CLI feature commit, an ADR/ledger commit, the lifecycle/clipping fix, four documentation/
+    visual/Graphify commits, the injected-failure test, the config-resolution fix, and two ledger entries) — no
+    unrelated or unexpected commit present.
+  - `git diff --stat origin/main...HEAD` → 42 files changed, 3328 insertions, 34 deletions; every changed path
+    reviewed and consistent with the work described above.
+  - `git diff --check origin/main...HEAD` → clean.
+  - `pnpm install --frozen-lockfile` → "Already up to date," confirming every `package.json` change across the
+    full range (the two `"files"` field additions) is already reflected in `pnpm-lock.yaml`.
+  - `git tag -l` → empty; `git diff --name-only origin/main...HEAD` grepped for `release`/`publish`/workflow
+    files → only `.github/workflows/ci.yml` (the packed-install verification step addition, already reviewed in
+    the Phase 1 ledger entry) — no publish/release/tag-related change of any kind.
+  - The exact `security.yml` tracked-file secret-scan pattern, run across the full current tree → clean.
+  - Grepped `README.md`/`docs/*.md` for "Antigravity" outside of accurate, already-reviewed context (status
+    tables, ADR-0011, historical ledger entries) → no overclaiming language found; Antigravity is consistently
+    described as a verified, cited-source client, matching the actual runtime behavior confirmed in Phase 12.
+  - Final `git status --short` before pushing → only `.claude/`/`CLAUDE.md` untracked.
+- **Push**: `git push origin main` → `a6402d5..b57e7ab`. Confirmed immediately afterward: local
+  `git rev-parse HEAD` and `git rev-parse origin/main` both equal `b57e7ab3049e96c85c251828218d1c70d8bab264`.
+- **GitHub Actions observation, for commit `b57e7ab` specifically** (not an earlier commit's runs):
+  - **CI** run `32803371630` (https://github.com/chidhvilasa/agentgate/actions/runs/32803371630) — all 3 jobs
+    **PASS**: `build-test (ubuntu, node 20)` 1m12s, `build-test (ubuntu, node 22)` 1m15s, `build-test (windows,
+    node 22)` 2m39s. This is the first time the config-resolution fix (and the rest of this session's Phase
+    11/12 work) has been exercised on Linux at all — this session's own local/clean-clone verification was
+    Windows-only, per the known limitation already recorded in the Phase 12 entry above.
+  - **Security** run `32803371578` (https://github.com/chidhvilasa/agentgate/actions/runs/32803371578) — all 3
+    jobs **PASS**: `Dependency audit (high+ severity)` 18s, `CodeQL (TypeScript/JavaScript)` 1m20s,
+    `Tracked-file secret scan (deterministic, local)` 4s.
+  - **No CI- or Security-discovered defect this push** — both workflows passed on the first attempt for this
+    exact commit; no repair, no follow-up commit, and no second push were needed in this phase.
+  - No package was published, no tag was created, no GitHub Release was created, and no repository setting
+    (visibility, branch protection) was changed at any point in this session.
+- Files materially changed by this phase: none (push/observation only; this ledger entry itself is the only
+  content change, committed separately after this entry is written, per the established self-referential-hash
+  avoidance rule).
+- Verification result: PASS — final remote HEAD `b57e7ab` has both required GitHub Actions workflows fully
+  green, confirmed by directly observing the completed run status for that exact commit via `gh run view`, not
+  inferred or assumed from an earlier run.
+- Known limitations / follow-up risk: none new beyond what Phase 12 already recorded (Windows-only local
+  testing; Linux coverage comes from CI, now confirmed green for this exact commit). No macOS coverage exists
+  anywhere in this project, local or CI, and is not claimed.
+- Unresolved questions: none blocking.
+- Exact next action: none — Milestone 5 is locally complete and its final candidate commit's required CI/
+  Security checks are green on the pushed remote HEAD. Produce the final report.
