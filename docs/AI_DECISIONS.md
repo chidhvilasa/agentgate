@@ -2145,3 +2145,153 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Exact next action: remaining backend/CLI adversarial-gate coverage (Milestone-5 DB migration fixture, DB-
   tampering/deletion/reordering tests, further hostile-fixture coverage), then documentation, browser
   verification, Graphify, full gates, clean-clone, and commit/push/CI observation.
+
+### 2026-08-25 — Milestone 6, Phases D–J (migration/tamper tests, documentation, browser verification, Graphify, full adversarial gates, clean-clone, and the implementation commit)
+
+- Prompt objective: complete the remaining backend adversarial-gate coverage (DB migration/tamper tests,
+  `agentgate init` recommended-mode default), full documentation, real browser verification with screenshots,
+  Graphify re-indexing and cross-checked queries, the full local adversarial gate suite, a clean-clone
+  verification at the exact candidate commit, and the commit itself.
+- Continuity check: re-read the ADR-0012 and Phase 1–8/B/C entries above; confirmed working tree state matched
+  (`git status --short`) before starting.
+- **Phase D (remaining adversarial coverage)**:
+  - New `packages/gateway/tests/tool-integrity-storage-migration.test.ts` (8 tests): fresh-database chain-empty
+    case; migration from a REAL pre-Milestone-6 database (built via the actual current `AuditStorage`, then the
+    two `tool_integrity_*` tables dropped and the corresponding `schema_version` row removed — schema-version-
+    driven, not a hand-maintained copy of an old schema that could silently drift from the real migrations —
+    confirming the pending migration re-runs cleanly and pre-existing audit data is untouched); restart
+    persistence; tampering (direct field mutation) detection; deleted-row (sequence-gap) detection; reordered-row
+    (swapped `sequence_number` values) detection; corrupted `previous_event_hash` link detection;
+    `upsertToolIntegrityState()` true-upsert behavior (one row after two calls on the same primary key, not two).
+    First attempt at the migration test hand-crafted an old schema directly and failed with `duplicate column
+    name: result_blocked` (the hand-built "legacy" table already had ADR-0009-era columns that a real early-
+    version migration would only add later) — fixed by switching to the schema-version-rollback approach
+    described above, which can never drift from the real migration list. All 8 pass.
+  - `packages/gateway/src/onboarding/init.ts`: `buildConfigTemplate()` now generates new projects with
+    `tool_integrity: { mode: explicit }` (previously the field was omitted entirely, implicitly `monitor`) —
+    addresses the milestone's explicit instruction to make `explicit` the *recommended* mode concretely, not
+    just in prose. Manually verified the generated YAML is valid and passes `agentgate config validate`; existing
+    `onboarding-init.test.ts`/`onboarding-doctor.test.ts`/`onboarding-integrate.test.ts` (38 tests) all still pass
+    unchanged (doctor never spawns the placeholder downstream server regardless of `tool_integrity` mode, so this
+    change does not affect doctor's read-only checks).
+- **Phase E (documentation)**: added/updated Tool Integrity sections in `README.md` (Core features bullet, CLI
+  block, full "Tool Integrity" section with config/CLI examples and a "what it does and does not prove"
+  limitations paragraph, Demo-and-verification block), `docs/POLICY_REFERENCE.md` (full config-field reference
+  table, migration guidance, a "common mistakes" entry), `docs/THREAT_MODEL.md` (a full "Tool-definition poisoning
+  (rug-pull, ADR-0012)" section with threat/mitigation/limitations, plus entries in the mitigations-implemented/
+  deferred and non-goals summaries), `docs/ARCHITECTURE.md` (component table row, a full architecture section
+  with a Mermaid flow diagram and per-module design notes), `docs/DEVELOPMENT.md` ("Using Tool Integrity locally"
+  walkthrough, demo-list and release-gates updates), `docs/TROUBLESHOOTING.md` (two new entries: the
+  `[AgentGate] Tool Integrity: ...` call-blocked message and its per-reason remediation, and the "Stale or
+  unknown candidate" CLI/API error), `docs/VERIFICATION.md` (a full Milestone 6 claim/evidence table), `CHANGELOG.md`
+  (a new Milestone 6 `[Unreleased]` section, Added + Fixed), and this ledger's ADR-0012 (already written in the
+  prior entry). Every limitation stated matches ADR-0012 exactly (fingerprints are not signatures, do not prove
+  runtime behavior, local identity is not remote attestation, annotations are untrusted, local tamper evidence is
+  not tamper-proof, TOCTOU is not fully eliminated, `monitor` provides no blocking protection) — no doc overclaims
+  beyond what the implementation and tests actually demonstrate.
+- **Phase F (real browser verification + screenshots)**: temporarily added `playwright` as a workspace
+  devDependency (`pnpm add -D playwright -w`, then `npx playwright install chromium`), started a real gateway
+  (`explicit` mode) against the rug-pull fixture server in a scratch temp directory, used the CLI to trust
+  generation 1 then drift to generation 2 (producing a real `drifted`/quarantined state with the hostile-content
+  candidate definition on record), started the Control Center's Vite dev server against it (on port 5173 —
+  discovered during this phase that the Control API's CORS `origin` allowlist is hardcoded to
+  `127.0.0.1:5173`/`localhost:5173`, so an initial attempt on port 5183 correctly failed with a CORS-driven
+  "Gateway Unreachable" state, itself a useful confirmation that CORS is actually enforced), and used a Playwright
+  script to navigate to `/tool-integrity`, capture `docs/assets/control-center-tool-integrity-overview.png`
+  (summary cards, drifted status, quarantine banner), open the review panel and capture
+  `docs/assets/control-center-tool-integrity-diff.png` (full-page; the untrusted-content warning, fingerprints,
+  and the visible field-level changes — the diff panel's own bounded, scrollable inner container means not every
+  change is visible in one screenshot, which is the correct/intended bounded-diff behavior, not a capture defect),
+  and a 420×800 narrow-viewport capture. Zero console errors observed at either viewport (asserted programmatically
+  in the capture script, not just eyeballed). Afterward: killed the gateway and Vite dev server processes, removed
+  the scratch temp directory, removed the temporary capture script from the repo root, and ran
+  `pnpm remove playwright -w` — confirmed via a byte-for-byte `diff` against pre-install backups that
+  `package.json` and `pnpm-lock.yaml` were restored to their EXACT prior state (not just "close").
+- **Phase G (Graphify)**: read the installed skill's full instructions before running anything (via the Skill
+  tool); ran `graphify update .` (AST-only, no LLM/API key) — 1017→1218 nodes, 1322→1744 edges, 85 communities.
+  Ran the required orientation/path queries and cross-checked every finding against source (full detail in the
+  new Milestone 6 section of `docs/GRAPHIFY_VERIFICATION.md`): confirmed accurate — `startStdioProxy() -->
+  filterTrustedTools()`/`checkCallAllowed()` call sites at the exact source line numbers ADR-0012 describes, and
+  the `cli.ts --dynamic_import--> tool-integrity/cli.ts --imports_from--> tool-integrity/registry.ts` path.
+  Two coverage gaps found, both independently confirmed (via `graphify explain "replay"` reproducing the identical
+  gap on the pre-existing Milestone 4 `api.replay` method) to be the SAME class of pre-existing, systemic AST-
+  extractor limitation already documented in Milestones 4–5 (object-literal arrow-function properties and
+  anonymous inline-callback bodies are not attributed as call-graph nodes/edges) — not a new defect and not acted
+  on by changing source, per the mandatory "never change source solely because Graphify reports/fails to report a
+  path without confirming imports and control flow" instruction.
+- **Phase I (full local adversarial gate suite)** — commands and exact results:
+  - `pnpm install --frozen-lockfile` → "Already up to date."
+  - `pnpm run build` → clean, all 4 buildable packages.
+  - `pnpm run lint` → 0 errors, 2 pre-existing unrelated warnings only.
+  - `pnpm run test` → **377 tests passed, 2 skipped, 0 failed, across 33 test files** (`packages/policy`: 52/3;
+    `apps/control-center`: 47/2; `packages/gateway`: 278/28, 2 correctly platform-skipped on Windows). This is the
+    exact final count — not the pre-Milestone-6 baseline, which was never treated as a target to preserve
+    verbatim.
+  - All 4 demos (`secret-exfiltration`, `downstream-secret-result`, `policy-drift-replay`, `tool-rug-pull`) →
+    **PASS**, `node scripts/verify-packed-install.mjs` → **PASS**.
+  - `git diff --check` → found one REAL trailing-whitespace error in the just-written `CHANGELOG.md` (not an LF/
+    CRLF advisory) — fixed immediately, re-verified clean (only the same pre-existing LF/CRLF advisories every
+    prior milestone's gate has also carried).
+  - Exact CI `security.yml` secret-scan regex/allowlist, run manually against the full tree (`node_modules`/
+    `dist`/`.git` excluded) → found the ledger's OWN prose (this file, describing the Phase B/C bugfix) quoting
+    the literal non-allowlisted synthetic value `tests/tool-integrity-diff.test.ts` had used before being fixed
+    — the fix itself was already correct, but re-stating the exact old literal in the ledger's prose would have
+    failed the real Security workflow on push. Reworded the ledger prose to describe the literal without quoting
+    it verbatim; re-ran the exact scan — clean.
+  - No tracked `.sqlite`/`.log`/token/`.env` file (`git ls-files | grep -iE ...`) → none.
+  - CLI Tool Integrity lifecycle (`scan`→`status`→`diff`→`trust`[stale rejected]→`trust`[exact accepted]→
+    `history`) re-verified end-to-end against a real spawned fixture server one more time, all correct.
+- **Commit**: staged everything except `.claude/`/`CLAUDE.md` (`git add -A -- ':!.claude' ':!CLAUDE.md'`),
+  confirmed the staged set matched intent exactly, ran `git diff --cached --check` (clean), and committed as a
+  single coherent commit (`3a98860a5fc5afbeb36f278af9ebc1d53b9f9669` — the entire Tool Integrity implementation,
+  tests, CLI, Control API, Control Center, demo, CI wiring, ADR-0012, and all documentation/screenshots/Graphify-
+  verification updates together). A single commit was used rather than the suggested finer-grained grouping
+  because this milestone's ledger narrative (this very file) already describes the implementation as one
+  continuous, phase-by-phase story spanning ADR-0012 through the final gates — attempting to carve that single
+  file's diff across several artificial commit boundaries risked staging broken/inconsistent intermediate states
+  for no real review benefit, which the governing prompt explicitly permits avoiding ("use fewer coherent commits
+  rather than staging broken intermediate states"). The commit is fully buildable and testable on its own (all
+  gates above were run against it). **First commit-message attempt was accidentally mangled**: a `-m "..."`
+  string containing literal backtick-quoted CLI command text (e.g. `` `agentgate tools scan|status|...` ``) was
+  parsed by bash as command substitution inside the double-quoted argument, silently dropping that text and
+  producing spurious "command not found" shell errors for `agentgate`/`status`/`reject`/`diff`. Caught
+  immediately by inspecting `git log -1 --format=%B` after the commit; fixed via `git commit --amend -F
+  <message-file>` (safe — this commit had not yet been pushed) with the message written to a plain file instead
+  of an inline shell string, avoiding backtick expansion entirely. Verified the amended message renders correctly
+  and the amend changed only the commit's message/hash, not its tree (`git show --stat HEAD` — same 47 files
+  changed, 6466 insertions, 45 deletions as the pre-amend commit).
+- **Phase J (clean-clone verification at the exact candidate commit)**: `git clone .` into a fresh OS-temp
+  directory; confirmed the clone's HEAD equals `3a98860a5fc5afbeb36f278af9ebc1d53b9f9669` exactly; confirmed NO
+  `.claude/`, `CLAUDE.md`, or `graphify-out/` present anywhere in the clone (`ls`/`git status --short` both
+  clean — proving no dependency on any of them). Repeated, **from a completely fresh `pnpm install
+  --frozen-lockfile`**: build (clean), lint (clean, same 2 pre-existing warnings), full test suite (**377
+  passed, 2 skipped, 33 files — byte-identical counts to the working tree**), all 4 demos (all PASS), packed-
+  install verification (PASS), a manual `agentgate init`/`config validate` walkthrough against the clone's own
+  built CLI binary (both succeeded), and a full CLI Tool Integrity `scan`/`status` cycle against a real spawned
+  fixture server using the clone's own built binary (correct `pending_review` output for all 4 fixture tools).
+  Exact CI secret-scan regex/allowlist and `git diff --check` both clean in the clone. After all checks: no
+  leftover `.sqlite`/temp file found under the clone directory; a precise port check for AgentGate's actual demo
+  port ranges (4337–4344, 4700–4701, 4800–4801, 4900–4901) found nothing listening (the raw `netstat` output
+  contained several unrelated high-numbered OS/IPv6 ephemeral ports that coincidentally substring-matched a
+  looser first-pass grep pattern — re-checked with a precise pattern and confirmed those were false matches, not
+  actual AgentGate listeners); confirmed no orphan git changes in the clone. The clone directory itself was then
+  removed, and the ORIGINAL working repository's own `git status --short` was re-checked immediately afterward
+  and confirmed unchanged (only `.claude/`/`CLAUDE.md` untracked) — the clean-clone work never touched the
+  working tree. **No defect was found in the clean clone** — this is the exact commit that will be pushed, not
+  an earlier one.
+- Files materially changed by this phase: `packages/gateway/tests/tool-integrity-storage-migration.test.ts`
+  (new), `packages/gateway/src/onboarding/init.ts`, `README.md`, `docs/{POLICY_REFERENCE,THREAT_MODEL,
+  ARCHITECTURE,DEVELOPMENT,TROUBLESHOOTING,VERIFICATION,GRAPHIFY_VERIFICATION}.md`, `CHANGELOG.md`, three new
+  `docs/assets/control-center-tool-integrity-*.png` files — all committed as `3a98860a5fc5afbeb36f278af9ebc1d53b9f9669`
+  (already an existing commit as of this entry, not a future/self-referential hash).
+- Verification result: **PASS on every item in this entry**, both in the working tree and independently in an
+  isolated clean clone at the exact commit that will be pushed.
+- Known limitations / follow-up risk: all local and clean-clone verification in this session ran on Windows
+  only — no Linux or macOS testing was performed locally. Linux (Ubuntu, Node 20 and 22) coverage is expected
+  from GitHub Actions CI in the next phase, not claimed here. No macOS coverage exists anywhere in this project,
+  local or CI, and is not claimed. The scan-to-call TOCTOU and `monitor`-mode-provides-no-blocking-protection
+  limitations documented in ADR-0012 remain unresolved by design (stated, not hidden).
+- Unresolved questions: none blocking.
+- Exact next action: push `main`, observe GitHub CI and Security for the exact pushed commit
+  (`3a98860a5fc5afbeb36f278af9ebc1d53b9f9669`) to completion, repair any real failure found there via a normal
+  follow-up commit, and produce the final report.
