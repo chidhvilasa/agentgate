@@ -1190,6 +1190,109 @@ decisions across AI-agent sessions. Verify entries against the repository.
   other public-beta docs listed in the Milestone 8 prompt (Phase 8), associated test files (added in the session
   log entry below).
 - Supersedes: NONE
+- Superseded by: NONE (amended by ADR-0015, which refines the release-workflow's publish-gating and artifact-integrity design without changing this ADR's core architecture decisions — see ADR-0015)
+
+### ADR-0015: Release-Workflow Publish-Gating and Artifact-Integrity Amendment (amends ADR-0014)
+
+- Status: ACCEPTED
+- Date: 2026-08-28
+- Scope: release / packaging / supply chain (amendment)
+- Decision:
+  1. **This ADR amends, and does not replace, ADR-0014.** Every decision in ADR-0014 (package topology, lockstep
+     versioning, OIDC trusted publishing, the inert-until-tag-or-dispatch trigger boundary) remains in force
+     unchanged. This ADR records three concrete defects found during a first-publication preflight review of
+     `.github/workflows/release.yml` — never actually executed — and the fixes applied, plus one critical
+     external-platform fact discovered that materially changes what "owner approval" for a first publish
+     actually requires.
+  2. **Critical bootstrap-sequencing fact, from current official npm documentation (verified this session, not
+     assumed): npm trusted publishing cannot be configured for a package that has never been published.** The
+     trusted-publisher configuration UI lives on a package's own settings page on npmjs.com, which does not exist
+     until the package exists. The documented, official sequence is: (a) publish the package's first version
+     manually, from an authenticated local terminal, using traditional auth (`npm login` + `npm publish
+     --access public`); (b) only then configure the trusted publisher on that now-existing package's settings
+     page; (c) only then can an OIDC-based CI/CD workflow (like `release.yml`) publish subsequent versions.
+     **Consequence for AgentGate specifically: `.github/workflows/release.yml`'s `publish` job cannot succeed at
+     publishing the FIRST version of `@agentgate/protocol`, `@agentgate/policy`, or `@agentgate/gateway`** — all
+     three are entirely new, never-published packages. The very first release of each must be published manually
+     by the owner, outside this workflow; the automated workflow becomes usable starting with each package's
+     SECOND release. This is now documented explicitly in `release.yml`'s own header comment rather than left
+     implicit, and is the central fact structuring the first-publication owner runbook.
+  3. **Fixed: the `publish` job's gate did not require the dispatch to target a tag.** Previously
+     `if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true'` — this reached a
+     real `npm publish` if the owner ran `workflow_dispatch` against ANY ref (e.g. the `main` branch tip,
+     GitHub's default pre-selected choice in the dispatch UI), with no tag ever required to exist, contradicting
+     ADR-0014's own stated intent that publication be tag-gated. Fixed by adding `&& github.ref_type == 'tag'` to
+     the condition — a real publish now structurally requires the dispatch to have been run against a tag ref,
+     not merely with the right input string.
+  4. **Fixed: attested/checksummed/SBOM'd artifacts were not necessarily the bytes actually published.** The
+     previous workflow had `verify` build-and-pack once (for checksums/SBOM/attestation) and the separate
+     `publish`/`publish-dry-run` jobs independently re-checkout, reinstall, and rebuild before calling `npm
+     publish` from the package directory (which packs again, internally, at publish time). Milestone 8 already
+     established that tarball packing is not byte-reproducible across separate build invocations of the same
+     commit (embedded file mtimes differ). This meant the SBOM/checksums/attestation this workflow would have
+     produced described a DIFFERENT build than what was actually published — undermining the entire point of
+     generating them. Fixed: `verify` now uploads its built tarballs as a workflow artifact; `publish-dry-run`,
+     `publish`, and `attest` all download and act on THAT SAME artifact (`npm publish <tarball-path>` instead of
+     `npm publish` from a re-built directory) — one build, reused everywhere, so the attestation's "these exact
+     bytes" claim is now actually true. This also removed the need for `pnpm`/a full workspace install in the
+     `publish-dry-run` and `publish` jobs (they now only need Node + npm), simplifying and speeding both up.
+  5. **Fixed: no idempotent-retry handling for a partial publish.** The publish loop previously had no check for
+     "already published" — since `set -e` (GitHub Actions' bash default) halts the loop at the first failure,
+     a rerun after e.g. `protocol` succeeded but `policy` failed would fail again immediately on `protocol`
+     (already published, `npm publish` correctly refuses to republish an existing immutable version) and never
+     reach `policy`/`gateway`. Fixed: each package is now skipped, not re-attempted, if `npm view
+     "<name>@<version>" version` already resolves — making a rerun after a partial failure safe and able to make
+     automatic forward progress on only the packages that still need publishing.
+  6. **Documented, not fixed (an inherent npm CLI limitation): `npm publish --dry-run` does not validate token/
+     OIDC identity against the registry.** Verified from current documentation/community sources this session:
+     `--dry-run` reports whether an auth/OIDC context is *present* locally, not whether the registry would
+     *accept* it. A green `publish-dry-run` job therefore proves the tarball is well-formed and packable — it
+     does NOT prove a real publish would succeed (in particular, it cannot detect "no trusted publisher is
+     configured yet," point 2's exact situation for a first release). This limitation is now stated in
+     `release.yml`'s own header comment so a future green dry-run is never over-read as "the real publish would
+     have worked."
+  7. **Observed, not fixed (informational, no repository-setting mutation performed):** the repository currently
+     has zero GitHub Environments and no branch protection on `main` (`gh api .../environments` → `total_count:
+     0`; `gh api .../branches/main/protection` → 404 "Branch not protected"). If the owner ever dispatched the
+     `publish` job before creating and protecting the `npm-publish` Environment, GitHub Actions would very likely
+     auto-create that Environment on first reference with NO protection rules, silently skipping the intended
+     human-approval gate. This is recorded here as a critical sequencing warning for the owner runbook — create
+     and protect the Environment BEFORE the first `workflow_dispatch` with `publish: true` — not fixed in code,
+     since creating a GitHub Environment is an explicit repository-setting mutation this preflight is not
+     authorized to perform.
+- Alternatives considered:
+  - Leaving the `publish` job's gate as `workflow_dispatch` + `publish:true` alone (no `ref_type` check), relying
+    on the owner to always remember to select the tag manually — rejected: a structural guarantee that cannot be
+    forgotten is strictly safer than a documented-but-unenforced operator convention, and costs nothing to add.
+  - Publishing straight from each package directory in the `publish` job (status quo) instead of reusing
+    `verify`'s tarballs — rejected once the reproducibility gap was understood: it would make every future
+    attestation this project produces describe a build that was never actually the one published, silently
+    undermining the exact guarantee ADR-0014 point 9 says attestations provide.
+  - Adding a repository `NPM_TOKEN` secret to work around the trusted-publishing bootstrap requirement (point 2)
+    so the automated workflow COULD perform even a first publish — rejected: explicitly forbidden by this
+    session's authorization boundary (no secret may be added), and would reintroduce the exact long-lived-token
+    risk ADR-0014 chose OIDC specifically to avoid; the correct fix is operator process (manual first publish),
+    not weakening the credential model.
+- Consequences:
+  - Positive: a real, previously-latent path to publishing from an unintended branch commit is closed
+    structurally; generated attestations will actually describe published bytes once real publication happens; a
+    partial first-publish failure is now automatically recoverable by rerunning the same dispatch, rather than
+    requiring manual intervention; the owner-facing runbook can now state the true, complete first-release
+    sequence instead of one that silently assumes the automated workflow can do something it cannot.
+  - Negative: the first release of each package requires a manual, out-of-band `npm publish` step the owner must
+    perform correctly (with 2FA) before the automated workflow is usable at all — this is an npm platform
+    constraint, not a choice this project can design around.
+- Limitations (stated explicitly, not implied):
+  - None of these fixes have been exercised against the real npm registry (no tag exists, nothing has been
+    published) — they are verified by direct code/YAML review and (where practical) local reasoning about GitHub
+    Actions' documented context-variable/shell-default behavior, not by an actual successful run.
+  - `@agentgate` npm scope ownership remains unverified — unchanged from ADR-0014; this amendment does not and
+    cannot resolve it.
+  - The Environment auto-creation-without-protection risk (point 7) is a GitHub Actions platform behavior this
+    project can only document and warn about, not prevent from code.
+- Affected files: `.github/workflows/release.yml` (publish-gating fix, artifact-integrity rework, idempotent
+  retry, expanded header documentation), `docs/AI_DECISIONS.md` (this entry).
+- Supersedes: NONE (amends ADR-0014's release-workflow design; ADR-0014's architecture decisions are unchanged)
 - Superseded by: NONE
 
 ## Superseded Decisions

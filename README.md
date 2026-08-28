@@ -273,6 +273,10 @@ npm install -g @agentgate/gateway   # not yet published — this command does no
 `@agentgate/protocol` and `@agentgate/policy` are also independently installable (for building your own tooling
 against AgentGate's types/policy engine); most users only need `@agentgate/gateway`, which depends on the other two.
 
+See [`docs/RELEASE_RUNBOOK.md`](docs/RELEASE_RUNBOOK.md) for the exact operator-side publication process,
+including why the very first publish of each of these packages cannot go through the automated release workflow
+(npm trusted publishing cannot be configured for a package that has never been published).
+
 ### Verifying a downloaded release (checksums, SBOM, attestation)
 
 Once packages/tarballs are actually published, each release is accompanied by (generated locally today via

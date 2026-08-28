@@ -227,3 +227,27 @@ exact final counts/hashes/commit, not invented in advance here.
 results, clean-clone result, tarball hashes, and commands run, phase by phase; the final candidate commit's exact
 counts are recorded there, not invented in advance here. This section describes a verified release CANDIDATE — no
 package has been published, no tag or GitHub Release created, as stated throughout ADR-0014.
+
+---
+
+# First Publication Preflight — Owner Authorization Gate (ADR-0015)
+
+A read-only preflight against the Milestone 8 release candidate, plus real defects found in
+`.github/workflows/release.yml` (never executed) and fixed. See [ADR-0015](AI_DECISIONS.md) for the full design
+amendment and [`docs/RELEASE_RUNBOOK.md`](RELEASE_RUNBOOK.md) for the resulting operator process.
+
+| Claim | Evidence |
+|---|---|
+| The release candidate commit had not drifted; the full local gate (install/build/lint/632+15 tests/all 5 demos/packed-install/release-consistency) still passes identically | Re-run this session; see the dated ledger entry for exact counts |
+| npm registry state for all three package names, and whether `@agentgate` scope ownership can be verified in this environment | `npm whoami` → `ENEEDAUTH`; `npm view @agentgate/{protocol,policy,gateway}` → all 404; scope ownership genuinely unverifiable without an authenticated npm session (not "confirmed available") |
+| **npm trusted publishing cannot be configured for a never-published package** — a first-publish bootstrap requirement not previously documented | Verified against current official npm documentation and community sources this session; see ADR-0015 point 2 |
+| The release workflow's `publish` job could previously be dispatched from an arbitrary branch commit with no tag, contradicting its own stated design | Found by direct line-by-line review; fixed by adding `github.ref_type == 'tag'` to the job's `if:` condition; regression-tested in `scripts/release-workflow-structure.test.mjs` |
+| Attested/checksummed/SBOM'd artifacts were not necessarily the same bytes that would actually be published (separate, non-reproducible rebuilds) | Found by tracing the build graph against Milestone 8's own documented tarball-reproducibility limitation; fixed by having every job reuse the exact tarballs `verify` already built; regression-tested |
+| The publish loop had no idempotent-retry handling for a partial-publish rerun | Found by reasoning through GitHub Actions' bash `-e` default and npm's immutable-version behavior; fixed with a `npm view <name>@<version>` already-published check; regression-tested |
+| No GitHub Environment exists yet in this repository; referencing a non-existent Environment risks an unprotected auto-created one | `gh api repos/chidhvilasa/agentgate/environments` → `total_count: 0`; documented as a critical sequencing warning in the runbook, not fixed in code (would require a repository-setting mutation, out of scope) |
+| The release workflow's structural invariants (trigger set, publish gating, artifact reuse, permission scoping, no stored secret, publish order, idempotency, documentation of the bootstrap requirement) | `scripts/release-workflow-structure.test.mjs` (13 cases, parses the real YAML) |
+| No package, tag, GitHub Release, npm scope, trusted publisher, GitHub Environment, repository setting, or secret was created or modified during this preflight | Directly confirmed — see the dated ledger entry and this preflight's final report |
+
+**Status:** see the dated ledger entry for this session in `docs/AI_DECISIONS.md` for the exact final commit,
+CI/Security run results, and complete evidence. This remains a verified release CANDIDATE with a corrected,
+regression-tested release workflow — still not published, tagged, or released.
