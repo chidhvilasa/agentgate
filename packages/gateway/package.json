@@ -1,7 +1,6 @@
 {
   "name": "@agentgate/gateway",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.0-beta.1",
   "description": "AgentGate gateway: MCP stdio proxy, policy evaluation pipeline, tamper-evident audit storage, loopback Control API, and CLI.",
   "license": "Apache-2.0",
   "type": "module",
@@ -9,10 +8,33 @@
     "agentgate": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chidhvilasa/agentgate.git",
+    "directory": "packages/gateway"
+  },
+  "homepage": "https://github.com/chidhvilasa/agentgate#readme",
+  "bugs": {
+    "url": "https://github.com/chidhvilasa/agentgate/issues"
+  },
+  "keywords": [
+    "agentgate",
+    "mcp",
+    "model-context-protocol",
+    "gateway",
+    "security",
+    "cli",
+    "ai-agents"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc && node scripts/copy-assets.mjs",

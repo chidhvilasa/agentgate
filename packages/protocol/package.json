@@ -1,18 +1,37 @@
 {
   "name": "@agentgate/protocol",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.0-beta.1",
   "description": "Shared TypeScript types for AgentGate: audit events, policy decisions, agent identity, and the Control API contract.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "sideEffects": false,
   "engines": {
     "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chidhvilasa/agentgate.git",
+    "directory": "packages/protocol"
+  },
+  "homepage": "https://github.com/chidhvilasa/agentgate#readme",
+  "bugs": {
+    "url": "https://github.com/chidhvilasa/agentgate/issues"
+  },
+  "keywords": [
+    "agentgate",
+    "mcp",
+    "model-context-protocol",
+    "types"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc",

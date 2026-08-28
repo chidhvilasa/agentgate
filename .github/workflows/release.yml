@@ -1,0 +1,265 @@
+name: Release
+
+# Milestone 8 / ADR-0014 — PREPARED BUT INERT. This workflow exists so its
+# structure/permissions/gates can be reviewed before any real publish ever
+# happens; landing this file on `main` does NOT publish anything and does
+# NOT run this workflow at all in any ordinary way. It only fires on:
+#   1. A version tag push matching "v*.*.*" (e.g. "v0.1.0-beta.1") — the
+#      owner must deliberately create and push that tag; nothing in this
+#      milestone creates one.
+#   2. A manual `workflow_dispatch` (owner-triggered from the Actions tab).
+# Even then, the actual `npm publish` step (the `publish` job) additionally
+# requires BOTH an explicit `publish: true` workflow_dispatch input AND the
+# `npm-publish` GitHub Environment's approval gate — an Environment the
+# owner must separately create and protect with required reviewers in repo
+# Settings; this file only REFERENCES that environment by name; it does not
+# and cannot create or configure it (that would be a repository-setting
+# mutation, explicitly out of scope for this milestone). Until the owner
+# does that AND configures npm trusted publishing for these exact package
+# names/repo/workflow-filename on npmjs.com (see docs/VERIFICATION.md /
+# the Milestone 8 final report for the exact steps), any real "publish"
+# attempt fails at the npm registry, by design — this workflow cannot
+# succeed at actually publishing until those two owner-side, out-of-repo
+# steps are done.
+#
+# A tag push ALONE (no manual workflow_dispatch with publish:true) only
+# ever runs `verify` + a `npm publish --dry-run`, in the `publish-dry-run`
+# job — it can never call a real `npm publish`, structurally: the `publish`
+# job's `if:` condition requires `github.event_name == 'workflow_dispatch'`.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Type "true" to attempt a REAL npm publish (still gated by the npm-publish protected Environment). Any other value (including leaving this blank) runs verification and a dry-run publish only.'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # never cancel a possibly-in-flight publish
+
+jobs:
+  # Always runs (on either trigger). No publish permissions at all — this
+  # job cannot publish anything even if every other gate were misconfigured.
+  verify:
+    name: verify release candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.consistency.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm + Node 22
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
+        with:
+          runtime: node@22
+          cache: true # verify job only — the publish job below deliberately does not cache
+          install: false
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Full test suite
+        run: pnpm run test
+
+      - name: Working tree must be clean (no uncommitted/generated changes)
+        run: |
+          if [ -n "$(git status --short)" ]; then
+            echo "Working tree is not clean:"
+            git status --short
+            exit 1
+          fi
+
+      - name: Confirm this commit is reachable from origin/main
+        run: |
+          git fetch origin main --depth=100
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Commit $GITHUB_SHA is not an ancestor of origin/main — refusing to release from an unmerged/unknown commit."
+            exit 1
+          fi
+
+      - name: Release version/tag consistency check (ADR-0014)
+        id: consistency
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            node scripts/check-release-consistency.mjs --tag "$GITHUB_REF_NAME"
+          else
+            node scripts/check-release-consistency.mjs
+          fi
+          VERSION=$(node -p "require('./packages/gateway/package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: "Packed-package install verification (content allowlist, no workspace:/file: deps, real installed-CLI proof)"
+        run: node scripts/verify-packed-install.mjs
+
+      - name: Generate release manifest, checksums, SBOM, license inventory
+        run: node scripts/generate-release-manifest.mjs --out-dir release-artifacts
+
+      - name: Tracked-file and packed-artifact secret/local-path scan
+        run: node scripts/scan-release-artifacts.mjs release-artifacts
+
+      - name: Upload release artifacts (tarballs, checksums, SBOM, manifest)
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: release-artifacts/
+          retention-days: 14
+
+  # Runs whenever this workflow runs at all (tag push OR manual dispatch),
+  # regardless of the `publish` input. Never touches the real registry.
+  publish-dry-run:
+    name: npm publish --dry-run (always safe)
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # exercised even in dry-run so the OIDC/npm-CLI-version path is proven end-to-end before any real attempt
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm + Node 22 (no caching — release builds never use a cache)
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
+        with:
+          runtime: node@22
+          cache: false
+          install: false
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Require npm CLI >=11.5.1 and Node >=22.14.0 (trusted-publishing minimums)
+        run: |
+          node -e "
+            const [nodeMajor, nodeMinor, nodePatch] = process.versions.node.split('.').map(Number);
+            if (nodeMajor < 22 || (nodeMajor === 22 && (nodeMinor < 14))) {
+              console.error('Node ' + process.versions.node + ' does not meet the >=22.14.0 requirement for npm trusted publishing.');
+              process.exit(1);
+            }
+          "
+          npm install -g npm@^11.5.1
+          NPM_VERSION=$(npm --version)
+          echo "npm CLI version: $NPM_VERSION"
+          node -e "
+            const v = '$NPM_VERSION'.split('.').map(Number);
+            if (v[0] < 11 || (v[0] === 11 && v[1] < 5) || (v[0] === 11 && v[1] === 5 && v[2] < 1)) {
+              console.error('npm ' + '$NPM_VERSION' + ' does not meet the >=11.5.1 requirement for trusted publishing.');
+              process.exit(1);
+            }
+          "
+
+      - name: npm publish --dry-run for every publishable package (never contacts the real registry mutably)
+        run: |
+          for pkg in protocol policy gateway; do
+            echo "── @agentgate/$pkg ──"
+            (cd "packages/$pkg" && npm publish --dry-run --access public)
+          done
+
+  # The ONLY job that can perform a real publish, and only when ALL of the
+  # following are simultaneously true: (a) this workflow was triggered by an
+  # explicit manual workflow_dispatch — never by a plain tag push — AND
+  # (b) the dispatch input `publish` is exactly the string "true" AND
+  # (c) the `verify` job above passed AND (d) the `npm-publish` protected
+  # Environment's required reviewers (owner-configured, not by this file)
+  # approve the run. A tag push by itself can NEVER reach this job's `if:`
+  # condition — structurally, not just by convention.
+  publish:
+    name: npm publish (REAL — gated)
+    needs: [verify, publish-dry-run]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm-publish # must be created + protected with required reviewers by the repo owner; see the Milestone 8 report for exact setup steps
+    permissions:
+      contents: read
+      id-token: write # OIDC token for npm trusted publishing — no NPM_TOKEN secret exists in this repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm + Node 22 (no caching)
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
+        with:
+          runtime: node@22
+          cache: false
+          install: false
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Require npm CLI >=11.5.1
+        run: npm install -g npm@^11.5.1 && npm --version
+
+      # Provenance is generated AUTOMATICALLY by npm trusted publishing —
+      # no --provenance flag and no NPM_TOKEN. --access public is required
+      # for a scoped package's first publish. Publish protocol first since
+      # policy/gateway depend on it.
+      - name: npm publish (real, trusted publishing via OIDC)
+        run: |
+          for pkg in protocol policy gateway; do
+            echo "── @agentgate/$pkg ──"
+            (cd "packages/$pkg" && npm publish --access public)
+          done
+
+  # Attests the release artifacts' build provenance after a REAL publish.
+  # Never runs on a dry-run-only trigger. Subject: the checksums/SBOM/
+  # manifest and tarballs already uploaded by `verify` — a DIFFERENT trust
+  # path than npm's own trusted-publishing provenance (which attests the
+  # published package itself); see the Milestone 8 report for why these are
+  # not the same guarantee and must both be independently verified.
+  attest:
+    name: attest release artifacts
+    needs: [verify, publish]
+    if: needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: release-artifacts
+
+      # Standard SLSA build-provenance attestation — subject-path only, the
+      # action derives the correct predicate itself (no hand-authored
+      # predicate JSON here, to avoid asserting a predicate-type/schema this
+      # workflow cannot verify since it has never actually been run). This
+      # attests these SPECIFIC artifact bytes were produced by THIS
+      # workflow run at THIS commit — a distinct trust path from npm
+      # trusted-publishing's own provenance (which attests the published
+      # package, not these locally-generated SBOM/manifest/checksum files).
+      # Verify with: gh attestation verify <file> -R chidhvilasa/agentgate
+      - name: Attest tarballs, checksums, SBOM, and manifest (build provenance)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            release-artifacts/*.tgz
+            release-artifacts/checksums.sha256
+            release-artifacts/sbom.cyclonedx.json
+            release-artifacts/release-manifest.json

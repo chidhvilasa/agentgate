@@ -57,6 +57,9 @@ jobs:
       - name: Test
         run: pnpm run test
 
+      - name: Release-tooling script tests (Milestone 8, ADR-0014)
+        run: pnpm run test:release
+
       - name: Secret-exfiltration attack demo (inbound)
         run: node examples/secret-exfiltration/demo.mjs
 
@@ -75,6 +78,9 @@ jobs:
       - name: Packed-package install verification (Milestone 5)
         run: node scripts/verify-packed-install.mjs
 
+      - name: Release version/tag consistency check (Milestone 8, ADR-0014)
+        run: node scripts/check-release-consistency.mjs
+
       - name: Verify no whitespace/hygiene errors
         run: git diff --check
 
@@ -82,6 +88,68 @@ jobs:
         run: |
           if [ -n "$(git status --short)" ]; then
             echo "Unexpected changes after the demo run:"
+            git status --short
+            exit 1
+          fi
+
+  # macOS (Milestone 8 / ADR-0014, Phase 5). A justified HIGH-VALUE SUBSET,
+  # not the full 2x-Ubuntu-plus-Windows pipeline a third time over: build +
+  # lint + the full unit/integration test suite (which exercises the
+  # better-sqlite3 native module's macOS binary — the single highest-value
+  # platform-specific risk, since a bad prebuild/native-compile would fail
+  # loudly right here) + the packed-install verification (proves the actual
+  # `npm install`/CLI-execution consumer experience this milestone claims,
+  # not just a source-tree build) + the release version/tag consistency
+  # check. The five attack/defense demo scripts are deliberately NOT
+  # duplicated a third time — they assert Node-level protocol/policy
+  # behavior with no macOS-specific code path, and already run to completion
+  # on both Ubuntu and Windows above; the value of a third identical run is
+  # low relative to its runtime cost. This job's own pass/fail is the entire
+  # evidence behind any macOS-support claim in this milestone's report — no
+  # claim is made beyond what this job actually runs and passes.
+  build-test-macos:
+    name: build-test (macos, node 22)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm + Node 22
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
+        with:
+          runtime: node@22
+          cache: true
+          install: false
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Release-tooling script tests (Milestone 8, ADR-0014)
+        run: pnpm run test:release
+
+      - name: Packed-package install verification (Milestone 5)
+        run: node scripts/verify-packed-install.mjs
+
+      - name: Release version/tag consistency check (Milestone 8, ADR-0014)
+        run: node scripts/check-release-consistency.mjs
+
+      - name: Verify no whitespace/hygiene errors
+        run: git diff --check
+
+      - name: Verify no generated artifacts were left behind
+        run: |
+          if [ -n "$(git status --short)" ]; then
+            echo "Unexpected changes after the test run:"
             git status --short
             exit 1
           fi
@@ -119,6 +187,9 @@ jobs:
       - name: Test
         run: pnpm run test
 
+      - name: Release-tooling script tests (Milestone 8, ADR-0014)
+        run: pnpm run test:release
+
       - name: Secret-exfiltration attack demo (inbound)
         run: node examples/secret-exfiltration/demo.mjs
 
@@ -136,6 +207,9 @@ jobs:
 
       - name: Packed-package install verification (Milestone 5)
         run: node scripts/verify-packed-install.mjs
+
+      - name: Release version/tag consistency check (Milestone 8, ADR-0014)
+        run: node scripts/check-release-consistency.mjs
 
       - name: Verify no whitespace/hygiene errors
         run: git diff --check

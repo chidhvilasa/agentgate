@@ -21,3 +21,8 @@ mock-downstream.js
 # Local Graphify knowledge-graph output (derived, regenerate with
 # `graphify update .`). See docs/GRAPHIFY_VERIFICATION.md.
 graphify-out/
+
+# Generated release evidence (tarballs, checksums, SBOM, manifests) — build
+# output, not source. Regenerate with scripts/generate-release-manifest.mjs.
+release-artifacts/
+*.tgz

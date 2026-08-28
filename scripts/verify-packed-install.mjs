@@ -1,4 +1,7 @@
-// Packed-package installability verification (Milestone 5, Phase 1/11).
+// Packed-package installability verification (Milestone 5, Phase 1/11;
+// extended Milestone 8 / ADR-0014 Phase 3 for the public-beta release
+// candidate: content-allowlist enforcement, forbidden-dependency-specifier
+// rejection, and a printed SHA-256/size manifest for every tarball).
 //
 // Proves — with real `pnpm pack` and a real `npm install` into a clean,
 // isolated consumer project, not an assumption — that AgentGate can
@@ -12,6 +15,7 @@
 // performs, and does not weaken the separate, fully-offline requirement
 // on `agentgate smoke-test` itself (verified independently).
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -25,9 +29,38 @@ const PACKAGES = ['protocol', 'policy', 'gateway'];
 // to resolve them; POSIX doesn't need or want it.
 const SHELL = process.platform === 'win32';
 
+// Any packed entry path containing one of these is an automatic failure —
+// none of these should ever be reachable from a package's `files`
+// allowlist, but this is deliberately a second, independent check on the
+// actual tarball bytes rather than trusting `files` alone.
+const FORBIDDEN_PATH_SUBSTRINGS = [
+  'package/src/',
+  'package/tests/',
+  'package/test/',
+  'package/.env',
+  'package/.git/',
+  'package/node_modules/',
+  '.sqlite',
+  '.sqlite3',
+  '.map', // no source maps — tsconfig.base.json does not enable them, verified as an invariant here
+  'package/.npmrc',
+  'package/.claude/',
+  'CLAUDE.md',
+];
+
 function check(label, condition) {
   console.log(`${condition ? '✅ PASS' : '❌ FAIL'} — ${label}`);
   return Boolean(condition);
+}
+
+function sha256File(filePath) {
+  const buf = fs.readFileSync(filePath);
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+/** Extracts one file's text content from a .tgz without unpacking the whole archive. */
+function extractFileFromTarball(tarballPath, innerPath) {
+  return execFileSync('tar', ['--force-local', '-xzOf', tarballPath, innerPath], { encoding: 'utf-8' });
 }
 
 async function main() {
@@ -50,28 +83,68 @@ async function main() {
       });
       const tarballLine = out.trim().split('\n').pop();
       const tarballPath = tarballLine.startsWith(packDir) ? tarballLine : path.join(packDir, tarballLine);
-      tarballs.push(tarballPath);
+      tarballs.push({ pkg, tarballPath });
       results.push(check(`pnpm pack produced a tarball for @agentgate/${pkg}`, fs.existsSync(tarballPath)));
     }
 
-    console.log('\nStep 2 — verify tarball contents exclude src/ and tests/ (packaging hygiene)...');
-    const gatewayTarball = tarballs[tarballs.length - 1];
-    // --force-local avoids tar misreading a Windows "C:\..." absolute path
-    // as a "host:path" remote-tar spec (the colon after the drive letter).
-    const listing = execFileSync('tar', ['--force-local', '-tzf', gatewayTarball], { encoding: 'utf-8' });
-    results.push(check('gateway tarball does not include src/', !listing.includes('package/src/')));
-    results.push(check('gateway tarball does not include tests/', !listing.includes('package/tests/')));
-    results.push(check('gateway tarball includes dist/cli.js', listing.includes('package/dist/cli.js')));
-    results.push(check('gateway tarball includes the smoke-test fixture', listing.includes('package/dist/onboarding/smokeFixtureServer.mjs')));
+    console.log('\nStep 2 — SHA-256 / size manifest for every packed tarball...');
+    const manifest = [];
+    for (const { pkg, tarballPath } of tarballs) {
+      const stat = fs.statSync(tarballPath);
+      const hash = sha256File(tarballPath);
+      const entry = { package: `@agentgate/${pkg}`, filename: path.basename(tarballPath), size_bytes: stat.size, sha256: hash };
+      manifest.push(entry);
+      console.log(`  ${entry.package.padEnd(24)} ${entry.filename.padEnd(34)} ${String(entry.size_bytes).padStart(9)} bytes  sha256:${entry.sha256}`);
+    }
 
-    console.log('\nStep 3 — npm install all three tarballs together into a clean consumer project...');
+    console.log('\nStep 3 — verify every tarball\'s content allowlist and reject forbidden entries...');
+    const listings = {};
+    for (const { pkg, tarballPath } of tarballs) {
+      // --force-local avoids tar misreading a Windows "C:\..." absolute path
+      // as a "host:path" remote-tar spec (the colon after the drive letter).
+      const listing = execFileSync('tar', ['--force-local', '-tzf', tarballPath], { encoding: 'utf-8' });
+      listings[pkg] = listing;
+      const entries = listing.trim().split('\n').filter(Boolean);
+      const forbidden = entries.filter((e) => FORBIDDEN_PATH_SUBSTRINGS.some((bad) => e.includes(bad)));
+      results.push(check(`@agentgate/${pkg} tarball (${entries.length} entries) contains no forbidden path (src/, tests/, .env, .git/, node_modules/, *.sqlite*, *.map, .npmrc, .claude/, CLAUDE.md)`, forbidden.length === 0));
+      if (forbidden.length > 0) {
+        console.error(`    forbidden entries found:\n      ${forbidden.join('\n      ')}`);
+      }
+      results.push(check(`@agentgate/${pkg} tarball includes package.json`, entries.includes('package/package.json')));
+      results.push(check(`@agentgate/${pkg} tarball includes LICENSE`, entries.includes('package/LICENSE')));
+      results.push(check(`@agentgate/${pkg} tarball includes README.md`, entries.includes('package/README.md')));
+    }
+    results.push(check('gateway tarball includes dist/cli.js', listings.gateway.includes('package/dist/cli.js')));
+    results.push(check('gateway tarball includes the smoke-test fixture', listings.gateway.includes('package/dist/onboarding/smokeFixtureServer.mjs')));
+
+    console.log('\nStep 4 — verify no packed package.json contains a workspace:/file:/link: dependency specifier...');
+    for (const { pkg, tarballPath } of tarballs) {
+      const packedManifestText = extractFileFromTarball(tarballPath, 'package/package.json');
+      const packedManifest = JSON.parse(packedManifestText);
+      const allDeps = { ...(packedManifest.dependencies ?? {}), ...(packedManifest.devDependencies ?? {}), ...(packedManifest.peerDependencies ?? {}) };
+      const badSpecifiers = Object.entries(allDeps).filter(([, range]) => /^(workspace:|file:|link:|portal:)/.test(String(range)));
+      results.push(check(`@agentgate/${pkg} packed package.json has no workspace:/file:/link:/portal: dependency specifier`, badSpecifiers.length === 0));
+      if (badSpecifiers.length > 0) {
+        console.error(`    unresolved specifiers: ${badSpecifiers.map(([n, r]) => `${n}@${r}`).join(', ')}`);
+      }
+      results.push(check(`@agentgate/${pkg} packed package.json is not private`, packedManifest.private !== true));
+      if (pkg !== 'protocol') {
+        // policy/gateway depend on @agentgate/protocol — must resolve to a real, installable semver range.
+        const protocolRange = allDeps['@agentgate/protocol'];
+        if (protocolRange !== undefined) {
+          results.push(check(`@agentgate/${pkg} declares @agentgate/protocol as a real semver range (got "${protocolRange}")`, /^\d/.test(protocolRange) || /^\^|~/.test(protocolRange)));
+        }
+      }
+    }
+
+    console.log('\nStep 5 — npm install all three tarballs together into a clean consumer project (zero workspace access)...');
     execFileSync('npm', ['init', '-y'], { cwd: consumerDir, stdio: 'ignore', shell: SHELL });
-    execFileSync('npm', ['install', ...tarballs], { cwd: consumerDir, stdio: 'ignore', shell: SHELL });
+    execFileSync('npm', ['install', ...tarballs.map((t) => t.tarballPath)], { cwd: consumerDir, stdio: 'ignore', shell: SHELL });
     const binName = process.platform === 'win32' ? 'agentgate.cmd' : 'agentgate';
     const binPath = path.join(consumerDir, 'node_modules', '.bin', binName);
     results.push(check('agentgate CLI binary was installed into node_modules/.bin', fs.existsSync(binPath)));
 
-    console.log('\nStep 4 — run the installed CLI...');
+    console.log('\nStep 6 — run the installed CLI...');
     const helpOut = execFileSync(binPath, [], { cwd: consumerDir, encoding: 'utf-8', shell: process.platform === 'win32' });
     results.push(check('agentgate (no args) prints usage help', helpOut.includes('AgentGate') && helpOut.includes('smoke-test')));
 
@@ -81,7 +154,7 @@ async function main() {
     const smokeOut = execFileSync(binPath, ['smoke-test'], { cwd: consumerDir, encoding: 'utf-8', shell: process.platform === 'win32' });
     results.push(check('agentgate smoke-test passes from the installed package', smokeOut.includes('Smoke test passed')));
 
-    console.log('\nStep 5 — Context Guard CLI (ADR-0013) help/read-only command smoke from the installed package...');
+    console.log('\nStep 7 — Context Guard CLI (ADR-0013) help/read-only command smoke from the installed package...');
     const contextHelpOut = execFileSync(binPath, ['context', '--help'], { cwd: consumerDir, encoding: 'utf-8', shell: process.platform === 'win32' });
     results.push(check('agentgate context --help prints usage and the conservative-observation wording', contextHelpOut.includes('Usage: agentgate context') && /conservative/i.test(contextHelpOut)));
 
@@ -102,6 +175,11 @@ async function main() {
     const contextVerifyOut = execFileSync(binPath, ['context', 'verify', '--config', 'agentgate.yml'], { cwd: consumerDir, encoding: 'utf-8', shell: process.platform === 'win32' });
     results.push(check('agentgate context verify passes against a fresh installed (empty) chain', contextVerifyOut.includes('✅') || /verified/i.test(contextVerifyOut)));
     fs.unlinkSync(path.join(consumerDir, 'context-guard-smoke.sqlite'));
+
+    console.log('\n─── Tarball manifest (also usable as an evidence table) ───');
+    for (const entry of manifest) {
+      console.log(`  ${JSON.stringify(entry)}`);
+    }
 
     const allPassed = results.every(Boolean);
     console.log('');
