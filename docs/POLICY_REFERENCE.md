@@ -227,15 +227,16 @@ context_guard:
 
 | Mode | Behavior | Recommended for |
 |---|---|---|
-| `enforce` | Contextual rules can DENY or REQUIRE_APPROVAL a call before it ever reaches policy execution or the downstream server. | High-security deployments; the whole point of enabling this feature. |
+| `enforce` | Contextual rules can DENY or REQUIRE_APPROVAL a call before it ever reaches policy execution or the downstream server. | New projects — this is what `agentgate init` generates (with an empty, schema-valid `tools`/`rules`, enforcing nothing until you configure real ones). High-security deployments. |
 | `monitor` | Context labels are still accumulated and contextual rules are still evaluated and recorded, but the result never blocks or escalates a call. | **The default when `context_guard` is omitted.** Kept as the default so a config file written before this milestone keeps working unmodified — see "Migration" below. Never described anywhere in this codebase as protection; it is reporting only. |
 | `disabled` | No context is created, no labels are tracked, no contextual rule is ever evaluated. Identical to every AgentGate version before this milestone. | Backwards-compatibility only. Using this removes the defense entirely. |
 
 **Migration**: an existing `agentgate.yml` without a `context_guard` section already behaves as `monitor` — no
-new blocking behavior, nothing to change for AgentGate to keep working exactly as before. Unlike Tool Integrity,
-`agentgate init` does **not** currently generate a `context_guard` block for new projects (a stated, honest gap,
-not an oversight) — a new project also starts in `monitor` mode until an operator explicitly adds one. To adopt
-enforcement:
+new blocking behavior, nothing to change for AgentGate to keep working exactly as before. As of the public-beta
+release (ADR-0014), `agentgate init` generates new projects with an explicit `context_guard: { mode: enforce }`
+block (see [ADR-0013](AI_DECISIONS.md) and [ADR-0014](AI_DECISIONS.md)) — a config generated before that change
+does not retroactively gain this section; only a freshly-generated project does. To adopt enforcement on an
+existing config:
 
 ```yaml
 context_guard:
@@ -536,9 +537,10 @@ rules:
 - **Assuming a downstream tool's `annotations` (e.g. `readOnlyHint`) affect Context Guard's evaluation.** They
   don't, ever — only your own `context_guard.tools.<name>.effects`/`.adds_on_result` config does. See the
   anti-example under [Context Guard](#context-guard) above.
-- **Forgetting `context_guard` defaults to `monitor` (reporting only) when omitted**, and that `agentgate init`
-  does not currently generate an `enforce`-mode block for new projects — unlike `tool_integrity`, which does.
-  Explicitly add `context_guard: { mode: enforce, ... }` to get real blocking behavior.
+- **Forgetting `context_guard` defaults to `monitor` (reporting only) when omitted** on a config written before
+  the public beta (ADR-0014). `agentgate init` generates new projects with an explicit `enforce`-mode block (an
+  empty one, enforcing nothing until you add real `tools`/`rules`) — an older, already-existing config does not
+  retroactively gain it; add `context_guard: { mode: enforce, ... }` yourself to get real blocking behavior.
 
 ## CLI
 

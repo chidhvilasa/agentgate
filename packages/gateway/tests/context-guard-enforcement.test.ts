@@ -227,11 +227,27 @@ describe('Context Guard enforcement (ADR-0013)', () => {
   });
 
   describe('checkApprovalContextValid — tool_fingerprint binding (Tool Integrity)', () => {
-    it('a null bound fingerprint (never bound — e.g. no trusted definition existed at creation time) skips the fingerprint check, unaffected by the current trusted fingerprint', () => {
+    it('a null-to-null fingerprint (no trusted definition existed at creation time, and none exists now either) passes — nothing was ever bound and nothing has changed', () => {
+      createContext(storage, 'ctx-1', null);
+      const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null, scope: 'send_webhook', tool_fingerprint: null });
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest', null);
+      expect(result.ok).toBe(true);
+    });
+
+    it('Milestone 8 / ADR-0014 fail-closed fix: a tool that had NO trusted definition at approval creation (fingerprint null) but becomes trusted before consumption is rejected — the approving human never saw the definition it is now bound under', () => {
       createContext(storage, 'ctx-1', null);
       const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null, scope: 'send_webhook', tool_fingerprint: null });
       const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest', 'fp-now-trusted');
-      expect(result.ok).toBe(true);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/trusted definition has changed/);
+    });
+
+    it('Milestone 8 / ADR-0014 fail-closed fix: the reverse transition — a fingerprint WAS bound at creation but the tool has since become untrusted (removed/never-re-scanned) — is also rejected, symmetric with the drift/quarantine case', () => {
+      createContext(storage, 'ctx-1', null);
+      const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null, scope: 'send_webhook', tool_fingerprint: 'fp-was-trusted' });
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest', null);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/trusted definition has changed/);
     });
 
     it('an exact-matching bound fingerprint and current trusted fingerprint passes', () => {

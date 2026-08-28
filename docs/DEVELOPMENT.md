@@ -220,9 +220,8 @@ database a running (or previously-run) gateway uses — every subcommand except 
 never starts a downstream server, discovers tools, or executes anything.
 
 ```sh
-# Add context_guard: { mode: enforce, tools: {...}, rules: [...] } to your config first — see
-# docs/POLICY_REFERENCE.md#context-guard for the exact schema. agentgate init does not currently generate this
-# block for new projects, unlike tool_integrity.
+# agentgate init already generates context_guard: { mode: enforce } for new projects (ADR-0014); add real
+# tools: {...} / rules: [...] for it to enforce anything — see docs/POLICY_REFERENCE.md#context-guard.
 node packages/gateway/dist/cli.js context status --config agentgate.yml --json
 node packages/gateway/dist/cli.js context history <context-id> --config agentgate.yml
 node packages/gateway/dist/cli.js context explain <context-id> --config agentgate.yml

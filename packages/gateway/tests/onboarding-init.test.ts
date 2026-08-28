@@ -112,4 +112,17 @@ describe('agentgate init (Milestone 5)', () => {
     expect(configText).not.toContain('0.0.0.0');
     expect(configText).not.toMatch(/host:\s*['"]?[^127]/); // no non-loopback host field at all
   });
+
+  it('generates an explicit, high-security tool_integrity AND context_guard mode for new projects (Milestone 8 / ADR-0014) — never silently relies on the backwards-compat monitor default', () => {
+    const result = runInit({ targetDir: tmpDir, force: false });
+    const configPath = result.files.find((f) => f.relativePath.endsWith('agentgate.yml'))!.path;
+    const config = loadGatewayConfig(configPath);
+    expect(config.tool_integrity.mode).toBe('explicit');
+    expect(config.context_guard.mode).toBe('enforce');
+    // An empty rule set is schema-valid and enforces nothing until the operator
+    // declares real tools/rules — "enforce" here must not itself break a brand
+    // new, otherwise-untouched project.
+    expect(config.context_guard.tools).toEqual({});
+    expect(config.context_guard.rules).toEqual([]);
+  });
 });

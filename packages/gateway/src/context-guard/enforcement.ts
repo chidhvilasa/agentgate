@@ -76,13 +76,24 @@ export interface ApprovalContextCheck {
  * `expectedToolFingerprint` must be freshly computed by the caller via
  * `getTrustedFingerprint()` (tool-integrity/enforcement.ts) immediately
  * before this call — never reused from approval-creation time, and never
- * client-supplied. `approval.tool_fingerprint === null` (no fingerprint
- * was bound — e.g. the tool had no trusted definition yet at creation
- * time, or this is a legacy approval) skips this specific check, exactly
- * like `argument_digest === null` above: a binding that was never made
- * cannot be violated. This is a defense-in-depth addition alongside, never
- * a replacement for, Tool Integrity's own independent `checkCallAllowed()`
- * gate, which re-verifies trust on every call regardless of Context Guard.
+ * client-supplied. `approval.tool_fingerprint === null` at BOTH creation and
+ * consumption (the tool had no trusted definition then and still has none
+ * now — Tool Integrity disabled, or the tool has simply never been scanned)
+ * is a genuine no-op no-change and passes, since nothing was ever bound and
+ * nothing has changed. Milestone 8 / ADR-0014 fix: unlike the milestone-7
+ * version of this check, a ONE-SIDED null — the tool had no trusted
+ * definition when a human approved this call (fingerprint null) but now
+ * DOES (or vice-versa: it was trusted then and is no longer trusted now) —
+ * is treated as a real identity change and fails closed, exactly like a
+ * null-to-non-null value change anywhere else in this function. A human
+ * approving an unreviewed tool never saw whatever definition it is
+ * subsequently trusted under, so silently proceeding as if the fingerprint
+ * "was never bound" would let a downstream server get trusted with a
+ * different, potentially attacker-controlled definition during the pending
+ * window and still consume an approval issued before that trust existed.
+ * This is a defense-in-depth addition alongside, never a replacement for,
+ * Tool Integrity's own independent `checkCallAllowed()` gate, which
+ * re-verifies trust on every call regardless of Context Guard.
  */
 export function checkApprovalContextValid(
   approval: Approval,
@@ -111,7 +122,7 @@ export function checkApprovalContextValid(
   if (approval.argument_digest !== null && approval.argument_digest !== expectedArgumentDigest) {
     return { ok: false, reason: 'The call arguments no longer match what this approval was created for.' };
   }
-  if (approval.tool_fingerprint !== null && approval.tool_fingerprint !== expectedToolFingerprint) {
+  if (approval.tool_fingerprint !== expectedToolFingerprint) {
     return { ok: false, reason: "The tool's trusted definition has changed since this approval was created — it must be re-evaluated." };
   }
   if (approval.scope !== expectedToolName) {

@@ -464,7 +464,7 @@ explicit list of what this does and does not prove.
 
 ```yaml
 context_guard:
-  mode: enforce            # "enforce" | "monitor" (default when omitted) | "disabled"
+  mode: enforce            # "enforce" (recommended; agentgate init generates new projects with this mode) | "monitor" (default when omitted) | "disabled"
   tools:
     fetch_ticket:
       adds_on_result: [untrusted_content]      # labels added on a SUCCESSFUL, non-blocked result

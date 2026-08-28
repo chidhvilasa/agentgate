@@ -1041,6 +1041,157 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Supersedes: NONE
 - Superseded by: NONE
 
+### ADR-0014: Public Beta Release, Packaging, and Verifiable Supply Chain
+
+- Status: ACCEPTED
+- Date: 2026-08-28
+- Scope: release / packaging / supply chain
+- Decision:
+  1. **Package topology: publish the existing scoped packages as-is; add no new meta-package.** The three
+     already-existing library/CLI packages — `@agentgate/protocol`, `@agentgate/policy`, `@agentgate/gateway`
+     (the last carrying the `agentgate` CLI `bin`) — become the public-beta publishable surface, unchanged in
+     shape. `@agentgate/control-center` (a Vite app, not a library) and the monorepo root (`"private": true`,
+     no publishable content) stay private/unpublished, exactly as today. No unscoped `agentgate` meta-package is
+     introduced. Evidence: `npm view agentgate` returns a real, unrelated, already-published third-party package
+     (`agentgate@0.16.0`, ISC license, `github.com/monteslu/agentgate`) — this makes an unscoped name a permanent
+     non-option, not a style preference. `npm view @agentgate/gateway|policy|protocol` all return 404 (unpublished,
+     name not yet claimed under the scope). Whether the `@agentgate` npm *scope itself* is currently unclaimed,
+     or already registered to some npm org/user, is **NOT verified** by this decision — the only check available
+     in this environment is an unauthenticated probe (`GET /-/org/agentgate/user` → `{}`), which is inconclusive
+     either way, and `npm whoami` fails (`ENEEDAUTH`) because no npm account is authenticated in this environment.
+     Confirming scope ownership (or registering it) is an explicit owner-side action, not something this session
+     can determine or perform.
+  2. **Versioning: lockstep prerelease versioning for the beta, not independent per-package versioning.** All
+     three packages are currently at `0.1.0` and `@agentgate/gateway` depends on the other two via
+     `workspace:*`, so they have always shipped as one coherent unit with no history of independent divergence —
+     lockstep is the truthful continuation of actual practice, not a new constraint invented for this milestone.
+     The beta channel is `0.1.0-beta.<n>` (semver prerelease), bumped together across all three packages by a
+     single version-bump action, verified by a new deterministic version/tag-consistency check (Phase 4) rather
+     than by convention alone. Independent versioning remains available later if the packages' release cadences
+     genuinely diverge; this ADR does not rule it out permanently, it only states it is not adopted now because
+     there is no evidence yet that it is needed.
+  3. **Distribution model: npm scoped packages via GitHub Actions OIDC trusted publishing, no long-lived
+     `NPM_TOKEN`.** Per npm's and GitHub's current documented trusted-publishing requirements (npm CLI ≥11.5.1,
+     Node ≥22.14.0, workflow permissions `id-token: write` + `contents: read`), provenance attestation is
+     generated automatically by trusted publishing itself — no `--provenance` flag or separate token is needed.
+     `--access public` is required on each package's first publish (npm defaults a new scoped package to private
+     otherwise). This is a strictly stronger security posture than a stored `NPM_TOKEN` secret: nothing
+     long-lived exists to leak, rotate, or be scoped incorrectly; the credential is a short-lived, workflow-run-
+     scoped OIDC token minted only for that one job.
+  4. **Release trigger and approval boundary: workflow is prepared, checked into `main`, and inert.** The release
+     workflow (Phase 6) is added to the repository this milestone but is intentionally built so that landing on
+     `main` alone never runs it — the real trigger (a version tag push, a GitHub Release being published, or
+     equivalent) and the protected-Environment manual-approval gate npmjs.com trusted publishing itself requires
+     are **owner-side configuration steps performed after this milestone**, not something this session creates or
+     activates. This ADR treats "a workflow file exists and is inert" and "publishing is live" as two genuinely
+     different states, and requires every future report to say which one is true rather than implying the second
+     because the first is done.
+  5. **Platform/runtime matrix.** Supported Node range stays ≥20 (matching `.nvmrc` and the existing CI matrix);
+     this milestone adds a macOS CI job (Phase 5) alongside the existing Ubuntu (Node 20/22) and Windows (Node 22)
+     jobs, running a justified high-value subset rather than the full pipeline three times over, so a claim of
+     "cross-platform" is backed by an actual scheduled job per OS rather than a Linux-only run generalized by
+     assumption.
+  6. **Secure-default compatibility boundary for Phase 2 fixes.** Any change to what `agentgate init` generates
+     for a brand-new project (see the Context Guard default in point 7 below) is additive to newly-generated
+     files only. The underlying schema default for an *omitted* `context_guard`/`tool_integrity` section
+     (`monitor`, per ADR-0012/ADR-0013) is deliberately left unchanged, so an already-deployed config from before
+     this milestone continues to parse and behave identically — this is a stricter default for new projects, not
+     a silent behavior change for existing ones. No prior ADR is superseded by this point; it only tightens what
+     `init` chooses to write.
+  7. **Named beta-blocker resolved by this ADR's Phase 2: Context Guard's init-time default.** Unlike
+     `tool_integrity` (already generated by `agentgate init` as `mode: explicit`, verified directly against
+     `packages/gateway/src/onboarding/init.ts` this session — no change needed there), `agentgate init` today
+     generates NO `context_guard` section at all, which means every brand-new beta installation silently starts
+     in the schema's `monitor` (reporting-only, non-blocking) default with no signal to the operator that this is
+     what happened. For a public beta whose README will describe Context Guard as a real defense, shipping new
+     installs in a silently non-blocking mode is classified **must-fix-before-beta**, not an acceptable documented
+     limitation — the fix (implemented in the same commit as this ADR) adds an explicit, commented
+     `context_guard: mode: enforce` block (with empty `labels`/`tools`/`rules`, which is schema-valid and enforces
+     nothing until the operator declares real tools/rules) to `buildConfigTemplate()`, mirroring the
+     already-existing `tool_integrity: mode: explicit` treatment and the same "safe narrow default, widen
+     deliberately" philosophy already used for the generated policy file.
+  8. **Two additional Phase 2 fixes closing named beta-blockers, both adversarially re-tested.**
+     (a) The Context Guard SSE stream (ADR-0013) previously had NO dedicated test proving a fresh subscriber never
+     receives historically-published `context_event` frames — an attempted version was removed as unreliable
+     (proving a negative by exhausting a read timeout). This milestone adds a deterministic replacement in
+     `packages/gateway/tests/context-guard-sse.test.ts`: it publishes events BEFORE a fresh connection's handler
+     is registered (structurally undeliverable, not merely late), then asserts the first frame the connection
+     actually receives is a distinct later sentinel event and that neither pre-connection event's id ever
+     appears — proving the property without waiting out a timeout.
+     (b) `checkApprovalContextValid()` (`context-guard/enforcement.ts`) previously skipped its `tool_fingerprint`
+     comparison whenever the approval's BOUND fingerprint was `null` (no trusted Tool Integrity definition existed
+     at approval-creation time), regardless of what the CURRENT trusted fingerprint is at consumption time. This
+     allowed a stale-reuse gap: an approval created while a tool had no trusted definition could still be consumed
+     after that tool became newly trusted (or re-trusted under a different fingerprint) during the pending window
+     — a definition the approving human never actually saw. The check is tightened to a symmetric equality
+     comparison (`approval.tool_fingerprint !== expectedToolFingerprint`), so ANY transition — null-to-value,
+     value-to-null, or value-to-different-value — fails closed and forces re-evaluation; only a genuine
+     null-to-null (no trusted definition then, none now) still passes, since nothing was ever bound and nothing
+     changed. Both the existing and two new adversarial cases are covered in
+     `packages/gateway/tests/context-guard-enforcement.test.ts`; the full existing fingerprint-binding suites
+     (`context-guard-fingerprint-binding.test.ts`, `context-guard-fingerprint-gateway.test.ts`, real gateway-path)
+     were re-run and continue to pass unchanged, confirming this is a strict tightening with no regression to the
+     already-covered non-null cases.
+  9. **Verifiable-artifact model: checksums, SBOM, and attestation preparation, not a new trust primitive.** SHA-256
+     manifests, a CycloneDX/SPDX SBOM, and GitHub artifact attestations (Phase 7) let a consumer verify that a
+     specific tarball corresponds to a specific commit/build/dependency graph. This ADR is explicit that these
+     mechanisms prove **origin and build linkage**, never the absence of malicious code, and that the existing
+     audit hash chain (ADR-0004/ADR-0012/ADR-0013) remains local tamper **evidence**, never described here or
+     elsewhere as tamper-proof or non-repudiating — this ADR introduces no change to that characterization.
+- Alternatives considered:
+  - An unscoped `agentgate` meta-package re-exporting the scoped packages — rejected outright: the name is
+    already owned by an unrelated real project, so this is not a namespacing preference but a hard collision.
+  - A single monolithic published package instead of three scoped ones — rejected: it would silently change the
+    existing public import surface (`@agentgate/protocol`, `@agentgate/policy` are already used as such in code
+    and docs) for no benefit, and would force the CLI's dependents to pull in policy/protocol internals they may
+    not need.
+  - Independent per-package semver from day one — rejected for now (not permanently) per point 2: no evidence of
+    divergent release cadence exists yet, and lockstep is verifiably simpler to keep tag/version-consistent for a
+    first beta.
+  - A long-lived `NPM_TOKEN` repository secret instead of OIDC trusted publishing — rejected: strictly weaker
+    (a stealable, broad-scoped, long-lived credential) with no offsetting benefit now that trusted publishing is
+    available and documented by npm/GitHub.
+  - Making the release workflow trigger on push to `main` directly — rejected: violates this milestone's explicit
+    constraint that no publish may happen without a later, distinct, owner-approved action, and removes the
+    protected-Environment manual-approval boundary npm trusted publishing is designed to work with.
+  - Silently changing the Context Guard init default to `enforce` with a non-empty starter rule set — rejected:
+    an operator-specific starter rule set would have to guess at real tool names/effects the same way the policy
+    template deliberately does not (it permits exactly one harmless example tool); an empty, valid `enforce` block
+    that enforces nothing until configured is the narrowest safe change, consistent with point 7's own reasoning.
+- Consequences:
+  - Positive: the smallest coherent, evidence-grounded distribution architecture is chosen without inventing a new
+    namespace or trust primitive; the actual current beta-blocker (silent Context Guard monitor-only default on
+    new installs) is named and fixed rather than merely documented; every truthfulness rule from this milestone's
+    prompt (no unverified availability claims, no claims of publication, no claims of cross-platform support
+    without a real per-OS CI job) is satisfied structurally by this ADR's own scope boundaries, not just by intent.
+  - Negative: `@agentgate` scope ownership remains genuinely unverified until the human owner authenticates an
+    npm account and checks/claims it — this ADR cannot resolve that, and says so rather than guessing; lockstep
+    versioning means a change to only one package still requires bumping all three, which is a minor process cost
+    accepted in exchange for a much simpler consistency story for a first beta.
+- Limitations (stated explicitly, not implied):
+  - No package has been published, no version tag has been created, no GitHub Release has been created, no GitHub
+    Environment or branch-protection rule or repository secret has been created or modified, and no npm
+    trusted-publisher configuration has been performed — all of that is explicitly out of scope for this ADR and
+    this milestone, and requires a later, distinct, explicit owner approval.
+  - `@agentgate` scope ownership on npm is unverified (neither confirmed available nor confirmed already claimed)
+    — this is a genuine unresolved fact, not a rhetorical hedge, and must be checked by the owner with an
+    authenticated npm session before any real publish is attempted.
+  - Checksums/SBOM/attestation (point 8) prove build/origin linkage only; they are not, and are never described
+    as, a guarantee that packaged code is free of vulnerabilities or malicious behavior.
+  - The Context Guard init-time fix (point 7) only changes what NEW projects generate; it cannot and does not
+    retroactively change any already-deployed `agentgate.yml` that omits `context_guard` — those continue to run
+    in `monitor` mode exactly as ADR-0013 already documented, until the operator edits their own config.
+- Affected files: `packages/gateway/src/onboarding/init.ts` (Context Guard default), `packages/gateway/src/
+  context-guard/enforcement.ts` (fingerprint fail-closed fix), `packages/gateway/tests/{onboarding-init,
+  context-guard-sse,context-guard-enforcement}.test.ts`, `README.md`, `docs/{POLICY_REFERENCE,DEVELOPMENT}.md`
+  (stale "init does not generate context_guard" text corrected), `packages/{protocol,policy,gateway}/package.json`
+  (publishable metadata, Phase 3), `scripts/verify-packed-install.mjs` and related release scripts (Phase 3/4/7),
+  `.github/workflows/ci.yml` (macOS job, Phase 5), a new release workflow file (Phase 6), `CHANGELOG.md`, and the
+  other public-beta docs listed in the Milestone 8 prompt (Phase 8), associated test files (added in the session
+  log entry below).
+- Supersedes: NONE
+- Superseded by: NONE
+
 ## Superseded Decisions
 
 

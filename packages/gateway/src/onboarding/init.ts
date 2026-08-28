@@ -108,6 +108,22 @@ db_path: ./${DB_FILE_NAME}
 tool_integrity:
   mode: explicit
 
+# Context Guard (cross-tool session-risk escalation defense, ADR-0013).
+# "enforce" is the recommended, high-security mode for a NEW project: any
+# contextual rule you add below can DENY or REQUIRE_APPROVAL a call before it
+# reaches policy execution. With no rules declared yet, this section is
+# schema-valid and enforces nothing — nothing is escalated until you add real
+# tool effect labels and rules for your own downstream tools. This differs
+# from AgentGate's own backwards-compatibility default (omitting this section
+# entirely defaults to "monitor" — reporting only, never blocking, kept only
+# so pre-existing configs are not silently changed on upgrade). See
+# docs/POLICY_REFERENCE.md and ADR-0013 in docs/AI_DECISIONS.md.
+context_guard:
+  mode: enforce
+  labels: []
+  tools: {}
+  rules: []
+
 servers:
   # Replace this placeholder with your real downstream MCP server. Until
   # you do, \`agentgate start\` will fail to spawn it — that is expected;

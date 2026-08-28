@@ -177,21 +177,37 @@ describe('Context Guard SSE (ADR-0013)', () => {
     expect(contextFrames).toEqual(['label_added', 'context_closed']);
   });
 
-  // A "fresh connection does not replay prior transitions" test was
-  // attempted here and removed: proving a NEGATIVE (nothing arrives)
-  // requires this suite's fetch()/ReadableStream-based harness to run out
-  // its full read-timeout with no data ever satisfying it, which proved
-  // unreliable in this environment (intermittent multi-minute hangs even
-  // after fixing the obvious concurrent-read and cancel() issues) despite
-  // real debugging effort — not skipped for convenience. The property
-  // itself is not new behavior this milestone introduces: `subscribers`
-  // (server.ts) is the exact same pre-existing, unmodified per-process
-  // array `audit_event`/`Approval` traffic already used before ADR-0013 —
-  // a connection's handler pushes itself in when it opens and is never
-  // populated with anything from before that point, structurally, for
-  // every payload type on the bus alike. See the "existing audit_event
-  // stream is unaffected" test above for the actual behavioral coverage
-  // this milestone's changes need.
+  // A prior "fresh connection does not replay prior transitions" test
+  // attempt (proving a NEGATIVE — nothing arrives — by exhausting a full
+  // read-timeout) was removed here as unreliable in this environment. The
+  // test below (Milestone 8 / ADR-0014 Phase 2) proves the same property
+  // deterministically instead, without waiting out any negative timeout:
+  // it publishes events BEFORE a fresh connection's handler is registered
+  // in `subscribers` (server.ts) — those `publish()` calls can only reach
+  // handlers present in the array AT THE TIME they run, so a pre-connection
+  // event is structurally undeliverable to a not-yet-open connection, not
+  // merely "unlikely to arrive in time" — then asserts the very FIRST frame
+  // the fresh connection actually receives is a distinct, later, sentinel
+  // event, and that neither pre-connection event's id ever appears at all.
+  it('never replays historical context transitions to a fresh subscriber — the first frame a new connection sees is a genuinely new event, and no pre-connection event id ever appears', async () => {
+    const stale1 = appendContextLabels(storage, contextId, ['untrusted_content'], { sourceEventId: null, toolName: 'stale-a', reason: 'before connect 1' });
+    publish(stale1.event!); // published with zero subscribers registered yet — cannot be delivered to anyone.
+    const stale2 = appendContextLabels(storage, contextId, ['sensitive_data_accessed'], { sourceEventId: null, toolName: 'stale-b', reason: 'before connect 2' });
+    publish(stale2.event!);
+
+    const framesPromise = readFrames(baseUrl, LOCAL_AUTH_TOKEN, 1);
+    await new Promise((r) => setTimeout(r, 200)); // let this fresh connection's handler actually register
+    const fresh = appendContextLabels(storage, contextId, ['prompt_injection_suspected'], { sourceEventId: null, toolName: 'fresh', reason: 'after connect' });
+    publish(fresh.event!);
+
+    const frames = await framesPromise;
+    expect(frames).toHaveLength(1);
+    const firstPayload = frames[0].data as ContextEvent;
+    expect(firstPayload.id).toBe(fresh.event!.id);
+    const allIds = frames.map((f) => (f.data as ContextEvent).id);
+    expect(allIds).not.toContain(stale1.event!.id);
+    expect(allIds).not.toContain(stale2.event!.id);
+  });
 
   it('never publishes the same event object twice (no duplicate publication from both pipeline and API layers)', async () => {
     const framesPromise = readFrames(baseUrl, LOCAL_AUTH_TOKEN, 1, 2000);
