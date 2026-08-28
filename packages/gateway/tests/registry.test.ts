@@ -77,7 +77,18 @@ describe('loadGatewayConfig — relative path resolution (Milestone 5 regression
     process.chdir(tmpDir);
     try {
       const config = loadGatewayConfig('agentgate.yml');
-      expect(config.policy).toBe(path.join(tmpDir, 'agentgate.policy.yml'));
+      // Compared against fs.realpathSync(tmpDir), not the raw tmpDir string:
+      // on macOS, os.tmpdir() returns a path under /var/folders/... that is
+      // itself a symlink to /private/var/folders/...; process.chdir()+
+      // process.cwd() (which loadGatewayConfig's path.resolve('agentgate.yml')
+      // depends on) reports the OS-canonicalized (symlink-resolved) form.
+      // AgentGate's own relative-path resolution is correctly resolving
+      // against the real current working directory here — it is this test's
+      // un-resolved tmpDir reference that needs the same canonicalization to
+      // compare correctly, not a change to loadGatewayConfig() itself. A
+      // no-op on Linux/Windows, where tmpDir already has no such symlink.
+      const realTmpDir = fs.realpathSync(tmpDir);
+      expect(config.policy).toBe(path.join(realTmpDir, 'agentgate.policy.yml'));
     } finally {
       process.chdir(originalCwd);
     }

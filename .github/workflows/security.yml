@@ -64,7 +64,7 @@ jobs:
         run: |
           set -e
           PATTERN='AKIA[0-9A-Z]{16}|sk-ant-api[0-9A-Za-z_-]{20,}|sk-[a-zA-Z0-9]{32,}|gh[pousr]_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{60,}|-----BEGIN (RSA|EC|OPENSSH|PRIVATE|DSA) KEY-----'
-          ALLOWED='AKIAIOSFODNN7EXAMPLE|AKIA1234567890ABCDEF|sk-abc123xyz456abc123xyz456abc123xyz456abc|ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890|sk-test1234567890abcdefghijklmnopqrstuvwxyz'
+          ALLOWED='AKIAIOSFODNN7EXAMPLE|AKIA1234567890ABCDEF|AKIAABCDEFGHIJKLMNOP|sk-abc123xyz456abc123xyz456abc123xyz456abc|ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890|sk-test1234567890abcdefghijklmnopqrstuvwxyz'
 
           MATCHES="$(git grep -nEI "$PATTERN" -- . ':(exclude)pnpm-lock.yaml' || true)"
           REAL="$(printf '%s\n' "$MATCHES" | grep -vE "$ALLOWED" | grep -v '^$' || true)"
