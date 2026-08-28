@@ -14,7 +14,7 @@
 // no different from the frozen-lockfile `pnpm install` step CI already
 // performs, and does not weaken the separate, fully-offline requirement
 // on `agentgate smoke-test` itself (verified independently).
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -28,15 +28,17 @@ const PACKAGES = ['protocol', 'policy', 'gateway'];
 // pnpm/npm are .cmd shims on Windows — execFileSync needs shell:true there
 // to resolve them; POSIX doesn't need or want it.
 const SHELL = process.platform === 'win32';
-// --force-local only exists in GNU tar (Linux, and Windows' bundled bsdtar-
-// via-Git or GNU tar depending on setup) and is needed ONLY on Windows, to
-// stop tar from misreading a "C:\..." absolute path's drive-letter colon as
-// a "host:path" remote-tar spec. macOS ships BSD tar (libarchive), which
-// does not recognize this flag at all and exits with a usage error if it is
-// passed — so it must never be passed there. Linux's GNU tar accepts it but
-// never needs it (no colon-containing local paths); omitting it there too
-// keeps the flag set minimal and exactly matched to why it exists.
-const TAR_LOCAL_FLAGS = process.platform === 'win32' ? ['--force-local'] : [];
+// Some Windows tar builds need --force-local to avoid treating a drive-letter
+// colon as a remote host separator; newer Windows bsdtar builds reject that
+// option entirely. Detect support instead of assuming it from the OS name.
+// POSIX paths do not need the flag even when GNU tar supports it.
+const tarHelp = process.platform === 'win32'
+  ? spawnSync('tar', ['--help'], { encoding: 'utf-8' })
+  : undefined;
+const TAR_LOCAL_FLAGS = process.platform === 'win32'
+  && `${tarHelp?.stdout ?? ''}${tarHelp?.stderr ?? ''}`.includes('--force-local')
+  ? ['--force-local']
+  : [];
 
 // Any packed entry path containing one of these is an automatic failure —
 // none of these should ever be reachable from a package's `files`
@@ -93,7 +95,7 @@ async function main() {
       const tarballLine = out.trim().split('\n').pop();
       const tarballPath = tarballLine.startsWith(packDir) ? tarballLine : path.join(packDir, tarballLine);
       tarballs.push({ pkg, tarballPath });
-      results.push(check(`pnpm pack produced a tarball for @agentgate/${pkg}`, fs.existsSync(tarballPath)));
+      results.push(check(`pnpm pack produced a tarball for @chidhvilasa/${pkg}`, fs.existsSync(tarballPath)));
     }
 
     console.log('\nStep 2 — SHA-256 / size manifest for every packed tarball...');
@@ -101,7 +103,7 @@ async function main() {
     for (const { pkg, tarballPath } of tarballs) {
       const stat = fs.statSync(tarballPath);
       const hash = sha256File(tarballPath);
-      const entry = { package: `@agentgate/${pkg}`, filename: path.basename(tarballPath), size_bytes: stat.size, sha256: hash };
+      const entry = { package: `@chidhvilasa/${pkg}`, filename: path.basename(tarballPath), size_bytes: stat.size, sha256: hash };
       manifest.push(entry);
       console.log(`  ${entry.package.padEnd(24)} ${entry.filename.padEnd(34)} ${String(entry.size_bytes).padStart(9)} bytes  sha256:${entry.sha256}`);
     }
@@ -111,15 +113,15 @@ async function main() {
     for (const { pkg, tarballPath } of tarballs) {
       const listing = execFileSync('tar', [...TAR_LOCAL_FLAGS, '-tzf', tarballPath], { encoding: 'utf-8' });
       listings[pkg] = listing;
-      const entries = listing.trim().split('\n').filter(Boolean);
+      const entries = listing.trim().split(/\r?\n/).filter(Boolean);
       const forbidden = entries.filter((e) => FORBIDDEN_PATH_SUBSTRINGS.some((bad) => e.includes(bad)));
-      results.push(check(`@agentgate/${pkg} tarball (${entries.length} entries) contains no forbidden path (src/, tests/, .env, .git/, node_modules/, *.sqlite*, *.map, .npmrc, .claude/, CLAUDE.md)`, forbidden.length === 0));
+      results.push(check(`@chidhvilasa/${pkg} tarball (${entries.length} entries) contains no forbidden path (src/, tests/, .env, .git/, node_modules/, *.sqlite*, *.map, .npmrc, .claude/, CLAUDE.md)`, forbidden.length === 0));
       if (forbidden.length > 0) {
         console.error(`    forbidden entries found:\n      ${forbidden.join('\n      ')}`);
       }
-      results.push(check(`@agentgate/${pkg} tarball includes package.json`, entries.includes('package/package.json')));
-      results.push(check(`@agentgate/${pkg} tarball includes LICENSE`, entries.includes('package/LICENSE')));
-      results.push(check(`@agentgate/${pkg} tarball includes README.md`, entries.includes('package/README.md')));
+      results.push(check(`@chidhvilasa/${pkg} tarball includes package.json`, entries.includes('package/package.json')));
+      results.push(check(`@chidhvilasa/${pkg} tarball includes LICENSE`, entries.includes('package/LICENSE')));
+      results.push(check(`@chidhvilasa/${pkg} tarball includes README.md`, entries.includes('package/README.md')));
     }
     results.push(check('gateway tarball includes dist/cli.js', listings.gateway.includes('package/dist/cli.js')));
     results.push(check('gateway tarball includes the smoke-test fixture', listings.gateway.includes('package/dist/onboarding/smokeFixtureServer.mjs')));
@@ -130,16 +132,16 @@ async function main() {
       const packedManifest = JSON.parse(packedManifestText);
       const allDeps = { ...(packedManifest.dependencies ?? {}), ...(packedManifest.devDependencies ?? {}), ...(packedManifest.peerDependencies ?? {}) };
       const badSpecifiers = Object.entries(allDeps).filter(([, range]) => /^(workspace:|file:|link:|portal:)/.test(String(range)));
-      results.push(check(`@agentgate/${pkg} packed package.json has no workspace:/file:/link:/portal: dependency specifier`, badSpecifiers.length === 0));
+      results.push(check(`@chidhvilasa/${pkg} packed package.json has no workspace:/file:/link:/portal: dependency specifier`, badSpecifiers.length === 0));
       if (badSpecifiers.length > 0) {
         console.error(`    unresolved specifiers: ${badSpecifiers.map(([n, r]) => `${n}@${r}`).join(', ')}`);
       }
-      results.push(check(`@agentgate/${pkg} packed package.json is not private`, packedManifest.private !== true));
+      results.push(check(`@chidhvilasa/${pkg} packed package.json is not private`, packedManifest.private !== true));
       if (pkg !== 'protocol') {
-        // policy/gateway depend on @agentgate/protocol — must resolve to a real, installable semver range.
-        const protocolRange = allDeps['@agentgate/protocol'];
+        // policy/gateway depend on @chidhvilasa/protocol — must resolve to a real, installable semver range.
+        const protocolRange = allDeps['@chidhvilasa/protocol'];
         if (protocolRange !== undefined) {
-          results.push(check(`@agentgate/${pkg} declares @agentgate/protocol as a real semver range (got "${protocolRange}")`, /^\d/.test(protocolRange) || /^\^|~/.test(protocolRange)));
+          results.push(check(`@chidhvilasa/${pkg} declares @chidhvilasa/protocol as a real semver range (got "${protocolRange}")`, /^\d/.test(protocolRange) || /^\^|~/.test(protocolRange)));
         }
       }
     }

@@ -17,7 +17,7 @@
 // whether the server's runtime behavior matches its advertised
 // definition. See ADR-0012 "Limitations" for the full statement.
 import crypto from 'node:crypto';
-import { sanitizeJsonValue } from '@agentgate/policy';
+import { sanitizeJsonValue } from '@chidhvilasa/policy';
 
 export const TOOL_DEFINITION_FINGERPRINT_VERSION = 'tool-definition-v1';
 

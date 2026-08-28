@@ -16,7 +16,7 @@ describe('scanReleaseArtifacts (ADR-0014)', () => {
 
   it('passes on a directory with only clean generated artifacts', () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentgate-scan-test-'));
-    fs.writeFileSync(path.join(tmpDir, 'release-manifest.json'), JSON.stringify({ commit: 'abc123', packages: [{ name: '@agentgate/gateway', version: '0.1.0-beta.1' }] }));
+    fs.writeFileSync(path.join(tmpDir, 'release-manifest.json'), JSON.stringify({ commit: 'abc123', packages: [{ name: '@chidhvilasa/gateway', version: '0.1.0-beta.1' }] }));
     fs.writeFileSync(path.join(tmpDir, 'checksums.sha256'), 'deadbeef  some-file.tgz\n');
     const { ok, findings } = scanReleaseArtifacts(tmpDir);
     expect(ok).toBe(true);

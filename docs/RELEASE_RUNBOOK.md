@@ -16,7 +16,7 @@ configuration UI lives on a package's own settings page on npmjs.com, which does
 exists. This means:
 
 - The automated `.github/workflows/release.yml` workflow **cannot perform the first publish** of
-  `@agentgate/protocol`, `@agentgate/policy`, or `@agentgate/gateway` — all three are brand-new, never-published
+  `@chidhvilasa/protocol`, `@chidhvilasa/policy`, or `@chidhvilasa/gateway` — all three are brand-new, never-published
   packages. Attempting it will fail with an authentication error (no trusted publisher recognizes the workflow
   yet, and this repository deliberately carries no long-lived `NPM_TOKEN` secret).
 - **The owner must publish the first version of each package manually**, from an authenticated local terminal,
@@ -50,7 +50,8 @@ you are about to publish — record these hashes; they are your independent evid
 
 ## 2. First publish of each package (manual, one-time per package)
 
-Do this from your own machine, logged in as the npm identity that will own `@agentgate`, with 2FA enabled on that
+Do this from your own machine, logged in as the npm identity `chidhvilasa`, which already owns the
+`@chidhvilasa` user scope, with 2FA enabled on that
 account (npm strongly recommends, and increasingly requires, 2FA for publish operations).
 
 ```sh
@@ -58,21 +59,21 @@ npm login                       # interactive; confirms/creates your session, pr
 npm whoami                      # confirm the identity that will own the packages
 
 cd release-artifacts             # the exact tarballs generated and hashed in Section 1
-npm publish agentgate-protocol-<version>.tgz --access public
-npm publish agentgate-policy-<version>.tgz   --access public
-npm publish agentgate-gateway-<version>.tgz  --access public
+npm publish chidhvilasa-protocol-<version>.tgz --access public
+npm publish chidhvilasa-policy-<version>.tgz   --access public
+npm publish chidhvilasa-gateway-<version>.tgz  --access public
 ```
 
 Publish in this exact order — `policy` and `gateway` depend on `protocol`. After each publish, verify:
 
 ```sh
-npm view @agentgate/protocol version   # should print the version you just published
+npm view @chidhvilasa/protocol version   # should print the version you just published
 ```
 
-**This is the only point in the entire process where a package's public identity is created.** If the `@agentgate`
-scope itself is not yet claimed by your account, `npm publish --access public` will fail with a clear ownership
-error — resolve that first (see the Milestone 9 preflight report's "npm account/scope" section) rather than
-retrying blindly.
+**This is the only point in the entire process where a package's public identity is created.** ADR-0016 records
+why the unavailable `@agentgate` organization scope was replaced before publication by the already-owned,
+zero-cost `@chidhvilasa` user scope. Verify `npm whoami` prints `chidhvilasa`; an identity mismatch must stop the
+release rather than trigger a blind retry.
 
 ## 3. Configure npm trusted publishing (per package, after Section 2)
 
@@ -122,25 +123,25 @@ Once Sections 2-4 are done for a package, its future releases can go through `.g
 
 ## 6. Verifying a real release after publishing
 
-- **Package + provenance**: `npm view @agentgate/gateway` (or `protocol`/`policy`) shows the new version;
-  `npm view @agentgate/gateway --json | grep -i provenance` or the npmjs.com package page's "Provenance" badge
+- **Package + provenance**: `npm view @chidhvilasa/gateway` (or `protocol`/`policy`) shows the new version;
+  `npm view @chidhvilasa/gateway --json | grep -i provenance` or the npmjs.com package page's "Provenance" badge
   confirms trusted-publishing provenance was attached automatically.
 - **Installed CLI from the real registry**, in a throwaway directory with no relation to this repo:
   ```sh
   mkdir /tmp/agentgate-release-check && cd /tmp/agentgate-release-check
-  npm init -y && npm install @agentgate/gateway
+  npm init -y && npm install @chidhvilasa/gateway
   ./node_modules/.bin/agentgate --version
   ./node_modules/.bin/agentgate smoke-test
   ```
 - **GitHub artifact attestations**:
   ```sh
-  gh attestation verify release-artifacts/agentgate-gateway-<version>.tgz -R chidhvilasa/agentgate
+  gh attestation verify release-artifacts/chidhvilasa-gateway-<version>.tgz -R chidhvilasa/agentgate
   ```
   This proves the tarball was built by this exact workflow run at this exact commit — **build/origin linkage,
   not a guarantee the code is free of vulnerabilities or malicious behavior**, and a genuinely different trust
   path from npm's own trusted-publishing provenance (which attests the published package via npm's own registry
   metadata) — check both, neither substitutes for the other.
-- **Checksums**: compare `sha256sum` of a freshly-downloaded tarball (`npm pack @agentgate/gateway@<version>`)
+- **Checksums**: compare `sha256sum` of a freshly-downloaded tarball (`npm pack @chidhvilasa/gateway@<version>`)
   against `release-artifacts/checksums.sha256` from Section 1.
 
 ## 7. If only one or two packages publish (partial release)
@@ -153,7 +154,7 @@ for a workflow-driven release, simply re-run `gh workflow run release.yml --ref 
 diagnosing and fixing whatever caused the failure (e.g. a transient registry error).
 
 For the **manual first publish** (Section 2), if `protocol` succeeds but `policy` fails: fix the underlying
-problem, then just re-run `npm publish agentgate-policy-<version>.tgz --access public` — `protocol` does not need
+problem, then just re-run `npm publish chidhvilasa-policy-<version>.tgz --access public` — `protocol` does not need
 to be touched again.
 
 **Never** attempt to work around a partial failure by publishing a different package's tarball under a name it
@@ -169,7 +170,7 @@ say so plainly wherever the release is announced.
   interrupted; the already-published package(s) are correct and complete at that version.
 - **A version that fully published but is later found to be broken**: publish a new corrective version
   (increment the beta counter, e.g. `0.1.0-beta.2`) — never attempt to overwrite or unpublish the broken version.
-  Use `npm deprecate "@agentgate/<pkg>@<broken-version>" "<clear reason and the fixed version to use instead>"`
+  Use `npm deprecate "@chidhvilasa/<pkg>@<broken-version>" "<clear reason and the fixed version to use instead>"`
   to mark it, which is reversible and non-destructive, unlike unpublishing.
 - **A version that must never be installed at all** (e.g. it leaked a secret): deprecate it immediately with an
   explicit, non-vague reason, and treat `npm unpublish` (only possible within a short window and with

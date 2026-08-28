@@ -1,5 +1,5 @@
 {
-  "name": "@agentgate/policy",
+  "name": "@chidhvilasa/policy",
   "version": "0.1.0-beta.1",
   "description": "AgentGate policy schema, first-match evaluation engine, path normalization, and secret detection/redaction.",
   "license": "Apache-2.0",
@@ -39,7 +39,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@agentgate/protocol": "workspace:*",
+    "@chidhvilasa/protocol": "workspace:*",
     "js-yaml": "^4.1.0",
     "micromatch": "^4.0.7",
     "zod": "^3.23.8"

@@ -5,7 +5,7 @@ import { AuditStorage } from '../src/storage.js';
 import { ApprovalManager } from '../src/approval.js';
 import { createContext } from '../src/context-guard/state.js';
 import crypto from 'node:crypto';
-import type { AgentIdentity } from '@agentgate/protocol';
+import type { AgentIdentity } from '@chidhvilasa/protocol';
 
 describe('Gateway Pipeline', () => {
   // Deliberately omits `context_guard` (and is cast through `any` rather

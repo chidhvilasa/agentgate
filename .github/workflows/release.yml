@@ -28,7 +28,7 @@ name: Release
 # published — the trusted-publisher UI lives on the package's OWN settings
 # page on npmjs.com, which does not exist until the package exists. This
 # means **this workflow's `publish` job cannot perform the FIRST publish of
-# @agentgate/protocol, @agentgate/policy, or @agentgate/gateway** — it will
+# @chidhvilasa/protocol, @chidhvilasa/policy, or @chidhvilasa/gateway** — it will
 # fail with an auth error, because no trusted publisher can be configured
 # yet and no long-lived NPM_TOKEN secret exists in this repository (by
 # design; see ADR-0014). The owner must publish the first version of EACH
@@ -194,8 +194,8 @@ jobs:
       - name: npm publish --dry-run for every publishable package, from the exact verified tarballs (never contacts the real registry mutably)
         run: |
           for pkg in protocol policy gateway; do
-            TARBALL=$(ls release-artifacts/agentgate-${pkg}-*.tgz)
-            echo "── @agentgate/$pkg (${TARBALL}) ──"
+            TARBALL=$(ls release-artifacts/chidhvilasa-${pkg}-*.tgz)
+            echo "── @chidhvilasa/$pkg (${TARBALL}) ──"
             npm publish --dry-run --access public "$TARBALL"
           done
 
@@ -247,8 +247,8 @@ jobs:
         run: |
           VERSION="${{ needs.verify.outputs.version }}"
           for pkg in protocol policy gateway; do
-            NAME="@agentgate/$pkg"
-            TARBALL=$(ls release-artifacts/agentgate-${pkg}-*.tgz)
+            NAME="@chidhvilasa/$pkg"
+            TARBALL=$(ls release-artifacts/chidhvilasa-${pkg}-*.tgz)
             if npm view "${NAME}@${VERSION}" version >/dev/null 2>&1; then
               echo "── ${NAME}@${VERSION} is already published — skipping (safe rerun) ──"
               continue

@@ -20,7 +20,7 @@ import { ApprovalManager } from '../src/approval.js';
 import { createContext } from '../src/context-guard/state.js';
 import { computeServerIdentity } from '../src/tool-integrity/identity.js';
 import { defaultContextGuardConfig, type GatewayConfig } from '../src/config/registry.js';
-import type { AgentIdentity } from '@agentgate/protocol';
+import type { AgentIdentity } from '@chidhvilasa/protocol';
 import type { ToolIntegrityState } from '../src/tool-integrity/types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

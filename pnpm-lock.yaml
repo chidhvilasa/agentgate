@@ -54,7 +54,7 @@ importers:
 
   apps/control-center:
     dependencies:
-      '@agentgate/protocol':
+      '@chidhvilasa/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
       react:
@@ -100,10 +100,10 @@ importers:
 
   packages/gateway:
     dependencies:
-      '@agentgate/policy':
+      '@chidhvilasa/policy':
         specifier: workspace:*
         version: link:../policy
-      '@agentgate/protocol':
+      '@chidhvilasa/protocol':
         specifier: workspace:*
         version: link:../protocol
       '@fastify/cors':
@@ -152,7 +152,7 @@ importers:
 
   packages/policy:
     dependencies:
-      '@agentgate/protocol':
+      '@chidhvilasa/protocol':
         specifier: workspace:*
         version: link:../protocol
       js-yaml:

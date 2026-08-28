@@ -7,7 +7,7 @@
 import crypto from 'node:crypto';
 import type { AuditStorage } from '../storage.js';
 import type { ContextGuardConfig, ContextGuardMode } from '../config/registry.js';
-import type { Approval } from '@agentgate/protocol';
+import type { Approval } from '@chidhvilasa/protocol';
 import { evaluateContextualRules } from './rules.js';
 import type { ContextGuardEvaluation } from './types.js';
 

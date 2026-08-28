@@ -8,7 +8,7 @@
 // do, by construction (see the structural no-execution test).
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { sanitizeErrorMessage } from '@agentgate/policy';
+import { sanitizeErrorMessage } from '@chidhvilasa/policy';
 import { canonicalizeManifest, type ManifestCanonicalizeResult } from './canonicalize.js';
 import type { DownstreamServer } from '../config/registry.js';
 

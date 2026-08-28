@@ -76,7 +76,7 @@ function checkAgentgateVersion(checks: DoctorCheck[]): void {
   try {
     const pkgPath = path.join(gatewayPackageDir(), 'package.json');
     const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as { version?: string };
-    push(checks, { id: 'agentgate_version', status: 'PASS', message: `@agentgate/gateway ${pkg.version ?? 'unknown'}.` });
+    push(checks, { id: 'agentgate_version', status: 'PASS', message: `@chidhvilasa/gateway ${pkg.version ?? 'unknown'}.` });
   } catch (err) {
     push(checks, {
       id: 'agentgate_version',

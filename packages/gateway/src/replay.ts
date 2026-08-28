@@ -5,13 +5,13 @@
  * STRUCTURAL GUARANTEE: this module imports nothing capable of reaching a
  * downstream server. It never imports executeDownstream(), runPipeline(),
  * the MCP SDK's Client/StdioClientTransport, or ApprovalManager. It depends
- * on exactly the pure evaluate() function from @agentgate/policy (the same
+ * on exactly the pure evaluate() function from @chidhvilasa/policy (the same
  * function the live pipeline calls — one rule matcher, not a second copy)
  * plus the pipeline's own pure argument-extraction helpers. There is no flag,
  * option, or code path here that reaches a downstream connection.
  */
-import { evaluate, normalizePath, computePolicyDigest, type EvaluationInput, type Policy } from '@agentgate/policy';
-import type { AuditEvent } from '@agentgate/protocol';
+import { evaluate, normalizePath, computePolicyDigest, type EvaluationInput, type Policy } from '@chidhvilasa/policy';
+import type { AuditEvent } from '@chidhvilasa/protocol';
 import { extractPrimaryPath, extractCommand, extractHost } from './pipeline.js';
 
 /** Thrown when a source event cannot be safely replayed — never guessed at. */

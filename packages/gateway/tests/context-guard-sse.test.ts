@@ -16,7 +16,7 @@ import { buildControlApi, LOCAL_AUTH_TOKEN } from '../src/api/control.js';
 import { AuditStorage } from '../src/storage.js';
 import { ApprovalManager } from '../src/approval.js';
 import { createContext, appendContextLabels, closeOrExpireContext } from '../src/context-guard/state.js';
-import type { AuditEvent, Approval } from '@agentgate/protocol';
+import type { AuditEvent, Approval } from '@chidhvilasa/protocol';
 import type { ContextEvent } from '../src/context-guard/types.js';
 
 type Frame = { event: string; data: unknown };

@@ -12,7 +12,7 @@ import { scanDownstreamServer } from '../tool-integrity/scan.js';
 import { applyScanToRegistry } from '../tool-integrity/registry.js';
 import { filterTrustedTools, checkCallAllowed } from '../tool-integrity/enforcement.js';
 import { closeOrExpireContext } from '../context-guard/state.js';
-import { sanitizeErrorMessage } from '@agentgate/policy';
+import { sanitizeErrorMessage } from '@chidhvilasa/policy';
 
 /**
  * Starts the AgentGate stdio proxy.

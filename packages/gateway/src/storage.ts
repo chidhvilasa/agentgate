@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
-import type { AuditEvent, Approval, ApprovalStatus, ReplayEvaluation } from '@agentgate/protocol';
+import type { AuditEvent, Approval, ApprovalStatus, ReplayEvaluation } from '@chidhvilasa/protocol';
 import type { ToolIntegrityEvent, ToolIntegrityState } from './tool-integrity/types.js';
 import type { ContextEvent, ContextState } from './context-guard/types.js';
 

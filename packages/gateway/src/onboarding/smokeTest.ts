@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { AuditStorage } from '../storage.js';
 import { ApprovalManager } from '../approval.js';
 import { runPipeline, type PipelineContext } from '../pipeline.js';
-import type { AgentIdentity } from '@agentgate/protocol';
+import type { AgentIdentity } from '@chidhvilasa/protocol';
 import type { GatewayConfig } from '../config/registry.js';
 
 export interface SmokeTestStep {

@@ -4,7 +4,7 @@
 // access. Given the ACTIVE context's current labels and the ATTEMPTED
 // call's declared effect labels, evaluates `context_guard.rules` in
 // order and returns the first match, exactly mirroring the base policy
-// engine's deterministic first-match semantics (see @agentgate/policy).
+// engine's deterministic first-match semantics (see @chidhvilasa/policy).
 //
 // Contextual rules only ever ESCALATE. There is no "allow" action in the
 // rule schema — the caller (pipeline.ts) always takes the STRICTER of the

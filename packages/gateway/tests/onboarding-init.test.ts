@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { runInit, buildConfigTemplate, buildPolicyTemplate } from '../src/onboarding/init.js';
 import { loadGatewayConfig } from '../src/config/registry.js';
-import { loadPolicyFile } from '@agentgate/policy';
+import { loadPolicyFile } from '@chidhvilasa/policy';
 
 describe('agentgate init (Milestone 5)', () => {
   let tmpDir: string;

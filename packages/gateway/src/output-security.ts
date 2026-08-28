@@ -5,11 +5,11 @@
  * inspected before AgentGate returns it to the upstream MCP client. It knows
  * about MCP CallToolResult content variants (text/image/audio/resource/
  * resource_link/structuredContent); the actual secret-pattern scanning and
- * generic JSON traversal is delegated to @agentgate/policy's
+ * generic JSON traversal is delegated to @chidhvilasa/policy's
  * sanitizeJsonValue()/detectSecrets()/redactSecrets() — there is one
  * authoritative secret-pattern implementation, not a second copy here.
  */
-import { sanitizeJsonValue, type SanitizationFinding } from '@agentgate/policy';
+import { sanitizeJsonValue, type SanitizationFinding } from '@chidhvilasa/policy';
 import type { OutputSecurityConfig } from './config/registry.js';
 
 export interface ResultSanitizationOutcome {

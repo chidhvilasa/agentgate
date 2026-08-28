@@ -6,7 +6,7 @@ import { api } from '../api.js';
 
 // Real network calls are never made in tests — the api module is mocked so
 // these tests exercise only the component's rendering of AuditEvent-shaped
-// data, matching real @agentgate/protocol fields (ADR-0009).
+// data, matching real @chidhvilasa/protocol fields (ADR-0009).
 vi.mock('../api.js', () => ({ api: { event: vi.fn(), replay: vi.fn() } }));
 
 // Synthetic-only — this string must never appear in rendered output; it

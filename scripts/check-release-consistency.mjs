@@ -1,11 +1,11 @@
 // Version / tag consistency check (Milestone 8 / ADR-0014, Phase 4).
 //
 // Verifies AgentGate's lockstep versioning invariant, decided in ADR-0014:
-// the three publishable packages (@agentgate/protocol, @agentgate/policy,
-// @agentgate/gateway) must always carry the EXACT SAME version string, and
-// @agentgate/control-center plus the monorepo root must stay `private: true`
+// the three publishable packages (@chidhvilasa/protocol, @chidhvilasa/policy,
+// @chidhvilasa/gateway) must always carry the EXACT SAME version string, and
+// @chidhvilasa/control-center plus the monorepo root must stay `private: true`
 // (never published). Also verifies each publishable package's declared
-// `@agentgate/protocol` dependency range is satisfied by the actual current
+// `@chidhvilasa/protocol` dependency range is satisfied by the actual current
 // protocol version — a lockstep promise that is otherwise easy to silently
 // violate by hand-editing one package.json and forgetting the others.
 //
@@ -30,7 +30,7 @@ const ROOT = path.resolve(__dirname, '..');
 export const PUBLISHABLE_PACKAGES = ['protocol', 'policy', 'gateway'];
 export const PRIVATE_PACKAGES = [
   { dir: '.', label: 'monorepo root' },
-  { dir: 'apps/control-center', label: '@agentgate/control-center' },
+  { dir: 'apps/control-center', label: '@chidhvilasa/control-center' },
 ];
 
 function readPkg(relDir) {
@@ -51,11 +51,11 @@ export function checkReleaseConsistency({ expectedTag } = {}) {
   const publishable = PUBLISHABLE_PACKAGES.map((name) => ({ name, ...readPkg(`packages/${name}`) }));
 
   for (const { name, pkg } of publishable) {
-    add(pkg.private !== true, `@agentgate/${name}: not marked private (publishable)`);
-    add(typeof pkg.version === 'string' && semver.valid(pkg.version) !== null, `@agentgate/${name}: version "${pkg.version}" is valid semver`);
-    add(pkg.publishConfig?.access === 'public', `@agentgate/${name}: publishConfig.access is "public"`);
-    add(typeof pkg.repository?.url === 'string' && pkg.repository.url.includes('github.com/chidhvilasa/agentgate'), `@agentgate/${name}: repository.url points at the real repo`);
-    add(Array.isArray(pkg.files) && pkg.files.length > 0, `@agentgate/${name}: has a restrictive "files" allowlist`);
+    add(pkg.private !== true, `@chidhvilasa/${name}: not marked private (publishable)`);
+    add(typeof pkg.version === 'string' && semver.valid(pkg.version) !== null, `@chidhvilasa/${name}: version "${pkg.version}" is valid semver`);
+    add(pkg.publishConfig?.access === 'public', `@chidhvilasa/${name}: publishConfig.access is "public"`);
+    add(typeof pkg.repository?.url === 'string' && pkg.repository.url.includes('github.com/chidhvilasa/agentgate'), `@chidhvilasa/${name}: repository.url points at the real repo`);
+    add(Array.isArray(pkg.files) && pkg.files.length > 0, `@chidhvilasa/${name}: has a restrictive "files" allowlist`);
   }
 
   const versions = new Set(publishable.map((p) => p.pkg.version));
@@ -65,7 +65,7 @@ export function checkReleaseConsistency({ expectedTag } = {}) {
   const protocolVersion = publishable.find((p) => p.name === 'protocol')?.pkg.version;
   for (const { name, pkg } of publishable) {
     if (name === 'protocol') continue;
-    const declaredRange = pkg.dependencies?.['@agentgate/protocol'];
+    const declaredRange = pkg.dependencies?.['@chidhvilasa/protocol'];
     if (declaredRange === undefined) continue;
     if (declaredRange.startsWith('workspace:')) {
       // Expected in the source tree (rewritten by `pnpm pack`); not a lockstep violation here.
@@ -73,7 +73,7 @@ export function checkReleaseConsistency({ expectedTag } = {}) {
     }
     add(
       protocolVersion !== undefined && semver.satisfies(protocolVersion, declaredRange),
-      `@agentgate/${name}: declared @agentgate/protocol range "${declaredRange}" is satisfied by protocol's actual version "${protocolVersion}"`
+      `@chidhvilasa/${name}: declared @chidhvilasa/protocol range "${declaredRange}" is satisfied by protocol's actual version "${protocolVersion}"`
     );
   }
 

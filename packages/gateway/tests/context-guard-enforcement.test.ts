@@ -12,7 +12,7 @@ import { AuditStorage } from '../src/storage.js';
 import { createContext, appendContextLabels, closeOrExpireContext } from '../src/context-guard/state.js';
 import { evaluateContextGuard, modeEnforces, computeArgumentDigest, checkApprovalContextValid } from '../src/context-guard/enforcement.js';
 import { defaultContextGuardConfig, loadGatewayConfig, type ContextGuardConfig } from '../src/config/registry.js';
-import type { Approval } from '@agentgate/protocol';
+import type { Approval } from '@chidhvilasa/protocol';
 
 function baseApproval(overrides: Partial<Approval> = {}): Approval {
   return {

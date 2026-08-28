@@ -8,16 +8,23 @@
 // to a consumer or get attested, not the source tree.
 //
 // Usage: node scripts/scan-release-artifacts.mjs <dir>
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const CREDENTIAL_PATTERN = /AKIA[0-9A-Z]{16}|sk-ant-api[0-9A-Za-z_-]{20,}|sk-[a-zA-Z0-9]{32,}|gh[pousr]_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{60,}|-----BEGIN (RSA|EC|OPENSSH|PRIVATE|DSA) KEY-----/g;
-// --force-local is GNU-tar-only and needed only on Windows (see the same
-// note in verify-packed-install.mjs) — macOS's BSD tar rejects it outright.
-const TAR_LOCAL_FLAGS = process.platform === 'win32' ? ['--force-local'] : [];
+// Some Windows tar builds need --force-local for drive-letter paths, while
+// newer Windows bsdtar builds reject the option. Detect support instead of
+// assuming it from the OS name (same rule as verify-packed-install.mjs).
+const tarHelp = process.platform === 'win32'
+  ? spawnSync('tar', ['--help'], { encoding: 'utf-8' })
+  : undefined;
+const TAR_LOCAL_FLAGS = process.platform === 'win32'
+  && `${tarHelp?.stdout ?? ''}${tarHelp?.stderr ?? ''}`.includes('--force-local')
+  ? ['--force-local']
+  : [];
 const ALLOWED_LITERALS = [
   'AKIAIOSFODNN7EXAMPLE',
   'AKIA1234567890ABCDEF',

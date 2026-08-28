@@ -3,7 +3,7 @@
  * canonical error-message sanitization.
  *
  * This module is protocol-agnostic — it knows nothing about MCP content
- * shapes (that lives in @agentgate/gateway's output-security.ts, which calls
+ * shapes (that lives in @chidhvilasa/gateway's output-security.ts, which calls
  * into sanitizeJsonValue() per MCP content block). It reuses the exact same
  * SECRET_PATTERNS-backed detectSecrets()/redactSecrets() already used for
  * inbound argument redaction (see ADR-0009) — there is deliberately no

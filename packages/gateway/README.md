@@ -1,4 +1,4 @@
-# @agentgate/gateway
+# @chidhvilasa/gateway
 
 The [AgentGate](https://github.com/chidhvilasa/agentgate) gateway: an MCP stdio proxy, policy evaluation
 pipeline, tamper-evident audit storage, a loopback-only Control API, and the `agentgate` CLI.
@@ -8,7 +8,7 @@ pipeline, tamper-evident audit storage, a loopback-only Control API, and the `ag
 > quickstart, and the full documentation set (architecture, threat model, policy reference, verification guide).
 
 ```sh
-npm install -g @agentgate/gateway
+npm install -g @chidhvilasa/gateway
 agentgate init
 agentgate start --config agentgate.yml
 ```

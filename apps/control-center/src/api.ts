@@ -5,7 +5,7 @@
  * (injected at launch time) or from localStorage as a fallback for dev.
  */
 
-import type { ReplayEvaluationResponse, ReplayEvaluationSummary } from '@agentgate/protocol';
+import type { ReplayEvaluationResponse, ReplayEvaluationSummary } from '@chidhvilasa/protocol';
 
 const BASE_URL = import.meta.env.VITE_CONTROL_URL ?? 'http://127.0.0.1:4001';
 const TOKEN = import.meta.env.VITE_AGENTGATE_TOKEN ?? localStorage.getItem('agentgate_token') ?? '';

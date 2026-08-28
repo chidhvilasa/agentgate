@@ -20,7 +20,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AuditStorage } from '../src/storage.js';
 import { ApprovalManager } from '../src/approval.js';
-import type { Approval } from '@agentgate/protocol';
+import type { Approval } from '@chidhvilasa/protocol';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '../../../');

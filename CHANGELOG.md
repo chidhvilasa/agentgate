@@ -12,9 +12,9 @@ version tag or GitHub Release has been created, and no repository setting/secret
 [ADR-0014](docs/AI_DECISIONS.md) for the full release/distribution architecture and its explicit non-goals.
 
 ### Added
-- **Package topology and metadata**: `@agentgate/protocol`, `@agentgate/policy`, and `@agentgate/gateway` are no
+- **Package topology and metadata**: `@chidhvilasa/protocol`, `@chidhvilasa/policy`, and `@chidhvilasa/gateway` are no
   longer `private` and now carry accurate `repository`/`homepage`/`bugs`/`keywords`/`publishConfig.access:"public"`
-  metadata, a restrictive `files` allowlist, and a per-package `README.md`/`LICENSE`. `@agentgate/control-center`
+  metadata, a restrictive `files` allowlist, and a per-package `README.md`/`LICENSE`. `@chidhvilasa/control-center`
   and the monorepo root remain private by design.
 - **Lockstep beta versioning**: all three publishable packages bumped to `0.1.0-beta.1` together (ADR-0014).
 - **`scripts/check-release-consistency.mjs`**: verifies the lockstep-version invariant, publishable/private

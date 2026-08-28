@@ -74,13 +74,13 @@ function getPackedTarballs(packDir) {
     });
     const tarballLine = out.trim().split('\n').pop();
     const tarballPath = tarballLine.startsWith(packDir) ? tarballLine : path.join(packDir, tarballLine);
-    tarballs.push({ pkg: `@agentgate/${pkg}`, tarballPath });
+    tarballs.push({ pkg: `@chidhvilasa/${pkg}`, tarballPath });
   }
   return tarballs;
 }
 
 function getRealLicenseInventory() {
-  const filters = PACKAGES.flatMap((p) => ['--filter', `@agentgate/${p}`]);
+  const filters = PACKAGES.flatMap((p) => ['--filter', `@chidhvilasa/${p}`]);
   const out = execFileSync('pnpm', ['licenses', 'list', '--json', '--prod', ...filters], {
     cwd: ROOT,
     encoding: 'utf-8',
@@ -122,7 +122,7 @@ function buildSbom(components, commit) {
         type: 'application',
         name: 'agentgate',
         group: 'agentgate',
-        description: 'AgentGate — MCP security gateway (@agentgate/protocol, @agentgate/policy, @agentgate/gateway)',
+        description: 'AgentGate — MCP security gateway (@chidhvilasa/protocol, @chidhvilasa/policy, @chidhvilasa/gateway)',
       },
       properties: commit ? [{ name: 'agentgate:commit', value: commit }] : [],
     },
@@ -176,7 +176,7 @@ async function main() {
     console.error('  Disallowed/unknown licenses found:');
     for (const d of disallowed) console.error(`    ${d.name}@${d.version} — "${d.license}"`);
   }
-  const licensesOut = { generated_at: new Date().toISOString(), scope: 'production dependencies of @agentgate/protocol, @agentgate/policy, @agentgate/gateway', allowed_license_pattern: ALLOWED_LICENSE_PATTERN.source, dependency_count: components.length, dependencies: components };
+  const licensesOut = { generated_at: new Date().toISOString(), scope: 'production dependencies of @chidhvilasa/protocol, @chidhvilasa/policy, @chidhvilasa/gateway', allowed_license_pattern: ALLOWED_LICENSE_PATTERN.source, dependency_count: components.length, dependencies: components };
   fs.writeFileSync(path.join(outDir, 'licenses.json'), JSON.stringify(licensesOut, null, 2) + '\n');
   results.push(check('licenses.json written', fs.existsSync(path.join(outDir, 'licenses.json'))));
 

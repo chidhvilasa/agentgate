@@ -8,8 +8,8 @@ import {
   redactArgumentsForAudit,
   sanitizeErrorMessage,
   type EvaluationInput,
-} from '@agentgate/policy';
-import type { AgentIdentity, AuditEvent, ToolCall } from '@agentgate/protocol';
+} from '@chidhvilasa/policy';
+import type { AgentIdentity, AuditEvent, ToolCall } from '@chidhvilasa/protocol';
 import type { AuditStorage } from './storage.js';
 import type { ApprovalManager } from './approval.js';
 import type { GatewayConfig, DownstreamServer } from './config/registry.js';

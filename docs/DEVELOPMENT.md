@@ -27,18 +27,18 @@ allowed to run); `pnpm-workspace.yaml` mirrors this under `allowBuilds`.
 ```text
 agentgate/
 ├── packages/
-│   ├── protocol/   @agentgate/protocol — shared types (events, decisions, Control API contracts)
-│   ├── policy/     @agentgate/policy   — policy schema, evaluation engine, secret detection/redaction
-│   └── gateway/    @agentgate/gateway  — MCP stdio proxy, pipeline, audit storage, Control API, CLI
+│   ├── protocol/   @chidhvilasa/protocol — shared types (events, decisions, Control API contracts)
+│   ├── policy/     @chidhvilasa/policy   — policy schema, evaluation engine, secret detection/redaction
+│   └── gateway/    @chidhvilasa/gateway  — MCP stdio proxy, pipeline, audit storage, Control API, CLI
 ├── apps/
-│   └── control-center/  @agentgate/control-center — React/Vite local UI
+│   └── control-center/  @chidhvilasa/control-center — React/Vite local UI
 ├── policies/       example policy YAML
 ├── examples/       example gateway config + the secret-exfiltration attack demo
 └── docs/           this documentation
 ```
 
-`packages/gateway` depends on `@agentgate/policy` and `@agentgate/protocol` (workspace:* — always the local
-version); `apps/control-center` depends on `@agentgate/protocol` for shared types.
+`packages/gateway` depends on `@chidhvilasa/policy` and `@chidhvilasa/protocol` (workspace:* — always the local
+version); `apps/control-center` depends on `@chidhvilasa/protocol` for shared types.
 
 ## Install / build / lint / test
 
@@ -327,14 +327,14 @@ should be the same safe, bounded shape.
 
 Verified this milestone with real, automated checks — see `scripts/verify-packed-install.mjs`:
 
-- All three publishable packages (`@agentgate/protocol`, `@agentgate/policy`, `@agentgate/gateway`) are
+- All three publishable packages (`@chidhvilasa/protocol`, `@chidhvilasa/policy`, `@chidhvilasa/gateway`) are
   `"private": true`, so `npm publish` is blocked outright — no accidental publication is possible, and none has
   happened. There is no published npm package; do not write documentation implying `npm install agentgate` or
   `npx agentgate` work — they do not.
 - Each package now has a `"files": ["dist"]` field, so `pnpm pack` produces a tarball containing only compiled
   output (no `src/`, `tests/`, or `tsconfig*.json`).
 - Installing the **gateway tarball alone** into an external project fails with a real `npm error 404` for
-  `@agentgate/policy`/`@agentgate/protocol` — `pnpm pack` rewrites their `workspace:*` dependency protocol to a
+  `@chidhvilasa/policy`/`@chidhvilasa/protocol` — `pnpm pack` rewrites their `workspace:*` dependency protocol to a
   bare semver that has never been published anywhere. This is a genuine, verified limitation, not a
   hypothetical one.
 - Installing **all three tarballs together** in one `npm install a.tgz b.tgz c.tgz` command works — npm
@@ -343,7 +343,7 @@ Verified this milestone with real, automated checks — see `scripts/verify-pack
   installed CLI's help/`--version`/`smoke-test`) and runs in both CI jobs.
 - The Control Center is **not** bundled into the gateway package at all — it is a separate Vite app
   (`apps/control-center`) with its own `pnpm run build`/`pnpm run dev:control`. An installed
-  `@agentgate/gateway` package gives you the CLI and backend only; `agentgate doctor`'s `control_center` check
+  `@chidhvilasa/gateway` package gives you the CLI and backend only; `agentgate doctor`'s `control_center` check
   reports this explicitly (`SKIP` outside a source checkout, `PASS`/`WARN` based on build status inside one).
 
 ## Onboarding CLI

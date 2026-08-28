@@ -1190,7 +1190,7 @@ decisions across AI-agent sessions. Verify entries against the repository.
   other public-beta docs listed in the Milestone 8 prompt (Phase 8), associated test files (added in the session
   log entry below).
 - Supersedes: NONE
-- Superseded by: NONE (amended by ADR-0015, which refines the release-workflow's publish-gating and artifact-integrity design without changing this ADR's core architecture decisions — see ADR-0015)
+- Superseded by: ADR-0016 for package-scope identity only. ADR-0015 still amends the release-workflow's publish-gating and artifact-integrity design; all other ADR-0014 architecture decisions remain active.
 
 ### ADR-0015: Release-Workflow Publish-Gating and Artifact-Integrity Amendment (amends ADR-0014)
 
@@ -1293,6 +1293,59 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Affected files: `.github/workflows/release.yml` (publish-gating fix, artifact-integrity rework, idempotent
   retry, expanded header documentation), `docs/AI_DECISIONS.md` (this entry).
 - Supersedes: NONE (amends ADR-0014's release-workflow design; ADR-0014's architecture decisions are unchanged)
+- Superseded by: NONE
+
+### ADR-0016: Publish Under the Existing `@chidhvilasa` npm User Scope
+
+- Status: ACCEPTED
+- Date: 2026-08-29
+- Scope: release / package identity
+- Decision:
+  1. Publish AgentGate's three public packages as `@chidhvilasa/protocol`, `@chidhvilasa/policy`, and
+     `@chidhvilasa/gateway`. Keep the existing three-package topology, lockstep `0.1.0-beta.<n>` versioning,
+     `agentgate` CLI binary, artifact verification, and trusted-publishing architecture from ADR-0014/ADR-0015.
+  2. Rename the private Control Center workspace package to `@chidhvilasa/control-center` as well so every
+     workspace import/filter uses one truthful namespace, while keeping that application `private: true` and
+     unpublished.
+  3. Use the npm user scope already owned by the authenticated npm identity `chidhvilasa`; do not create a paid
+     plan, private package, access token, or alternate organization. Public user-scoped packages are free.
+  4. Bootstrap the first versions manually in dependency order (`protocol`, `policy`, `gateway`) after the full
+     release gate passes. Configure GitHub Actions OIDC trusted publishing per package only after those first
+     package records exist, as required by the npm bootstrap constraint recorded in ADR-0015.
+- Reason: The authenticated npm organization-creation form rejected `agentgate` with the authoritative message
+  `This name is unavailable.` No organization was created and no payment occurred. The same authenticated account
+  (`chidhvilasa`) already owns the `@chidhvilasa` user scope, its three proposed AgentGate package names are
+  unpublished, and the account now has 2FA enabled for authorization and publishing with one security key. Using
+  that existing scope is the smallest zero-cost path and avoids inventing another organization identity merely to
+  preserve a pre-publication placeholder namespace.
+- Evidence:
+  - Authenticated npm account page on 2026-08-29: username `chidhvilasa`; `2FA Enabled for authorization and
+    publishing`; one security key.
+  - Authenticated npm organization creation attempt on 2026-08-29: `agentgate` rejected as unavailable; no
+    organization created.
+  - Registry checks before the rename: `@chidhvilasa/protocol`, `@chidhvilasa/policy`, and
+    `@chidhvilasa/gateway` each returned 404/unpublished.
+- Alternatives considered:
+  - Continue using `@agentgate/*`: rejected because the authoritative authenticated creation attempt proved the
+    required scope is unavailable to this owner.
+  - Create a different organization such as `@agentgatehq`: rejected for the first beta because the existing user
+    scope is already owned, free, and sufficient; another permanent account object adds setup and governance with
+    no demonstrated technical benefit.
+  - Use the unrelated unscoped `agentgate` package: impossible and misleading; it is owned by another project.
+- Consequences:
+  - Positive: zero-cost, immediately owned namespace; no new organization, billing relationship, or package-owner
+    ambiguity; package names align with the repository owner.
+  - Negative: installation uses the maintainer scope rather than the shorter product scope. A later rename would
+    require publishing new package identities and a migration/deprecation plan because npm package names are
+    immutable identities.
+- Compatibility: This is a pre-first-publication rename, so no registry consumer can depend on the old names.
+  All workspace manifests, source imports, tests, release scripts, workflows, current documentation, and packed
+  manifests must change together. Historical ledger text remains unchanged except for ADR-0014's explicit
+  supersession pointer.
+- Affected files: workspace/package manifests and lockfile; TypeScript imports; release scripts/tests/workflow;
+  package READMEs and current public documentation; `docs/AI_DECISIONS.md`.
+- Supersedes: ADR-0014 point 1's `@agentgate/*` package identity and the corresponding name-specific references
+  in ADR-0015. It does not supersede their topology, versioning, security, OIDC, or artifact-integrity decisions.
 - Superseded by: NONE
 
 ## Superseded Decisions
@@ -3504,3 +3557,38 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Exact next action: append the final Milestone 8 closeout ledger entry recording this already-observed green
   CI/Security state (this session, immediately after this one, as a ledger-only commit), then report the
   milestone's final result to the operator.
+
+### 2026-08-29 — First-publication identity resolution and zero-cost release preparation
+
+- Starting local and remote HEAD: `4c65010cec17ee72071ac9cebdc769a6e06591cc`, branch `main`, with only the
+  owner's pre-existing `.claude/` and `CLAUDE.md` untracked.
+- npm account evidence: authenticated browser session belongs to `chidhvilasa`; account settings report 2FA
+  enabled for authorization and publishing with one security key. The account initially had no organizations.
+- Scope result: an authenticated attempt to create the free, public-only npm organization `agentgate` returned
+  the authoritative error `This name is unavailable.` No organization was created and no payment or paid plan
+  was initiated. The three `@chidhvilasa/{protocol,policy,gateway}` package records were independently confirmed
+  unpublished before this change. ADR-0016 records the resulting decision to use the already-owned, free
+  `@chidhvilasa` user scope.
+- Implementation: changed all four workspace package identities and every live TypeScript import, workspace
+  dependency, filter, release script, release workflow, test, package README, and current documentation reference
+  from `@agentgate/*` to `@chidhvilasa/*`. Historical ADR/session prose remains intact except ADR-0014's explicit
+  pointer to ADR-0016. Updated release tarball patterns from `agentgate-*.tgz` to the actual scoped-pack output
+  `chidhvilasa-*.tgz`; added a structural regression test for both the package identity and tarball patterns.
+- Two genuine current-Windows compatibility findings were fixed before publication: Vite/Vitest's default
+  config bundler attempted to traverse a sandbox-inaccessible parent directory, while their supported `runner`
+  config loader builds/tests correctly; Control Center scripts now select that loader. Windows 11's current
+  bundled bsdtar 3.8.8 rejects `--force-local`, while older Windows tar variants required it for drive-letter
+  paths; both tar-consuming release scripts now detect the option before using it, and
+  `verify-packed-install.mjs` also normalizes CRLF tar listings.
+- Verification before the first release checkpoint: frozen workspace install clean; build clean (all four
+  buildable workspaces); lint 0 errors/2 pre-existing warnings; 52 policy + 105 Control Center + 475 gateway
+  passed with 2 gateway skips = 632 passing workspace tests; all five adversarial demos passed with their
+  established assertion counts; release-tooling tests increased from 28 to 29 and all pass; release consistency
+  passes; packed-install verification passes all 30 checks against the real renamed tarballs and an isolated
+  external consumer, including installed CLI `--version`, smoke-test, and Context Guard commands.
+- No package, tag, GitHub Release, GitHub Environment, trusted publisher, repository setting, organization, token,
+  or paid plan has been created at the time of this checkpoint entry. The implementation commit hash cannot be
+  recorded here before that commit exists; a later entry must record the actual hash and publication evidence.
+- Exact next action: commit and push the fully verified package-identity change, wait for CI/Security on that exact
+  commit, regenerate and scan release artifacts from it, authenticate npm's CLI through the web flow, and publish
+  the first versions in dependency order only if all gates remain green.

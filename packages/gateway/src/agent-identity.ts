@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { AgentIdentity } from '@agentgate/protocol';
+import type { AgentIdentity } from '@chidhvilasa/protocol';
 
 /**
  * Builds an AgentIdentity from MCP client info.

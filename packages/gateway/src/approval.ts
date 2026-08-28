@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { Approval } from '@agentgate/protocol';
+import type { Approval } from '@chidhvilasa/protocol';
 import type { AuditStorage } from './storage.js';
 
 export type ApprovalEventName = 'created' | 'resolved' | 'expired';

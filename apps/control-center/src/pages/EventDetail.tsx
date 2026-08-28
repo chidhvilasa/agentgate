@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../api';
-import type { ReplayEvaluationResponse } from '@agentgate/protocol';
+import type { ReplayEvaluationResponse } from '@chidhvilasa/protocol';
 
 function statusClass(status: string) {
   const s = status.toLowerCase();

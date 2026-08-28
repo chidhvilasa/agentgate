@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { runPipeline } from '../src/pipeline.js';
 import { AuditStorage } from '../src/storage.js';
 import { ApprovalManager } from '../src/approval.js';
-import type { AgentIdentity } from '@agentgate/protocol';
+import type { AgentIdentity } from '@chidhvilasa/protocol';
 import type { GatewayConfig } from '../src/config/registry.js';
 import { defaultContextGuardConfig } from '../src/config/registry.js';
 import { createContext } from '../src/context-guard/state.js';

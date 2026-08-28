@@ -5,7 +5,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { loadGatewayConfig } from '../config/registry.js';
-import { loadPolicyFile, sanitizeErrorMessage } from '@agentgate/policy';
+import { loadPolicyFile, sanitizeErrorMessage } from '@chidhvilasa/policy';
 
 export type ConfigValidationCategory =
   | 'missing_file'

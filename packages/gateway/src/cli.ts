@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { startGateway } from './server.js';
-import { validatePolicy, sanitizeErrorMessage, loadPolicyFile } from '@agentgate/policy';
+import { validatePolicy, sanitizeErrorMessage, loadPolicyFile } from '@chidhvilasa/policy';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

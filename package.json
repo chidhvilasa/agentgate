@@ -18,8 +18,8 @@
     "test": "pnpm -r run test",
     "test:release": "vitest run --root scripts",
     "lint": "eslint .",
-    "dev:control": "pnpm --filter @agentgate/control-center dev",
-    "dev:gateway": "pnpm --filter @agentgate/gateway dev",
+    "dev:control": "pnpm --filter @chidhvilasa/control-center dev",
+    "dev:gateway": "pnpm --filter @chidhvilasa/gateway dev",
     "dev": "pnpm run dev:control & pnpm run dev:gateway"
   },
   "devDependencies": {

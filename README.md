@@ -224,7 +224,7 @@ agentgate <command> --help            # Print detailed usage for any command
 ## Installation
 
 **No AgentGate package has been published to the npm registry yet** — this beta ships as source and as packed
-tarballs only. `npm install @agentgate/gateway` will work **once published** (see
+tarballs only. `npm install @chidhvilasa/gateway` will work **once published** (see
 [Release channels and future registry install](#release-channels-and-future-registry-install) below); until then,
 use one of the two methods below, both proven with a real, automated, CI-enforced check
 (`scripts/verify-packed-install.mjs`), not assumed:
@@ -237,16 +237,16 @@ use one of the two methods below, both proven with a real, automated, CI-enforce
    pnpm install --frozen-lockfile && pnpm run build
    for pkg in protocol policy gateway; do (cd packages/$pkg && pnpm pack --pack-destination /tmp/agentgate-pkgs); done
    mkdir my-consumer && cd my-consumer && npm init -y
-   npm install /tmp/agentgate-pkgs/agentgate-protocol-*.tgz /tmp/agentgate-pkgs/agentgate-policy-*.tgz /tmp/agentgate-pkgs/agentgate-gateway-*.tgz
+   npm install /tmp/agentgate-pkgs/chidhvilasa-protocol-*.tgz /tmp/agentgate-pkgs/chidhvilasa-policy-*.tgz /tmp/agentgate-pkgs/chidhvilasa-gateway-*.tgz
    ./node_modules/.bin/agentgate smoke-test
    ```
    **All three tarballs must be installed together in one `npm install` command.** Installing the gateway
    tarball alone fails with a real `404` — `pnpm pack` rewrites its `workspace:*` dependencies on
-   `@agentgate/policy`/`@agentgate/protocol` to a bare version number that has never been published to any
+   `@chidhvilasa/policy`/`@chidhvilasa/protocol` to a bare version number that has never been published to any
    registry; installing all three together lets npm resolve the sibling packages from the other tarballs given
    in the same command. This is **not** the same as `npm install agentgate` from the public npm registry, which
    this project does not publish to or claim — and note the unscoped `agentgate` name on npm already belongs to
-   an unrelated third-party project; AgentGate only ever uses the `@agentgate/*` scope.
+   an unrelated third-party project; AgentGate only ever uses the `@chidhvilasa/*` scope.
 
 Not yet supported: a published npm package (see above), a Homebrew/system package, or a standalone binary. See
 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md#installability) for the full audit.
@@ -267,11 +267,11 @@ owner-approved step — see the Milestone 8 section of [`docs/VERIFICATION.md`](
 what that step involves and has and has not happened so far), installation will be:
 
 ```sh
-npm install -g @agentgate/gateway   # not yet published — this command does not work today
+npm install -g @chidhvilasa/gateway   # not yet published — this command does not work today
 ```
 
-`@agentgate/protocol` and `@agentgate/policy` are also independently installable (for building your own tooling
-against AgentGate's types/policy engine); most users only need `@agentgate/gateway`, which depends on the other two.
+`@chidhvilasa/protocol` and `@chidhvilasa/policy` are also independently installable (for building your own tooling
+against AgentGate's types/policy engine); most users only need `@chidhvilasa/gateway`, which depends on the other two.
 
 See [`docs/RELEASE_RUNBOOK.md`](docs/RELEASE_RUNBOOK.md) for the exact operator-side publication process,
 including why the very first publish of each of these packages cannot go through the automated release workflow

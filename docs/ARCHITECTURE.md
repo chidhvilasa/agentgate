@@ -260,7 +260,7 @@ sequenceDiagram
     CA-->>UI: { executed: false, mode: "policy_only", ... }
 ```
 
-- **`replay.ts` depends on exactly two things**: the same pure `evaluate()` function from `@agentgate/policy`
+- **`replay.ts` depends on exactly two things**: the same pure `evaluate()` function from `@chidhvilasa/policy`
   that `runPipeline()` itself calls (one rule matcher, not a second copy), and three tiny, already-existing pure
   argument-extraction helpers re-exported from `pipeline.ts`. It never imports the MCP SDK,
   `executeDownstream()`, `runPipeline()`, or `ApprovalManager` — enforced by a dedicated structural test

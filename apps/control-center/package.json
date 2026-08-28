@@ -1,5 +1,5 @@
 {
-  "name": "@agentgate/control-center",
+  "name": "@chidhvilasa/control-center",
   "private": true,
   "version": "0.1.0",
   "description": "AgentGate Control Center: a local, loopback-only React UI for live tool-call timeline, approvals, and audit inspection.",
@@ -10,13 +10,13 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build --configLoader runner",
     "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run --configLoader runner",
+    "test:watch": "vitest --configLoader runner"
   },
   "dependencies": {
-    "@agentgate/protocol": "workspace:*",
+    "@chidhvilasa/protocol": "workspace:*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.27.0"

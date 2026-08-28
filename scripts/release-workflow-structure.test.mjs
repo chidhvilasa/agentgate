@@ -72,6 +72,17 @@ describe('.github/workflows/release.yml structure (ADR-0015)', () => {
     }
   });
 
+  it('publishes the ADR-0016 user-scoped package identities from the matching scoped tarball filenames', () => {
+    for (const jobName of ['publish-dry-run', 'publish']) {
+      const step = doc.jobs[jobName].steps.find((s) => s.run?.includes('for pkg in'));
+      expect(step.run).toContain('release-artifacts/chidhvilasa-${pkg}-*.tgz');
+      expect(step.run).not.toContain('release-artifacts/agentgate-${pkg}-*.tgz');
+    }
+    const publishStep = doc.jobs.publish.steps.find((s) => s.name?.includes('npm publish (real'));
+    expect(publishStep.run).toContain('NAME="@chidhvilasa/$pkg"');
+    expect(raw).not.toContain('NAME="@agentgate/$pkg"');
+  });
+
   it('no job requires anything beyond contents:read + id-token:write (+ attestations:write only for attest) — least privilege, and never a stored NPM_TOKEN', () => {
     // "NPM_TOKEN" itself legitimately appears in prose explaining that none
     // exists — what must never appear is an actual reference to a secret.

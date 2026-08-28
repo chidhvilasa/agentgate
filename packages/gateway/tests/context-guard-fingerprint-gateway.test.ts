@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { runToolsTrust, runToolsStatus } from '../src/tool-integrity/cli.js';
 import { AuditStorage } from '../src/storage.js';
 import { ApprovalManager } from '../src/approval.js';
-import type { Approval } from '@agentgate/protocol';
+import type { Approval } from '@chidhvilasa/protocol';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '../../../');

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { evaluateHistoricalEvent, ReplayUnsupportedEventError } from '../src/replay.js';
-import type { Policy } from '@agentgate/policy';
-import type { AuditEvent, AgentIdentity, ToolCall, PolicyDecision } from '@agentgate/protocol';
+import type { Policy } from '@chidhvilasa/policy';
+import type { AuditEvent, AgentIdentity, ToolCall, PolicyDecision } from '@chidhvilasa/protocol';
 
 const AGENT: AgentIdentity = {
   session_id: 's1',
