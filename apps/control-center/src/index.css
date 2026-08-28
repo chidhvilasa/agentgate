@@ -732,3 +732,186 @@ input, select, textarea { font: inherit; }
 .ti-diff-path { color: var(--text-secondary); margin-bottom: 4px; }
 .ti-diff-before { color: var(--color-denied); font-family: var(--font-mono); font-size: 11.5px; white-space: pre-wrap; }
 .ti-diff-after  { color: var(--color-allowed); font-family: var(--font-mono); font-size: 11.5px; white-space: pre-wrap; }
+
+/* ─── Context Guard (Milestone 7, ADR-0013) ──────────────────────────────── */
+
+/* Correlation-not-causation / limitation notes — quiet, informational tone
+   (never the amber "warning" treatment used for mode banners) so a reader
+   does not mistake AgentGate's own stated limitation for an active alert. */
+.cg-note {
+  background: var(--bg-elevated);
+  border: 1px solid var(--bg-border);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.cg-label-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.cg-label-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  font-family: var(--font-mono);
+  background: rgba(245,158,11,0.12);
+  color: var(--color-pending);
+  border: 1px solid rgba(245,158,11,0.3);
+  white-space: nowrap;
+}
+
+.cg-context-row { cursor: pointer; }
+.cg-context-row.selected td { background: var(--bg-hover); }
+.cg-table-scroll { overflow-x: auto; }
+
+.cg-contexts-cards { display: none; }
+
+.cg-context-card {
+  border-bottom: 1px solid rgba(37,42,56,0.5);
+  padding: 14px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: pointer;
+}
+.cg-context-card:last-child { border-bottom: none; }
+.cg-context-card:hover, .cg-context-card:focus-visible { background: var(--bg-hover); }
+.cg-context-card.selected { background: var(--bg-hover); }
+.cg-context-card-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cg-context-card-meta { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
+.cg-context-id { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
+
+/* Transition timeline — a connected vertical thread, not a generic stepper:
+   each row's dot sits on a continuous left rail so accumulation reads as
+   one continuous story rather than isolated cards. */
+.cg-timeline { display: flex; flex-direction: column; }
+
+.cg-timeline-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+.cg-timeline-row:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 26px;
+  bottom: -4px;
+  width: 1px;
+  background: var(--bg-border);
+}
+
+.cg-timeline-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--color-neutral);
+  z-index: 1;
+  flex-shrink: 0;
+}
+.cg-timeline-dot.label { background: var(--color-pending); }
+.cg-timeline-dot.deny { background: var(--color-denied); }
+.cg-timeline-dot.approval { background: var(--color-pending); }
+.cg-timeline-dot.allow { background: var(--color-allowed); }
+.cg-timeline-dot.reset { background: var(--color-transform); }
+.cg-timeline-dot.lifecycle { background: var(--text-muted); }
+
+.cg-timeline-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.cg-timeline-meta { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
+.cg-timeline-detail { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
+
+/* Reset — reject-oriented, cautious visual treatment. */
+.cg-reset-trigger {
+  background: transparent;
+  color: var(--color-denied);
+  border: 1px solid rgba(239,68,68,0.35);
+  border-radius: var(--radius-md);
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.cg-reset-trigger:hover:not(:disabled) { background: rgba(239,68,68,0.1); }
+.cg-reset-trigger:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.cg-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5,6,10,0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 20px;
+}
+
+.cg-modal {
+  background: var(--bg-surface);
+  border: 1px solid rgba(239,68,68,0.35);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  width: 100%;
+  max-width: 480px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cg-modal-title { font-size: 15px; font-weight: 700; color: var(--text-danger); }
+
+.cg-modal textarea {
+  width: 100%;
+  min-height: 80px;
+  resize: vertical;
+  background: var(--bg-base);
+  border: 1px solid var(--bg-border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 13px;
+}
+.cg-modal textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.cg-modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+.cg-stale-banner {
+  background: rgba(245,158,11,0.08);
+  border: 1px solid rgba(245,158,11,0.3);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  font-size: 12.5px;
+  color: var(--text-warning);
+}
+
+/* Escalation panel — the only place a "denied/blocked" tone appears outside
+   the reset control itself. */
+.cg-escalation {
+  border: 1px solid rgba(239,68,68,0.3);
+  background: rgba(239,68,68,0.06);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+}
+.cg-escalation.pending {
+  border-color: rgba(245,158,11,0.35);
+  background: rgba(245,158,11,0.06);
+}
+
+@media (max-width: 640px) {
+  .cg-timeline-row { grid-template-columns: 14px 1fr; gap: 10px; }
+  .cg-timeline-row:not(:last-child)::after { left: 6px; }
+  .cg-contexts-table { display: none; }
+  .cg-contexts-cards { display: block; }
+}

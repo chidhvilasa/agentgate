@@ -1,5 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../api';
+
+function fpPrefix(fp: unknown): string {
+  return typeof fp === 'string' && fp.length > 0 ? `${fp.slice(0, 12)}…` : '(none)';
+}
 
 function ApprovalTimer({ expiresAt }: { expiresAt: string }) {
   const [remaining, setRemaining] = useState(0);
@@ -130,6 +135,37 @@ export default function Approvals({ onCountChange }: ApprovalsProps) {
                   <span className="text-mono">{String(approval.id).slice(0, 8)}…</span>
                 </div>
               </div>
+
+              {/* Context Guard binding (ADR-0013) — only rendered when this
+                  approval is actually context-bound; a pre-Milestone-7 or
+                  non-contextual approval has null in all these fields,
+                  which is normal, not an error, so nothing extra renders. */}
+              {typeof approval.context_id === 'string' && approval.context_id && (
+                <div className="approval-meta">
+                  <div className="approval-meta-item">
+                    <span>◫</span>
+                    <span>
+                      <strong>Context:</strong>{' '}
+                      <Link to={`/context-guard?context=${encodeURIComponent(approval.context_id)}`} className="text-mono" style={{ color: 'var(--accent-text)' }}>
+                        {String(approval.context_id).slice(0, 8)}…
+                      </Link>
+                      {typeof approval.context_revision === 'number' && ` (rev ${approval.context_revision})`}
+                    </span>
+                  </div>
+                  {typeof approval.contextual_rule_id === 'string' && approval.contextual_rule_id && (
+                    <div className="approval-meta-item">
+                      <span>📐</span>
+                      <span><strong>Rule:</strong> <span className="text-mono">{String(approval.contextual_rule_id)}</span></span>
+                    </div>
+                  )}
+                  {typeof approval.tool_fingerprint === 'string' && approval.tool_fingerprint && (
+                    <div className="approval-meta-item">
+                      <span>🔏</span>
+                      <span><strong>Tool fingerprint:</strong> <span className="text-mono">{fpPrefix(approval.tool_fingerprint)}</span></span>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="approval-actions">
                 {/* Deny: Primary, prominent, safe action */}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../api';
 import type { ReplayEvaluationResponse } from '@agentgate/protocol';
 
@@ -257,6 +257,15 @@ export default function EventDetail() {
             <div className="detail-row"><div className="detail-label">Reason Code</div><div className="detail-value mono">{String(decision.reason_code ?? '—')}</div></div>
             <div className="detail-row"><div className="detail-label">Matched Rule</div><div className="detail-value mono">{String(decision.matched_rule_id ?? 'none — default applied')}</div></div>
             <div className="detail-row"><div className="detail-label">Explanation</div><div className="detail-value">{String(decision.explanation ?? '—')}</div></div>
+            {decision.reason_code === 'CONTEXT_GUARD_ESCALATION' && (
+              <div className="cg-note mt-16">
+                This decision was escalated by Context Guard's cross-tool session-risk rules — labels accumulated from
+                earlier calls in this same execution context raised what would otherwise have been the base policy
+                decision. See <Link to="/context-guard" style={{ color: 'var(--accent-text)' }}>Context Guard</Link> for
+                the accumulated labels and transition history. This reflects AgentGate's own observed gateway history,
+                not proof that one call caused another.
+              </div>
+            )}
           </div>
         </div>
       )}

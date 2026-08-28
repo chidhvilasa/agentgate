@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { openEventStream, api } from '../api';
 
 function statusClass(status: string) {
@@ -103,6 +103,20 @@ export default function Timeline() {
                     <td className="text-muted">{String(agent?.declared_name ?? 'unknown')}</td>
                     <td className="text-muted text-mono">
                       {decision?.matched_rule_id ? String(decision.matched_rule_id) : <em>default-deny</em>}
+                      {decision?.reason_code === 'CONTEXT_GUARD_ESCALATION' && (
+                        <>
+                          {' '}
+                          <Link
+                            to="/context-guard"
+                            className="badge pending"
+                            style={{ fontSize: 9, textDecoration: 'none' }}
+                            onClick={(e) => e.stopPropagation()}
+                            title="This decision was escalated by Context Guard's cross-tool session-risk rules — see Context Guard for the accumulated labels."
+                          >
+                            context-escalated
+                          </Link>
+                        </>
+                      )}
                     </td>
                     <td className="text-muted">
                       {ev.duration_ms != null ? `${ev.duration_ms}ms` : '—'}

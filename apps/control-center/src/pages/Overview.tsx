@@ -1,6 +1,51 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { api } from '../api';
+import type { ContextStatusReport } from '../api';
+
+/**
+ * Compact Context Guard summary (ADR-0013) — self-contained: fetches its
+ * own bounded snapshot once and silently renders nothing if Context Guard
+ * isn't configured (404) or the gateway is unreachable, so Overview stays
+ * fully functional either way. Never a second poll loop layered on top of
+ * Overview's own — this widget owns its one fetch.
+ */
+function ContextGuardSummaryCard() {
+  const [report, setReport] = useState<ContextStatusReport | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .contexts({ limit: 200 })
+      .then((r) => {
+        if (!cancelled) setReport(r);
+      })
+      .catch(() => {
+        if (!cancelled) setUnavailable(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (unavailable || !report) return null;
+
+  const activeWithLabels = report.contexts.filter((c) => c.status === 'active' && c.labels.length > 0).length;
+  const pendingApprovals = report.contexts.reduce((sum, c) => sum + c.pending_approval_count, 0);
+
+  if (activeWithLabels === 0 && pendingApprovals === 0) return null;
+
+  return (
+    <div className="cg-escalation pending">
+      <div className="cg-timeline-title" style={{ marginBottom: 4 }}>Context Guard: accumulated session risk</div>
+      <div className="text-muted" style={{ fontSize: 12 }}>
+        {activeWithLabels} active context(s) carrying risk labels, {pendingApprovals} pending contextual approval(s).{' '}
+        <Link to="/context-guard" style={{ color: 'var(--accent-text)' }}>Review in Context Guard →</Link>
+      </div>
+    </div>
+  );
+}
 
 function DecisionBadge({ status }: { status: string }) {
   const s = status.toLowerCase();
@@ -60,6 +105,8 @@ export default function Overview() {
           {riskLevel === 'low' ? '✔' : riskLevel === 'medium' ? '⚑' : '⚠'} Risk: {riskLevel.toUpperCase()}
         </div>
       </div>
+
+      <ContextGuardSummaryCard />
 
       <div className="stat-grid">
         <div className="stat-card">
