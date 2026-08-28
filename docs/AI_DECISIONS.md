@@ -2733,3 +2733,201 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Exact next action: stage exactly the CLI/API/SSE/fingerprint-binding/test/doc files listed above (excluding
   `.claude/`, `CLAUDE.md`, `graphify-out/`, and any generated artifact), run a final staged-diff check and
   secret scan, and create a normal local commit — not pushed, per this turn's explicit scope stop.
+
+### 2026-08-28 — Milestone 7 Control Center + poisoned-result demo session (built on `c8ed307`)
+
+- Prompt objective: build the Control Center's Context Guard investigation UI, the milestone's central executable
+  attack demo (`examples/context-poisoning/demo.mjs`), real-browser verification with screenshots, and local
+  checkpoint commits — on top of the two already-committed local checkpoints (`61c02c3`, `c8ed307aeb2ae1dee96d306
+  dda5a2b8f782e0956` — see prior entries for their exact contents; both unpushed).
+- Decisions added or changed: none — this session implements UI/demo/test surfaces against ADR-0013 exactly as
+  already decided; no ADR text changed.
+- Implementation completed:
+  - **Typed API client** (`apps/control-center/src/api.ts`): added `ContextStatus`/`ContextSummary`/
+    `ContextStatusReport`/`ContextEventWire`/`ContextHistoryReport`/`LabelOrigin`/`LatestDecision`/
+    `ContextExplainReport`/`ContextResetReport`/`ContextVerifyReport` types mirroring `context-guard/{types,cli}.ts`'s
+    actual validated response shapes exactly (never widened to `Record<string, unknown>`), and `api.contexts()`/
+    `context()`/`contextHistory()`/`contextExplain()`/`contextReset()`/`contextIntegrity()` methods — `contextReset`
+    is the only mutating call, requiring exact revision + reason, matching the server's own single mutation route.
+    Added an `ApiError` class (`message`, `status`) thrown by `get`/`post`/`postForResult` in place of a bare
+    `Error`, so callers can distinguish 404 ("not configured") from 409 ("stale") from a generic failure without
+    parsing message text — backward compatible (`instanceof Error` still true, `.message` unchanged) for every
+    pre-existing call site. `openEventStream()` gained an optional third `onContextEvent` parameter for the same
+    already-multiplexed SSE stream's `context_event` frames; existing callers passing only two arguments are
+    unaffected. Documented (doc comment, not a new test — see below) that a fresh SSE subscriber never receives
+    events published before it connected, matching the exact pre-existing `subscribers` array semantics in
+    `server.ts` (push-only, no replay buffer) — the UI is built to tolerate this by treating an SSE frame as a
+    "refetch now" signal, never as the sole source of state.
+  - **Context Guard page** (`apps/control-center/src/pages/ContextGuard.tsx`, new): overview stat grid (active/
+    closed/expired/reset counts, active-with-labels, pending-approval total), chain-integrity note, a bounded/
+    state-filterable context list (table on desktop, a stacked card list at ≤640px — see the narrow-layout defect
+    below), and a master/detail panel (mirrors `ToolIntegrity.tsx`'s list+review-panel pattern) showing lifecycle,
+    revision, labels, the correlation-not-causation limitation note (verbatim requirement, not paraphrased away),
+    label origins with links to originating audit events, a deny/require-approval escalation panel (zero-execution
+    wording shown only when the stored `call_evaluated` event's own `action` field supports it — deny is
+    structurally pre-downstream per ADR-0013 point 9, never asserted from UI copy alone), and the full transition
+    timeline (oldest-first, matching `context-guard/cli.ts`'s own stated ordering) rendered as a connected vertical
+    thread (border-line + colored dot per event kind), not a generic stepper. Reset is gated to `status === 'active'`
+    (matching `resetContext()`'s own server-side rejection of any other status), behind an explicit confirmation
+    dialog (not `window.confirm` — a real `role="dialog"` with the pending-approval-invalidation and memory-erase
+    warnings, exact-revision display, a required/bounded reason field, double-submit prevention via an in-flight
+    ref, Escape-to-close, and initial focus on the reason textarea) that on a 409 closes and shows a "state changed,
+    review again" banner rather than silently retrying. No reset-all/remove-label/mark-safe/force control exists
+    anywhere on the page (tested — see below). All display text (tool names, reasons, rule ids, labels) passes
+    through a `sanitizeText()` helper stripping the exact same C0-control-char class the CLI's own
+    `sanitizeForTerminal()` strips, bounding length with a truncation marker; React's own escaping (never
+    `dangerouslySetInnerHTML`) handles markup/script inertness. Added the nav item + `/context-guard` route in
+    `App.tsx`, with a `?context=` deep-link param other pages can navigate to.
+  - **Integration touches** (Part 3, deliberately scoped to what the actual data model safely supports — see
+    Known limitations): `Overview.tsx` gained a self-contained `ContextGuardSummaryCard` (own single fetch, renders
+    nothing if Context Guard is 404/unreachable) surfacing active-with-labels/pending-approval counts;
+    `Timeline.tsx` shows a small "context-escalated" badge/link when `decision.reason_code ===
+    'CONTEXT_GUARD_ESCALATION'` (a field the API already returns — zero new fetches); `Approvals.tsx` renders the
+    `context_id`/`context_revision`/`contextual_rule_id`/`tool_fingerprint` fields already present on `Approval`
+    (ADR-0013's binding fields) when non-null, linking to the new page; `EventDetail.tsx` shows the same
+    escalation note when applicable. Explicitly NOT built: a per-row "latest contextual effective action" column on
+    the context list (would require an N+1 `explain()` fetch per row — no bulk API returns it) and an Event-Detail
+    "which context is this?" back-link (no field on `AuditEvent` carries a context id — `ContextEvent.
+    source_event_id` only points the other direction). Both are named, not silently dropped.
+  - **Poisoned-result demo** (`examples/context-poisoning/demo.mjs`, new, plus `examples/context-poisoning/
+    fixtures/{constants,context-poisoning-fixture-server}.mjs`): the milestone's central executable proof,
+    structured exactly like `examples/tool-rug-pull/demo.mjs`/`examples/secret-exfiltration/demo.mjs` (numbered
+    PASS/FAIL `check()` helper, `finally`-block cleanup, `assertInsideTempDir()` safety gate, never
+    `process.exit()` before cleanup). No LLM is called anywhere — it manually issues the exact tool sequence a
+    compromised agent would issue after "reading" a synthetic indirect-prompt-injection support-ticket body
+    (`fixtures/constants.mjs`'s `TICKET_BODY`, containing `INJECTED_INSTRUCTION_PHRASE` =
+    `"IGNORE ALL PREVIOUS INSTRUCTIONS"`), and proves Context Guard blocks/gates the result from OBSERVED gateway
+    history alone. Two independent gateway connections/contexts against a shared database: connection A (deny-mode
+    contextual rule) proves revision-0/no-labels start, `fetch_ticket`→`untrusted_content`, `read_secret_fixture`→
+    `sensitive_data_accessed`, then two DENIED `send_webhook` attempts (fresh and repeated/cached-name) with the
+    downstream `send_webhook` call counter staying exactly 0 both times, then closes (context transitions to
+    `closed`). Connection B (require_approval-mode contextual rule) proves it does NOT inherit A's revision/labels
+    (fresh context, revision 0, no labels), then demonstrates the full approval lifecycle from
+    `context-guard-gateway-enforcement.test.ts`'s own proven pattern: a pending approval P1 bound to revision 1,
+    the context advanced to revision 2 by a concurrent call while P1 is still pending, approving P1 anyway still
+    fails on consumption-time revalidation (counter stays 0 — the stale-binding proof), a FRESH approval P2 bound
+    to the current revision executes successfully (counter becomes exactly 1), and a third attempt requires its
+    own fresh approval P3 (proving single-use) which is denied (counter stays 1). CLI evidence (`agentgate context
+    status/explain/history/verify`) is captured at each checkpoint and, together with every stored `context_events`
+    row read directly via `AuditStorage`, is asserted to never contain the synthetic secret
+    (`AKIAIOSFODNN7EXAMPLE`, the literal already allowlisted in `security.yml`'s scan) or the raw injected-
+    instruction phrase. A `CONTEXT_POISONING_INJECT_FAILURE=after-step-9` env var (zero effect unless explicitly
+    set) throws mid-run for the cleanup-proof test below. Wired into both CI build-test jobs (ubuntu, windows) in
+    `.github/workflows/ci.yml`, immediately after the tool-rug-pull demo step — README/demo-list documentation
+    integration is deferred to the closeout documentation pass per this turn's explicit scope.
+  - `packages/gateway/tests/context-poisoning-demo-cleanup.test.ts` (new): mirrors `tool-rug-pull-demo-
+    cleanup.test.ts` exactly — spawns the real demo script with the fault-injection env var set, asserts a
+    non-zero exit, the injected-failure message, no leftover `agentgate-context-poisoning-*` temp directory, and
+    neither gateway's control port still listening; a second test asserts the hook is a true no-op when unset.
+  - **Real browser verification** (Part 7): temporarily added `playwright` as a workspace devDependency (`pnpm add
+    -D playwright -w`, `npx playwright install chromium`) and two scratch scripts in the repo root (never
+    committed, deleted before this entry): one started a real production-built gateway (`context_guard: enforce`)
+    against the context-poisoning fixture, drove a real MCP client through the exact deny-path sequence, and kept
+    the connection open so the Control Center could be browsed against genuinely live state (plus a second,
+    already-closed context for list variety); the other used Playwright to navigate the real Vite dev server
+    (`pnpm run dev:control` equivalent, `VITE_CONTROL_URL`/`VITE_AGENTGATE_TOKEN` pointed at the live gateway, port
+    5173 — the Control API's CORS allowlist is hardcoded to 5173, same discovery as the Milestone 6 Phase F
+    session) at 1280×900 and 420×800, asserting zero console errors, zero failed/4xx/5xx requests, the reset
+    dialog's warnings, Escape-to-close, initial textarea focus, and — critically — that the raw injected-
+    instruction phrase, the synthetic secret, and the local auth token never appear anywhere in the rendered page
+    text. Captured `docs/assets/control-center-context-guard.png`, `-escalation.png`, and `-narrow.png`. Afterward:
+    killed the gateway and Vite dev server processes (confirmed via `Get-NetTCPConnection`/`Get-CimInstance` that
+    no process or listening port remained), removed every scratch temp directory, removed both temporary capture
+    scripts, and ran `pnpm remove playwright -w` — confirmed via byte-for-byte `diff` against pre-install backups
+    that `package.json` and `pnpm-lock.yaml` were restored to their exact prior state.
+- Defects found and fixed this session (with reasons):
+  1. **Narrow-viewport (~420px) clipping regression in the new Contexts list.** The initial implementation used
+     only the existing `<table className="data-table">` pattern; `.card`'s pre-existing `overflow: hidden` (a
+     deliberate, documented fix from an earlier milestone for a different clipping bug) silently hid the table's
+     rightmost columns at 420px with no way to reach them — a real regression against this turn's explicit
+     "intentional narrow reflow, not a squeezed desktop grid" requirement, caught by the Playwright narrow-viewport
+     screenshot itself, not by the component tests (jsdom doesn't lay out CSS, so this class of bug is invisible
+     to Vitest/RTL). Fixed by adding a genuinely separate, CSS-toggled stacked card list (`.cg-contexts-cards`,
+     shown only at `max-width: 640px` alongside `.cg-contexts-table { display: none }`) with full keyboard support
+     (`role="button"`, `tabIndex`, Enter/Space activation) — every field remains visible and reachable at narrow
+     width, nothing scroll-hidden. Two new component tests assert the card list's structure/data parity and that
+     Enter-key activation opens the same detail panel as a table-row click. Because both the table and the card
+     list render unconditionally in jsdom (media queries aren't evaluated there), every existing list-content
+     assertion (the `selectRow()` test helper plus several standalone list tests) had to be scoped to
+     `within(desktopTable())` to stay unambiguous — the same scoping pattern `ToolIntegrity.test.tsx` already used
+     for its own duplicate-fingerprint-prefix case, not a new pattern invented for this fix.
+  2. **Scratch capture script config bug (browser-verification tooling, never committed).** The first version of
+     the temporary gateway-setup script reused the SAME config (and therefore the SAME `control_port`/
+     `gateway_port`) for both the persistent connection and the short-lived "closed context" connection, causing
+     the second gateway process to always fail `EADDRINUSE` against the first, still-running one — reproduced
+     identically across three different port pairs before the actual cause (not a port-range or environment
+     issue) was found by bisecting with a bare `node cli.js start <config>` invocation outside the MCP client
+     wrapper. Fixed by giving the second connection its own config/port pair sharing only the same `db_path` (the
+     same two-config pattern `examples/context-poisoning/demo.mjs` itself already uses for contexts A/B). This
+     script was never part of any commit; noted here only because the defect and its diagnosis are real engineering
+     record, not because the file exists in the tree.
+  3. **Playwright `fullPage` screenshot silently omitted below-the-fold content.** The Control Center's app shell
+     is a fixed-height (`100vh`) grid whose `.main-content` region scrolls internally — the document `<body>`
+     itself never scrolls — so neither `page.screenshot({ fullPage: true })` nor an element-level screenshot of
+     the `overflow: auto` region reliably captured the full escalation panel/timeline (both approaches returned
+     only the initial viewport's content). Fixed in the scratch capture script (not application code — this is a
+     screenshot-tooling detail, not a product bug) by measuring `.main-content`'s real `scrollHeight` and
+     temporarily growing the Playwright viewport to fit it before capturing.
+- Files materially changed: `apps/control-center/src/{api.ts,App.tsx,index.css}` (extended, not rewritten),
+  `apps/control-center/src/pages/ContextGuard.tsx` (new), `apps/control-center/src/pages/{Approvals,Timeline,
+  Overview,EventDetail}.tsx` (small, additive integration touches), `apps/control-center/src/pages/
+  {ContextGuard,Approvals}.test.tsx` (new), `examples/context-poisoning/{demo.mjs,fixtures/constants.mjs,
+  fixtures/context-poisoning-fixture-server.mjs}` (new), `packages/gateway/tests/context-poisoning-demo-
+  cleanup.test.ts` (new), `.github/workflows/ci.yml` (one new step in each of the two build-test jobs), `docs/
+  assets/control-center-context-guard{,-escalation,-narrow}.png` (new), `docs/AI_DECISIONS.md` (this entry).
+- Tests added and exact counts: `ContextGuard.test.tsx` 53 (loading/unavailable/error/empty states; overview
+  stats incl. truncation and chain-integrity verified/FAILED/unreachable; list rendering incl. state-filter
+  refetch, row selection, deep-link, and the new narrow-card-list parity/keyboard-activation pair; detail
+  lifecycle/correlation-note/reset-availability-per-status; escalation display for deny/require_approval/allow/
+  never-evaluated; label origins; transition timeline ordering/chain-invalid/truncated/empty; the full reset flow
+  incl. exact-revision submission, 409 handling, double-submit prevention, Escape, focus, and the
+  no-broad-controls check; SSE refetch-once/duplicate-idempotent/reconnect-indicator/unmount-cleanup; hostile
+  HTML/Markdown/ANSI/secret/long-value handling; accessible-name coverage). `Approvals.test.tsx` 5 (new — covers
+  only this session's added Context Guard binding fields; the pre-existing approve/deny flow had no test file
+  before this session and is unchanged/untested, same as before). `context-poisoning-demo-cleanup.test.ts` 2.
+  Control Center suite: **105 passed, 4 files, 0 failed** (baseline 47 + 53 + 5), run repeatedly with no
+  flakiness observed. Gateway suite: **466 passed, 2 skipped, 40 files, 0 failed** (baseline 464 + 2), run twice,
+  byte-identical both times. Full workspace: policy 52/52, control-center 105/105, gateway 466/2-skipped —
+  **623 tests total, 0 failed**. Build: clean (5/5 packages incl. control-center). Lint: 0 errors, the same 2
+  pre-existing `no-explicit-any` warnings as every prior session. Demo: 3 consecutive runs, **58 PASS / 0 FAIL
+  every time**, exit code 0 each time. Injected-failure cleanup test: passes (non-zero exit, injected-failure
+  message present, no leftover temp dir, neither control port still listening); the "hook is a no-op when unset"
+  sanity test also passes. `git diff --check`: clean (CRLF notices only, matching every prior session). Tracked/
+  new-file secret scan: clean. Packed-install verification (unchanged from the prior session's 15 checks): all
+  PASS. Screenshot privacy scan (`strings`-based, plus direct visual review): no username/local path/token/raw
+  secret/raw injected-instruction text found in any of the three captured PNGs. Process/port/temp residue check
+  after cleanup: clean (`Get-NetTCPConnection`/`Get-CimInstance` confirmed no gateway or Vite process/port
+  remained; no leftover `agentgate-context-poisoning-*` or scratch-capture temp directory).
+- Public security behavior preserved/added: no gateway-side enforcement code changed this session (Context Guard's
+  actual decision logic, storage, migrations, and Control API routes are exactly what `61c02c3`/`c8ed307` already
+  committed) — this session is UI/demo/test surface only. The new UI adds no new mutation capability beyond the
+  single, already-existing exact-revision/reason reset route; every new display surface treats tool names/reasons/
+  labels/server identity as untrusted text (React escaping only, `sanitizeText()` control-character stripping,
+  bounded length) and never renders raw arguments/results/secrets/tokens/paths, verified both by targeted
+  component tests and by the live-browser hostile-content assertions (the demo's own real injected-instruction
+  ticket body and synthetic secret, actually present in the live database, were confirmed absent from the
+  rendered page).
+- Known limitations / follow-up risk: the context list's per-row "latest contextual effective action" and the
+  Event-Detail→Context-Guard back-link were deliberately not built (see Implementation completed) — the current
+  API/data model doesn't support either without an N+1 fetch pattern or a new backend field, and this session's
+  scope was UI/demo, not further gateway API changes. The pre-existing SSE "fresh subscriber does not replay
+  prior events" property still has no dedicated low-level gateway test (unchanged gap from the prior session —
+  see that entry's defect #3; a fresh attempt at a lower-level, non-HTTP test was considered again this session
+  and set aside for the same reason: the underlying `subscribers` push-only array in `server.ts` is unexported/
+  private to `startGateway()`, so a real test would require either a risky refactor of core gateway wiring — out
+  of scope for a UI/demo-focused turn — or duplicating the mechanism, which is worse than the documented gap).
+  The Approvals page's pre-existing approve/deny flow (not touched this session beyond the new binding-field
+  display) still has no test coverage of its own — only the newly-added fields are tested. README/ARCHITECTURE/
+  THREAT_MODEL/DEVELOPMENT documentation integration, a Graphify re-index, and a clean-clone verification are all
+  still outstanding, explicitly deferred to the closeout phase per this turn's scope.
+- Current Git state at the time of this entry: branch `main`, local HEAD still `c8ed307311d6730b7410ef11fc8ff317f
+  4f80773` (this session's Control Center/demo/test work is verified but not yet committed as of this ledger
+  entry — the commits containing it are created immediately after, per the standard "ADR/ledger before commit"
+  ordering this project follows); `origin/main` unchanged at `2e959e3121e542ea01a4d5f6ba28424a647cb865`; only
+  `.claude/`/`CLAUDE.md` untracked beyond the intended changes; the temporary `playwright` devDependency and both
+  scratch capture scripts were fully removed before this entry, confirmed byte-for-byte against pre-install
+  backups.
+- Unresolved questions: none blocking.
+- Exact next action: stage the Control Center/demo/test/CI/doc/screenshot files listed above (excluding
+  `.claude/`, `CLAUDE.md`, `graphify-out/`, and any runtime DB/token/log), run a final staged-diff check and
+  secret scan, and create local checkpoint commits — not pushed, per this turn's explicit scope stop.
