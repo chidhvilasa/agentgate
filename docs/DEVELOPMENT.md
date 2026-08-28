@@ -78,18 +78,22 @@ node examples/secret-exfiltration/demo.mjs        # attack demo, inbound: secret
 node examples/downstream-secret-result/demo.mjs   # attack demo, outbound: secret in a downstream result AND error message
 node examples/policy-drift-replay/demo.mjs        # Safe Replay demo: policy drift detection, no execution (ADR-0010)
 node examples/tool-rug-pull/demo.mjs              # Tool Integrity demo: rug-pull detected, quarantined, and blocked (ADR-0012)
+node examples/context-poisoning/demo.mjs          # Context Guard demo: cross-tool prompt-injection chain blocked (ADR-0013)
 ```
 
-All four are safe to run repeatedly and from any working directory: each writes its config, mock/fixture
+All five are safe to run repeatedly and from any working directory: each writes its config, mock/fixture
 downstream server, and SQLite database into its own unique `os.tmpdir()` directory (never the repo root), closes
 every connection and child process it opens, and removes the temp directory in a `finally` block on both success
-and failure. All four use only well-known placeholder credentials (`AKIAIOSFODNN7EXAMPLE`) — never a real one.
-The third and fourth demos are not attack demos in the "malicious input blocked" sense: the third proves Safe
-Replay's policy-drift and no-execution behavior against a real historical event; the fourth proves a downstream
-server's tool DEFINITION (not a single malicious call) changing after being trusted is detected, quarantined, and
-blocked before the downstream server is contacted again — see `RUG_PULL_INJECT_FAILURE` in the script itself
-(and `packages/gateway/tests/tool-rug-pull-demo-cleanup.test.ts`) for how its `finally` cleanup is proven with a
-deterministic injected mid-run failure, not merely inspected by eye.
+and failure. All five use only well-known placeholder credentials (`AKIAIOSFODNN7EXAMPLE`) — never a real one.
+The third, fourth, and fifth demos are not attack demos in the "malicious input blocked" sense alone: the third
+proves Safe Replay's policy-drift and no-execution behavior against a real historical event; the fourth proves a
+downstream server's tool DEFINITION (not a single malicious call) changing after being trusted is detected,
+quarantined, and blocked before the downstream server is contacted again; the fifth proves a cross-tool SEQUENCE
+of individually-legal-looking calls is blocked/gated from observed gateway history alone, with no LLM involved
+anywhere in the script. Each demo's own `*_INJECT_FAILURE` env var (`RUG_PULL_INJECT_FAILURE`,
+`CONTEXT_POISONING_INJECT_FAILURE`, etc. — see the script itself and its matching `*-demo-cleanup.test.ts`) proves
+that demo's `finally` cleanup runs on a real injected mid-run failure, not merely inspected by eye. Never set any
+of these env vars in a normal run — they are zero-effect no-ops unless explicitly set.
 
 ## Configuring output security
 
@@ -209,6 +213,88 @@ node packages/gateway/dist/cli.js tools history --config agentgate.yml
 - Try `node examples/tool-rug-pull/demo.mjs` for a full, real, end-to-end walkthrough (trust → rug-pull →
   rescan → diff → block → reject → distinct benign update trusted).
 
+## Using Context Guard locally
+
+`agentgate context <status|history|explain|reset|verify> [--config <path>]` (ADR-0013) operates against the same
+database a running (or previously-run) gateway uses — every subcommand except `reset` is strictly read-only and
+never starts a downstream server, discovers tools, or executes anything.
+
+```sh
+# Add context_guard: { mode: enforce, tools: {...}, rules: [...] } to your config first — see
+# docs/POLICY_REFERENCE.md#context-guard for the exact schema. agentgate init does not currently generate this
+# block for new projects, unlike tool_integrity.
+node packages/gateway/dist/cli.js context status --config agentgate.yml --json
+node packages/gateway/dist/cli.js context history <context-id> --config agentgate.yml
+node packages/gateway/dist/cli.js context explain <context-id> --config agentgate.yml
+node packages/gateway/dist/cli.js context reset   <context-id> --revision <n> --reason "<text>" --config agentgate.yml
+node packages/gateway/dist/cli.js context verify  --config agentgate.yml
+```
+
+- `<context-id>` and `--revision <n>` both come from `context status`/`context explain` output — never type these
+  by hand from memory; `reset` requires the EXACT current revision or fails closed with a stale-revision error.
+- Try `node examples/context-poisoning/demo.mjs` for a full, real, end-to-end walkthrough of both the deny and
+  require-approval paths, including the CLI evidence gathering (`context status`/`explain`/`history`/`verify`).
+
+### Adding a new policy-owned label or effect safely
+
+1. Add the tool's `effects`/`adds_on_result` to your `context_guard.tools.<name>` config block — never to code.
+   There is no built-in taxonomy beyond `BUILTIN_CONTEXT_LABELS`/`BUILTIN_EFFECT_LABELS`
+   (`packages/gateway/src/config/registry.ts`); a genuinely new *kind* of label (not just a new tool using an
+   existing one) goes in `context_guard.labels` in your own config, never as a code change, unless you are adding
+   to the built-in vocabulary itself (rare — most new labels should be operator-config, not code).
+2. If you ARE extending the built-in vocabulary in code, add the string to `BUILTIN_CONTEXT_LABELS` (a source
+   label — what a *result* may have exposed the agent to) or `BUILTIN_EFFECT_LABELS` (an effect label — what a
+   *call itself* does), never both, and update the label-vocabulary table in
+   [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md#context-guard) in the same change.
+3. **Transition timing is not configurable — it is a fixed pipeline invariant.** `adds_on_result` labels are
+   appended only when `finalStatus === 'SUCCEEDED' && !resultBlocked` (`pipeline.ts` step 8) — never add a code
+   path that appends labels on a DENY/CANCEL/EXPIRE/FAIL/blocked-result outcome; a redacted-but-delivered result
+   is the one documented case that still adds labels (content beyond the redacted pattern still reached the
+   agent). Add a case to `packages/gateway/tests/context-guard-interactions.test.ts` for any new outcome
+   combination you touch.
+4. Add a case to `packages/gateway/tests/context-guard-rules.test.ts` for a new `when` operator, and to
+   `packages/gateway/tests/docs-context-guard-examples.test.ts` if you change a *published* config example.
+
+### Writing a context migration test
+
+Follow the exact same pattern `context-guard-storage-migration.test.ts` and
+`tool-integrity-storage-migration.test.ts` already use: pin an EXACT NAMED migration version from
+`MIGRATION_VERSIONS` (`storage.ts`) — e.g. `MIGRATION_VERSIONS.CONTEXT_GUARD` — never assume "the highest recorded
+version" identifies any one specific migration, since a later milestone will add more entries to `MIGRATIONS`. If
+you add a new hash-chained field to `context_events`, follow the same rule every other chain in this project
+follows: bump a `canonical_payload_version`-style version marker for new writes, never change what an existing
+version means, and append the new migration as the LAST entry in `MIGRATIONS` (inserting one earlier silently
+renumbers every migration after it and causes an already-upgraded database to skip the new one entirely).
+
+### Avoiding raw content in Context Guard state
+
+`context_events`/`context_state` must never gain a column or code path that stores raw tool arguments, raw tool
+results, or any prompt-injection text — only label names (bounded, policy vocabulary), rule ids, safe/bounded
+`reason` strings, and already-redacted `source_event_id` linkage. If you add a new field, ask whether it could
+ever contain untrusted free text; if so, either don't store it, or route it through the same bounded/sanitized
+pattern the reviewer/reason fields already use, and add a hostile-content test (`context-guard-cli.test.ts`'s
+ANSI-stripping cases, or `ContextGuard.test.tsx`'s hostile-content describe block, whichever surface you touched).
+
+### Preserving exact approval binding
+
+If you touch `context-guard/enforcement.ts`'s `checkApprovalContextValid()` or `pipeline.ts`'s approval-creation
+call site, preserve the exact contract: every binding field (`context_id`, `context_revision`, `argument_digest`,
+`tool_fingerprint`, `contextual_rule_id`) is read FRESH at consumption time, never reused from creation time, and
+a `null` field skips only that specific check rather than short-circuiting the others. Add a case to
+`packages/gateway/tests/context-guard-fingerprint-binding.test.ts` (pipeline-level) or
+`context-guard-fingerprint-gateway.test.ts` (real gateway) for any new binding/revalidation path.
+
+### Adding a new SSE event without duplicates or unsafe payloads
+
+Context Guard's `context_event` frames reuse the exact same `subscribers` array / `ctx.emitEvent` bus
+`audit_event`/`Approval` traffic already used — never create a second, parallel event stream. Publish a NEW event
+type from exactly one call site (mirror `pipeline.ts` step 4.5/8's `call_evaluated`/`label_added` emission, or
+`transport/stdio.ts`'s `context_closed`/`context_expired` publication, which is guarded against re-publishing on
+the idempotent no-op close path), and only after the corresponding storage write has already completed — a
+subscriber must never observe an event for a state that isn't yet durably persisted. Never widen a payload beyond
+what `context_events` itself stores (see "Avoiding raw content" above) — the SSE payload and the stored row
+should be the same safe, bounded shape.
+
 ## Adding a policy rule
 
 1. Add the rule to `policies/agentgate.example.yml` (or your own policy file).
@@ -305,6 +391,7 @@ node examples/secret-exfiltration/demo.mjs
 node examples/downstream-secret-result/demo.mjs
 node examples/policy-drift-replay/demo.mjs
 node examples/tool-rug-pull/demo.mjs
+node examples/context-poisoning/demo.mjs
 node scripts/verify-packed-install.mjs
 node packages/gateway/dist/cli.js smoke-test
 git diff --check

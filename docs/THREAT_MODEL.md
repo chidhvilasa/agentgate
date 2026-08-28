@@ -153,6 +153,153 @@ independently).
   security-irrelevant change, e.g. a typo fix in a description, still produces drift requiring review in an
   enforcing mode).
 
+## Context Guard: cross-tool escalation defense (ADR-0013)
+
+**Threat: indirect prompt injection through a stable, trusted tool's own output.** A tool the operator already
+trusts (a ticket reader, a web-page fetcher, a file reader) is not compromised or drifted at all — its *result*
+simply contains attacker-controlled text that a later, individually-legal call obeys. This is distinct from
+[Indirect prompt injection](#indirect-prompt-injection) above, which is about AgentGate not detecting injected
+*intent*; this section is about the specific cross-tool *sequence* pattern OWASP's MCP guidance calls "confused
+deputy" / cross-tool escalation, and how AgentGate's own gateway-observed history can still catch the pattern
+even without ever inspecting the injected text itself.
+
+**Threat: confused deputy — sensitive-read + untrusted-content + external-communication sequence.** An agent
+reads untrusted content (tool A), is steered by it to read sensitive data (tool B), then exfiltrates it via a
+third, unrelated-looking call (tool C) — each individually policy-legal.
+
+**Mitigation implemented:** operator config classifies a tool's *result* as adding conservative risk labels to
+the current execution context (`context_guard.tools.<name>.adds_on_result`) and a tool's *call* as declaring
+effect labels (`.effects`) checked against the context's accumulated labels before the call is allowed
+(`context_guard.rules`, first-match, strictest-wins merge with base policy — see
+[`docs/ARCHITECTURE.md`](ARCHITECTURE.md#context-guard-adr-0013) for the exact evaluation order). This is
+enforced in the real gateway request path, not a UI warning — proven end-to-end by
+`packages/gateway/tests/context-guard-gateway-enforcement.test.ts` (a real compiled gateway, a real MCP client)
+and `examples/context-poisoning/demo.mjs` (a realistic synthetic ticket body containing an indirect-prompt-
+injection instruction, with the downstream fixture's own external-send call counter proving zero contact for the
+denied attempt).
+
+**Threat: direct/cached-name bypass.** An agent (or a client caching an old tool list) attempts the risky call by
+name directly, without ever calling `tools/list` again, hoping contextual enforcement only applies to calls
+discovered through the "normal" path. **Mitigation implemented:** Context Guard evaluation happens at the
+`tools/call` dispatch point itself (`transport/stdio.ts` → `pipeline.ts`), identically regardless of whether the
+tool name came from a fresh `tools/list` or a client's own cache — there is no discovery-time-only enforcement
+path to bypass. Verified by the same gateway-enforcement test above, which calls `send_webhook` directly by name
+without ever listing tools on that connection.
+
+**Threat: approval replay, argument substitution, and context-revision race.** A human approves a contextually-
+gated call, but between the approval's creation and its consumption: (a) the context has since accumulated more
+risk (a concurrent call advanced the revision), (b) the call's arguments were changed after approval was granted,
+or (c) the downstream tool's trusted definition drifted or was quarantined. **Mitigation implemented:**
+`checkApprovalContextValid()` re-reads context/argument/tool-fingerprint state *fresh* immediately before
+downstream execution — not merely at approval-creation time — and fails closed on any mismatch, even though the
+approval record itself already shows `APPROVED`. Proven by
+`packages/gateway/tests/context-guard-fingerprint-binding.test.ts` (fingerprint drift/quarantine cases) and the
+`context-guard-gateway-enforcement.test.ts`/`examples/context-poisoning/demo.mjs` stale-revision cases (a
+concurrent call advances the context while an approval is pending; approving it anyway still fails on
+revalidation, with the downstream call counter staying exactly 0). A `null` bound field (nothing was bound at
+approval-creation time — e.g. no trusted Tool Integrity definition existed yet) skips only that specific check; a
+binding that was never made cannot be violated, which is a legitimate "not bound" state, not a gap.
+
+**Threat: base-policy change between contextual-rule evaluation and execution.** Not a distinct new risk beyond
+what the base policy engine already accepts — policy is re-loaded and re-evaluated on every call, same as
+without Context Guard; there is no cached decision that could go stale across a policy edit.
+
+**Threat: context-reset abuse — using reset to "wash away" accumulated risk.** An operator or compromised local
+process resets a context specifically to erase labels that would otherwise block a later call. **Mitigation
+implemented:** reset requires the *exact* current revision (a stale reset request is rejected outright, so it
+cannot be issued blind against "whatever the current state happens to be") and a mandatory, non-empty,
+reviewer-attributed reason — both recorded permanently in the append-only history, which is never itself deleted
+by a reset. Reset also does not retroactively change any decision already made; it only affects labels going
+forward. **Deferred:** any client holding the Control API token can reset any active context — there is no
+per-agent or finer-grained authorization for who may reset, the same single-shared-local-token model the rest of
+the Control API uses (see [Approval replay and scope confusion](#approval-replay-and-scope-confusion) above).
+
+**Threat: corrupted, deleted, or reordered context history.** An attacker with database access tries to alter
+stored context transitions without detection. **Mitigation implemented:** `context_events` is hash-chained
+exactly like the audit and Tool Integrity chains; `verifyContextChain()` independently re-walks it, detecting
+tampering (hash mismatch), deleted rows (sequence gap), and reordered rows (broken hash link). Same caveat as
+every other chain in this document: local tamper *evidence*, not tamper-*proof* — see
+[Database replacement](#database-replacement-by-a-local-administrator) below.
+
+**Threat: hostile content through the Context Guard CLI, API, UI, or SSE stream.** A tool name, contextual rule
+reason, or reviewer-supplied reset reason is attacker- or operator-influenced text rendered across four different
+surfaces. **Mitigation implemented:** only label names (bounded, policy vocabulary), rule ids, safe/bounded
+reason strings, and already-redacted `source_event_id` linkage are ever stored in `context_events`/
+`context_state` in the first place — raw tool arguments, raw tool results, and any prompt-injection text are
+never written by any Context Guard code path, so there is nothing hostile to leak through these surfaces beyond a
+tool *name* or a *reason* string. The CLI strips C0 control characters/DEL (`sanitizeForTerminal()`) before
+printing either; the Control Center renders all such text through React's own escaping only (never
+`dangerouslySetInnerHTML`), with the same control-character stripping applied at the display boundary. Verified
+by `apps/control-center/src/pages/ContextGuard.test.tsx`'s hostile-content cases (HTML/script, Markdown/
+prompt-injection phrasing, ANSI escapes — all rendered as inert text, zero `<script>` elements created) and
+`context-poisoning/demo.mjs`'s own safety-sweep assertions (the synthetic secret and the raw injected-instruction
+phrase never appear in any CLI/API output or stored row).
+
+**Threat: concurrent or out-of-order calls interleaving contextual state.** Two calls issued close together on
+the same context could, in principle, race: one call's contextual evaluation reading state that a different,
+still-finishing call is about to change. **Mitigation implemented:** within one Node.js process, better-sqlite3
+is synchronous and every individual state-transition function (`appendContextLabels`, `recordCallEvaluation`,
+`resetContext`, `closeOrExpireContext`) contains no `await` between its read of current state and its write, so
+JavaScript's single-threaded execution model already prevents same-process code from interleaving and corrupting
+one transition; two *different* concurrent calls each independently read current context state fresh at their
+own evaluation point, never a cached/shared value. **Deferred / residual:** a genuine cross-request race remains
+between one call's contextual evaluation and a *different*, concurrently-finishing call's label-append — the
+exact-revision approval-binding mechanism above closes this specifically for human-approval consumption, not for
+every possible interleaving; this is a named, explicit limitation, not hidden.
+
+**Threat: gateway restart or reconnect used to evade accumulated context.** An attacker (or a compromised agent)
+deliberately triggers a reconnect specifically to shed accumulated risk labels. **This is a real, permanent
+limitation, not a bug in this milestone**: a new gateway process launch always creates a brand-new context — there
+is no cross-restart persistence, and no reliable client-supplied session identifier exists at the legacy-2025
+stdio protocol boundary (ADR-0005) to key persistence on even if it were implemented. A real attack sequence that
+spans a restart is genuinely not detected by Context Guard. Persisting context across restarts was considered and
+rejected (see ADR-0013's Alternatives) — a restored-but-stale context would reintroduce exactly the kind of
+unverifiable persistence this design otherwise avoids.
+
+**Threat: covert or alternate exfiltration channels not modeled by declared tool effects.** An operator declares
+`send_webhook` as the only `external_communication`-effect tool, but the downstream server or agent has some
+other, undeclared way to move data out (a different tool the operator forgot to classify, a side channel outside
+the MCP tool-call interface entirely). **Not mitigated, by design and by necessity:** Context Guard only ever
+evaluates what operator config declares — it cannot discover or infer a covert channel the operator never told it
+about, and it does not sandbox downstream servers or the agent process in any way (same non-goal as the rest of
+this document — see [Non-goals](#non-goals)).
+
+**Threat: operator misclassification or missing labels.** The single most important dependency of this whole
+defense: if an operator fails to declare a genuinely sensitive tool's `adds_on_result`/`effects` correctly, or
+omits a contextual rule that should exist, Context Guard simply has nothing to act on for that gap — it does not
+infer risk from tool names, descriptions, or MCP annotations (see below). This is not a bug to fix in code; it is
+the fundamental shape of an operator-declared-policy system, stated plainly rather than implied away.
+
+**Threat: `monitor` mode (the default) providing a false sense of protection.** Identical in kind to Tool
+Integrity's own `monitor`-mode caveat (ADR-0012): `context_guard.mode` defaults to `monitor` when the section is
+omitted entirely, for backwards compatibility with configs written before this milestone. In `monitor` mode,
+contextual rules are still evaluated and every decision is still recorded in history, but the result never
+actually blocks or escalates a call — reporting only, never protection. An operator must explicitly set
+`mode: enforce` to get real enforcement. See [`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md#context-guard) for
+the one-line migration.
+
+**Threat: a contextual approval bound to no trusted tool definition (`tool_fingerprint: null`).** A tool that has
+never been scanned by Tool Integrity (or Tool Integrity is `disabled`) has no trusted fingerprint to bind an
+approval to. **Documented compatibility behavior, not a silent gap:** the binding field is `null` in this case,
+and `checkApprovalContextValid()` skips only that specific sub-check — the context-revision and argument-digest
+checks still apply in full. This is the same `null`-means-"not bound" pattern already used for a pre-Milestone-7
+approval; a binding that was never made cannot be violated. Operators who want the fingerprint check to actually
+apply must run Tool Integrity in `explicit`/`tofu` mode (see [Tool-definition poisoning](#tool-definition-
+poisoning-rug-pull-adr-0012) above).
+
+**Threat: SSE subscriber/reconnect assumptions.** A Control Center tab that reconnects to the live event stream
+might assume it receives every transition that occurred while disconnected. **Actual behavior, stated plainly:**
+the underlying event bus (`server.ts`'s `subscribers` array, unchanged pre-existing plumbing this milestone reuses
+for `context_event` frames too) never replays history to a fresh subscriber — it only pushes events published
+*after* a listener registers. The Control Center's Context Guard page is built to tolerate this: it always treats
+an SSE frame as a "refetch current state now" signal, reconciling by re-fetching the authoritative REST state
+rather than trying to reconstruct history from a stream that makes no replay guarantee. **Known gap:** this
+specific "no historical replay" property has no dedicated low-level automated test in this codebase — a real
+attempt at a real-fetch-based SSE test proved unreliable in this environment (removed rather than shipped flaky)
+and a lower-level unit test would require either refactoring `server.ts`'s currently-private subscriber wiring or
+duplicating it, both rejected as worse than the documented gap; the underlying mechanism itself is unmodified,
+pre-existing code that `audit_event`/`Approval` traffic already relied on before this milestone.
+
 ## Path traversal and normalization mismatch
 
 **Threat:** an agent supplies a path like `../../etc/passwd` or a Windows-style path that evades a naive string
@@ -469,6 +616,13 @@ port between the check and a later `agentgate start`, same as any such check in 
   accept/reject with stale-review protection; append-only, hash-chained registry history verified alongside the
   audit chain; bounded, safe, field-level drift diff with hostile-content handling; fail-closed on scan failure,
   malformed/oversized/duplicate definitions, or an unknown tool.
+- **Context Guard** (ADR-0013, Milestone 7): operator-owned, conservative risk labels attached to the current
+  local execution context based on observed tool results, checked against a later call's own declared effects
+  before it is allowed — enforced in the real gateway request path (including a direct/cached-name call, not only
+  calls discovered via `tools/list`), monotonic/escalate-only merge with base policy, exact-revision/argument/
+  tool-fingerprint approval binding re-validated fresh immediately before execution, append-only hash-chained
+  history verified independently of the audit chain, and exact-revision/reviewer-attributed reset that
+  invalidates every pending contextual approval bound to the reset context.
 
 ## Mitigations deferred (summary)
 
@@ -492,6 +646,12 @@ port between the check and a later `agentgate start`, same as any such check in 
 - Tool Integrity's `monitor` mode (the default when `tool_integrity` is omitted) provides no blocking protection;
   scan-to-call TOCTOU is not fully eliminated; there is no `notifications/tools/list_changed` handling — see
   [Tool-definition poisoning](#tool-definition-poisoning-rug-pull-adr-0012) above.
+- Context Guard's `monitor` mode (the default when `context_guard` is omitted) provides no blocking protection;
+  context does not persist across a gateway restart/reconnect, so a restart-spanning attack sequence is not
+  detected; TTL-based expiry exists in the schema but is not yet actively scheduled; a residual cross-request race
+  between one call's contextual evaluation and a different, concurrently-finishing call's label-append is not
+  fully eliminated; the SSE "fresh subscriber does not replay prior events" property has no dedicated low-level
+  automated test — see [Context Guard](#context-guard-cross-tool-escalation-defense-adr-0013) above.
 
 ## Non-goals
 
@@ -515,3 +675,12 @@ port between the check and a later `agentgate start`, same as any such check in 
   of runtime behavior, or supply-chain security of any kind** (ADR-0012). Tool Integrity fingerprints are local
   hashes proving definition equality over time, not a substitute for any of these — see
   [Tool-definition poisoning](#tool-definition-poisoning-rug-pull-adr-0012) above.
+- **Model-reasoning inspection, causal proof, or information-flow/taint tracking of any kind** (ADR-0013). Context
+  Guard never reads, inspects, or reasons about the upstream LLM's prompts, completions, chain-of-thought, or any
+  model-internal state — it only observes the MCP `tools/call` requests and results that actually cross the
+  gateway. A label is a policy assertion triggered by an observed gateway event, never a claim that an injection
+  actually happened, that the model "read" or "acted on" anything, or that one call causally caused a later one.
+  One stdio connection/process is not guaranteed to correspond to exactly one upstream model conversation. A
+  context reset is entirely local, gateway-side state and has no effect whatsoever on what the upstream LLM or
+  MCP client itself remembers from before the reset. See
+  [Context Guard](#context-guard-cross-tool-escalation-defense-adr-0013) above.

@@ -95,6 +95,134 @@ that tool — either it drifted again since you last checked, or you copy-pasted
 id/fingerprint, then retry. This is deliberate fail-closed behavior (ADR-0012), not a bug — accepting a stale
 fingerprint could otherwise silently trust a definition different from the one you actually reviewed.
 
+## The Context Guard page/CLI says "not configured" (404)
+
+Your gateway config has no `context_guard` section, or it's present but the Control API route returned 404 —
+Context Guard routes are gated behind the same optional-config pattern as Tool Integrity: absent config means the
+route simply doesn't exist (404), not an error. Add a `context_guard:` block to your `agentgate.yml` — see
+[`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md#context-guard) for the exact schema — and restart the gateway.
+An omitted `context_guard` section is NOT the same as `mode: disabled`: it defaults to `mode: monitor` internally
+(context tracking happens, but nothing blocks), it's specifically the Control API/CLI/UI surfaces that 404 when
+the config key is missing entirely, as a UI-availability signal, not an enforcement signal.
+
+## A tool call is denied or requires approval because of Context Guard
+
+Look at the block/pending message and, if you have Context Guard `enforce`d, run
+`agentgate context explain <context-id> --config agentgate.yml` — it reports the currently active labels, what
+established each one, and the latest stored contextual decision (never a fabricated one). Common, non-bug causes:
+
+- **Labels you didn't expect are active.** Some earlier call in this same session added them — `context explain`
+  names the exact tool and (where available) the linked audit event. Remember labels only ever accumulate within
+  one context; they never clear themselves.
+- **A contextual rule you forgot about is matching.** Check `context_guard.rules` in your config against the
+  `rule_id` reported in the block message / `context explain` output.
+- **You expected `monitor` mode (reporting only) but the call was actually blocked.** Check `context_guard.mode`
+  — only `enforce` mode actually blocks or gates calls; `monitor` records what *would* have happened but never
+  interferes. If you don't want blocking behavior yet, set `mode: monitor` (or omit the section entirely, which
+  defaults to `monitor`).
+
+If this is unexpected and you don't want this defense right now, set `context_guard: { mode: monitor }`
+(reporting only — the same default as an omitted section) or `mode: disabled` — see
+[`docs/POLICY_REFERENCE.md`](POLICY_REFERENCE.md#context-guard).
+
+## Missing labels — a tool's risky result never seems to add a context label
+
+Check that the tool name in `context_guard.tools.<name>.adds_on_result` EXACTLY matches the tool name as called
+(the same name-matching AgentGate uses everywhere else — no fuzzy matching). Also confirm the call actually
+`SUCCEEDED` with a non-blocked result: a denied, cancelled, expired, failed, or fully output-security-blocked
+call never adds labels, by design (ADR-0013) — nothing the label would describe actually reached the agent in
+those cases. A redacted-but-still-delivered result DOES still add its configured labels. If every label in
+`adds_on_result` was already active before the call, this is correctly a no-op (no new history event) — check
+`context history <context-id>` to confirm whether the label was already present from an earlier call.
+
+## `agentgate context reset` fails with a stale-revision error (409)
+
+The `--revision` you passed no longer matches the context's CURRENT revision — either it accumulated more risk
+(a new label was added) since you last checked, or you copy-pasted an old value. Re-run
+`agentgate context status --config agentgate.yml --json` (or `context explain <id>`) to get the CURRENT exact
+revision, review the context's current state again, then retry. This is deliberate fail-closed behavior
+(ADR-0013), not a bug — accepting a stale revision could otherwise silently reset a context whose risk state you
+never actually reviewed.
+
+## A contextual (require_approval) approval fails even after a human approved it
+
+This is expected, documented behavior, not a bug: `checkApprovalContextValid()` re-validates the approval's exact
+binding (context revision, redacted-argument digest, and — where a trusted Tool Integrity definition exists —
+tool fingerprint) *fresh*, immediately before execution, even though the approval record itself already shows
+`APPROVED`. If the context accumulated more risk, the arguments changed, or the tool's trusted definition drifted
+or was quarantined in the window between approval creation and the human's decision, execution is refused and a
+FRESH approval (bound to current state) is required — see
+[`docs/ARCHITECTURE.md`](ARCHITECTURE.md#context-guard-adr-0013) for the exact mechanism. There is no way to
+force an approval through this revalidation.
+
+## A contextual approval's tool-fingerprint binding is `null` — is that a bug?
+
+No — a `null` `tool_fingerprint` on a contextual approval means no trusted Tool Integrity definition existed for
+that tool at the moment the approval was created (the tool was never scanned, is still `pending_review`, or Tool
+Integrity is `disabled`). This is a legitimate "not bound" state, identical in kind to a pre-Milestone-7
+approval's `null` context-binding fields — a binding that was never made cannot be violated, so
+`checkApprovalContextValid()` simply skips that one sub-check while still enforcing the context-revision and
+argument-digest checks. If you want the fingerprint check to actually apply, run Tool Integrity in `explicit`/
+`tofu` mode and trust the tool first.
+
+## `agentgate context verify` reports a broken chain, or a context "integrity failure" shows in the Control Center
+
+Same tamper-*evidence*-not-tamper-*proof* model as `agentgate audit verify` (see
+[`agentgate audit verify` reports a broken chain](#agentgate-audit-verify-reports-a-broken-chain) above) — a
+sequence gap, hash mismatch, or missing data in `context_events` means that table was modified outside
+AgentGate's own append-only write path, or is corrupted. The context chain and the audit chain are stored and
+verified completely independently; one can be broken while the other is valid. There is no way to "repair" a
+broken chain — if you deliberately want a fresh one, delete the SQLite file (and its `-wal`/`-shm` companions)
+and restart the gateway.
+
+## A context stays `active` after the client seems to have disconnected
+
+Three independent mechanisms close a context: the MCP SDK's own `server.onclose`/`onerror` (transport close/
+error), a direct `process.stdin.on('end', ...)` listener (added specifically because the installed SDK's
+`StdioServerTransport` never listens for `'end'` itself, so a graceful `stdin.end()` disconnect would otherwise
+leave the context active until a slower escalation), and the gateway process's own SIGINT/SIGTERM handler. All
+three call the same idempotent `closeOrExpireContext()`, so whichever fires first performs the real transition.
+If a context still shows `active` well after you believe the client disconnected, the client's own transport
+likely never actually closed at the OS/pipe level (e.g. it crashed in a way that left the pipe open, or is still
+technically connected) — check whether the gateway's OS process itself is still running. There is no manual
+"force close" command; `context reset` is the only mutating command, and resetting an otherwise-still-active
+context does not close it — it transitions it to `reset`, which similarly stops it from accumulating further
+labels.
+
+## No context continuity across a gateway restart or reconnect
+
+Expected, documented behavior, not a bug (ADR-0013): every new gateway process launch creates a brand-new,
+empty-label context. Context Guard cannot detect an attack sequence that spans a restart — this is a stated,
+permanent limitation, not a missing feature to file a bug against. See
+[`docs/THREAT_MODEL.md`](THREAT_MODEL.md#context-guard-cross-tool-escalation-defense-adr-0013).
+
+## `agentgate context <subcommand>` uses the wrong database or config
+
+Every `agentgate context` subcommand defaults to `./agentgate.yml` and reads `db_path` from whatever config
+`--config <path>` actually points to — same resolution rule as every other AgentGate CLI command. If you have
+multiple projects/databases, always pass `--config <path>` explicitly rather than relying on your current working
+directory matching the config you mean.
+
+## Context Guard live updates in the Control Center seem to stop working after a reconnect
+
+The Context Guard page's live indicator shows connection state, and it always treats an incoming `context_event`
+SSE frame as a "refetch current state now" signal rather than trying to reconstruct history from the stream
+itself — a reconnected subscriber does NOT receive events that were published while it was disconnected (this is
+the same pre-existing, unmodified event-bus behavior `audit_event`/`Approval` traffic already had before this
+milestone — there is no historical replay to a fresh subscriber). If the page looks stale after a reconnect,
+reload it — the initial REST fetch on load is always the authoritative source of current state, independent of
+whatever the SSE stream did or didn't deliver in the meantime.
+
+## Does resetting a Context Guard context clear what the agent/model remembers?
+
+**No — never.** `agentgate context reset` (or the Control Center's reset control) is entirely local, gateway-side
+state. It clears AgentGate's own accumulated risk labels going forward and has **no effect whatsoever** on
+anything the upstream LLM or MCP client itself remembers — its own conversation history, cached tool results, or
+reasoning it has already produced. If you need the agent to actually "forget" something, that has to happen in
+the agent/client itself (e.g. starting a new conversation) — resetting AgentGate's context is a completely
+separate, local operation from that. See [ADR-0013](AI_DECISIONS.md) and
+[`docs/THREAT_MODEL.md`](THREAT_MODEL.md#context-guard-cross-tool-escalation-defense-adr-0013).
+
 ## A downstream result comes back with `[REDACTED]` in it unexpectedly
 
 The result matched one of `SECRET_PATTERNS` (`packages/policy/src/transformation.ts`) — the same conservative,

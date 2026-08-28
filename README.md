@@ -40,10 +40,11 @@ Run it yourself: `node examples/secret-exfiltration/demo.mjs` (see [Demo and ver
 ## Project status
 
 **Early development / research-quality MVP.** AgentGate implements a real policy engine, a real MCP stdio proxy, a
-real tamper-evident audit store, a real Control Center UI, a real Safe Replay policy-drift analyzer, and a real
-onboarding CLI (`init`/`config validate`/`doctor`/`integrate`/`smoke-test`) — all covered by executable tests
-(206 as of this milestone) and end-to-end demos/scripts (see [`docs/VERIFICATION.md`](docs/VERIFICATION.md)). It
-is **not** production-hardened: there is no authentication beyond a per-launch local token, no multi-user
+real tamper-evident audit store, a real Control Center UI, a real Safe Replay policy-drift analyzer, a real Tool
+Integrity Registry, a real Context Guard cross-tool escalation defense, and a real onboarding CLI (`init`/
+`config validate`/`doctor`/`integrate`/`smoke-test`) — all covered by executable tests (623 as of this milestone,
+2 intentionally platform-skipped) and end-to-end demos/scripts (see [`docs/VERIFICATION.md`](docs/VERIFICATION.md)).
+It is **not** production-hardened: there is no authentication beyond a per-launch local token, no multi-user
 support, and MCP protocol support is currently **legacy 2025-era stdio only** (see
 [Supported integrations](#supported-integrations)). Read [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before
 relying on it for anything sensitive.
@@ -141,6 +142,12 @@ for human approval — is recorded before the call reaches (or is kept from reac
   definition and quarantines a new or changed one until a human explicitly accepts its exact fingerprint;
   enforced in the gateway request path itself, both for what is exposed via discovery and for a direct call by a
   cached tool name (see [Tool Integrity](#tool-integrity) below).
+- **Context Guard — cross-tool session-risk escalation defense** — attaches conservative, operator-owned risk
+  labels to the current execution context based on which tools were called and what their results were
+  classified as, then checks a later call's own declared effects against those accumulated labels before
+  allowing it — closing the "read untrusted content, then quietly exfiltrate it with a different, individually-
+  legal-looking call" gap left open by evaluating each call in isolation (see [Context Guard](#context-guard)
+  below).
 
 ## Example policy
 
@@ -195,6 +202,11 @@ agentgate tools scan|status|diff|trust|reject|history [--config <path>]
                                        # Tool Integrity Registry: rescan the downstream server, list trust status,
                                        # show a safe field-level diff, and accept/reject an EXACT candidate
                                        # fingerprint. See "Tool Integrity" below.
+
+agentgate context status|history|explain|reset|verify [--config <path>]
+                                       # Context Guard: bounded context list/history, a stored-evidence
+                                       # explanation of accumulated labels, the only mutating command (exact
+                                       # revision + reason), and chain verification. See "Context Guard" below.
 
 agentgate --version                   # Print the installed version
 agentgate <command> --help            # Print detailed usage for any command
@@ -264,6 +276,11 @@ gateway YAML:
   primary action.
 - **Event Detail** — full decision trace, redacted arguments, the event's position in the hash chain, and a
   Safe Replay card to re-evaluate the event against the current policy (see [Safe Replay](#safe-replay) below).
+- **Tool Integrity** — trust status per downstream tool, a safe field-level diff for a quarantined candidate, and
+  exact-fingerprint accept/reject (see [Tool Integrity](#tool-integrity) below).
+- **Context Guard** — active/closed/expired/reset context counts, a bounded/filterable context list, and a
+  detail view with accumulated labels, the transition timeline, escalation reason, and the reset control (see
+  [Context Guard](#context-guard) below).
 - **Policies** — the currently loaded policy file and a decision-type reference (read-only in this milestone).
 
 It authenticates with a random per-launch token (printed to the gateway's stderr on startup) sent as the
@@ -413,6 +430,83 @@ also available in the Control Center's **Tool Integrity** page.
   callable by its cached name — with the fixture's own call counter proving the downstream server was never
   contacted for the blocked call — reject it, and separately trust a later, genuinely distinct benign update.
 
+## Context Guard
+
+**What it is:** cross-tool session-risk escalation defense (ADR-0013) for the MCP "confused deputy" pattern: an
+agent reads untrusted content from one tool (a ticket, a web page, a file) that contains an indirect
+prompt-injection instruction telling it to read sensitive data with a second tool and exfiltrate it with a third
+— where each individual call can look policy-legal in isolation, and only the *sequence* is the actual attack.
+Context Guard closes this by attaching operator-declared risk labels to the current local execution context
+based on which tools were called and what their results were classified as, then checking a later call's own
+declared *effects* against those accumulated labels before allowing it. The observable sequence AgentGate
+actually acts on:
+
+1. **untrusted content observed** — a tool's successful, non-blocked result is classified by operator config as
+   exposing the agent to `untrusted_content` (or another declared source label);
+2. **sensitive data accessed** — a later tool's result adds `sensitive_data_accessed`;
+3. **external transmission attempted** — a later call declares the `external_communication` effect;
+4. **a stricter policy action applies before downstream contact** — a contextual rule matching the accumulated
+   labels denies the call, or requires an exact, revision-bound human approval, before the downstream server is
+   ever reached — including for a call by a cached/guessed tool name the client never re-listed.
+
+**What this is explicitly not:** AgentGate never reads, inspects, or reasons about the upstream model's prompts,
+completions, or memory — it only observes the MCP `tools/call` requests and results that actually cross the
+gateway. A label is a policy assertion triggered by an observed gateway event, never a claim that an injection
+actually happened, that the model "read" or "acted on" anything, or that one call *caused* a later one. Two calls
+sharing one context is correlation by connection, not proof of causation — see
+[Security model and limitations](#security-model-and-limitations) below and
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md#context-guard-cross-tool-escalation-defense-adr-0013) for the full,
+explicit list of what this does and does not prove.
+
+![AgentGate Control Center — Context Guard page showing an active execution context with accumulated risk labels, chain integrity status, and a lifecycle-filterable context list](docs/assets/control-center-context-guard.png)
+
+![AgentGate Control Center — Context Guard detail view showing a denied contextual escalation: attempted tool, matched rule, reason, and the full transition timeline from context creation through the deny](docs/assets/control-center-context-guard-escalation.png)
+
+```yaml
+context_guard:
+  mode: enforce            # "enforce" | "monitor" (default when omitted) | "disabled"
+  tools:
+    fetch_ticket:
+      adds_on_result: [untrusted_content]      # labels added on a SUCCESSFUL, non-blocked result
+    read_secret:
+      effects: [sensitive_read]                # what this tool's CALL itself does
+      adds_on_result: [sensitive_data_accessed]
+    send_webhook:
+      effects: [external_communication]
+  rules:
+    - id: deny-external-after-risk
+      when:
+        context_has_any: [untrusted_content, sensitive_data_accessed]
+        target_has_any: [external_communication]
+      action: deny                              # "deny" | "require_approval" — contextual rules only escalate
+      reason: "External communication blocked: untrusted or sensitive content was accessed earlier in this session."
+```
+
+```sh
+agentgate context status  --config agentgate.yml --json   # bounded list of contexts, most recently updated first
+agentgate context history <context-id> --config agentgate.yml   # append-only transition history, chain-verified
+agentgate context explain <context-id> --config agentgate.yml   # stored evidence only — never a fabricated decision
+agentgate context reset   <context-id> --revision <n> --reason <text> --config agentgate.yml   # the only mutating command
+agentgate context verify  --config agentgate.yml   # independently re-verify the context hash chain
+```
+
+There is no `reset-all`, no way to remove a single label, no "mark safe," and no way to force-approve — `reset`
+requires the exact current revision and a non-empty reason, clears the active label set going forward without
+deleting history, and invalidates every pending contextual approval bound to that context. It cannot erase
+anything the upstream model or MCP client itself remembers from before the reset. The same status/history/detail/
+reset flow is also available in the Control Center's **Context Guard** page, including the field- and label-level
+context that produced a given decision.
+
+- Try it: `node examples/context-poisoning/demo.mjs` — a real gateway, a real MCP SDK client, and a real
+  downstream fixture server: `fetch_ticket` returns a realistic synthetic indirect-prompt-injection ticket body,
+  `read_secret_fixture` returns a synthetic credential, and two attempts to `send_webhook` (one fresh, one by the
+  same cached tool name) are both **denied** — the fixture's own call counter for `send_webhook` stays **exactly
+  0** throughout. A second, independent context/connection then demonstrates the `require_approval` path: a
+  pending approval bound to one context revision fails once the context has since advanced (counter stays 0), a
+  fresh approval bound to the current revision executes (counter becomes exactly 1), and a third attempt requires
+  its own fresh approval. No LLM is called anywhere in the script — it manually issues the exact tool sequence a
+  compromised agent would issue, and Context Guard blocks/gates it from observed gateway history alone.
+
 ## Security model and limitations
 
 AgentGate treats agent identity as **untrusted**: `declared_name`/`declared_version` are self-reported and used for
@@ -439,6 +533,22 @@ tamper-proof against a privileged local administrator. A definition can still ch
 one scan and the next call; this is not fully eliminated (see ADR-0012). This is not remote attestation, signed
 tools, sandboxing, runtime-behavior verification, or a claim of zero false positives.
 
+**What Context Guard does and does not prove:** AgentGate tracks conservative, locally-observed gateway context —
+which tools were called on the current stdio connection and what operator policy classifies their results as —
+never the upstream model's actual reasoning, intent, or memory, and never proof that one call caused a later one.
+One stdio connection/process is the current context boundary; it may not correspond to exactly one upstream model
+conversation. Labels only ever accumulate (a contextual rule can escalate a decision, never downgrade a
+base-policy one); a `reset` clears local AgentGate state only and cannot erase anything the model or MCP client
+itself remembers. Context does not persist across a gateway restart or reconnect under a new process — a real
+attack sequence spanning a restart is not detected. MCP tool annotations remain untrusted and are never consulted
+to lower risk, exactly as for Tool Integrity above. TTL-based expiry exists in the schema but is not yet actively
+scheduled. Context Guard's own hash chain is local tamper *evidence*, not tamper-proof, identical in kind to the
+limitations above. This is not information-flow/taint tracking, not sandboxing, not a prompt-injection detector
+(it never inspects text for injection patterns — only observed tool identity and classified result outcomes), and
+not a claim that every covert or indirect exfiltration channel is closed. See
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md#context-guard-cross-tool-escalation-defense-adr-0013) and
+[ADR-0013](docs/AI_DECISIONS.md) for the full model and its explicit non-goals.
+
 ## Architecture
 
 Component responsibilities, system and sequence diagrams, the audit data model, and trust boundaries:
@@ -451,6 +561,7 @@ node examples/secret-exfiltration/demo.mjs       # inbound attack demo: secret i
 node examples/downstream-secret-result/demo.mjs  # outbound demo: secret in a downstream result AND error (self-cleaning)
 node examples/policy-drift-replay/demo.mjs       # Safe Replay demo: policy drift, no execution (self-cleaning)
 node examples/tool-rug-pull/demo.mjs             # Tool Integrity demo: rug-pull blocked before execution (self-cleaning)
+node examples/context-poisoning/demo.mjs         # Context Guard demo: cross-tool prompt-injection chain blocked (self-cleaning)
 node scripts/verify-packed-install.mjs           # packed-tarball install verification (self-cleaning)
 node packages/gateway/dist/cli.js smoke-test     # built-in harmless proof AgentGate works (self-cleaning)
 pnpm run test                                    # unit/integration tests (policy + gateway + control-center)

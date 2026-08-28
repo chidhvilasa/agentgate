@@ -195,6 +195,198 @@ record for that tool — there is no name-only or "trust all" shortcut anywhere 
 Center). If the tool has drifted again since you last looked, an attempt to accept/reject using the stale
 id/fingerprint fails outright rather than silently applying to whatever the current candidate happens to be.
 
+## Context Guard
+
+This is also a **gateway config field, not a policy field** — cross-tool session-risk escalation defense (see
+ADR-0013 in `docs/AI_DECISIONS.md` and
+[`docs/THREAT_MODEL.md`](THREAT_MODEL.md#context-guard-cross-tool-escalation-defense-adr-0013)). It governs
+whether a tool's *result* adds risk labels to the current execution context, and whether a *later* call's
+declared effects are checked against those accumulated labels — independent of everything else on this page,
+which governs individual calls in isolation.
+
+Schema (`packages/gateway/src/config/registry.ts`, `ContextGuardSchema`):
+
+```yaml
+context_guard:
+  mode: enforce               # "enforce" | "monitor" (default if omitted) | "disabled"
+  labels: [my_custom_label]   # optional — custom labels beyond the built-in vocabulary below
+  tools:
+    <tool-name>:
+      effects: [external_communication]        # what this tool's CALL declares — max 16 labels
+      adds_on_result: [untrusted_content]       # what a SUCCESSFUL, non-blocked result adds — max 16 labels
+  rules:
+    - id: my-rule-id
+      when:
+        context_has_any: [untrusted_content]    # true if the context currently has ANY listed label
+        # context_has_all / context_lacks_all / context_lacks_any / target_has_any / target_has_all also exist —
+        # at least one condition is required per rule
+      action: deny                              # "deny" | "require_approval" — contextual rules only ESCALATE
+      reason: "..."                              # required, 1-500 characters
+      approval_ttl_seconds: 60                   # only meaningful with action: require_approval; 1-3600
+```
+
+| Mode | Behavior | Recommended for |
+|---|---|---|
+| `enforce` | Contextual rules can DENY or REQUIRE_APPROVAL a call before it ever reaches policy execution or the downstream server. | High-security deployments; the whole point of enabling this feature. |
+| `monitor` | Context labels are still accumulated and contextual rules are still evaluated and recorded, but the result never blocks or escalates a call. | **The default when `context_guard` is omitted.** Kept as the default so a config file written before this milestone keeps working unmodified — see "Migration" below. Never described anywhere in this codebase as protection; it is reporting only. |
+| `disabled` | No context is created, no labels are tracked, no contextual rule is ever evaluated. Identical to every AgentGate version before this milestone. | Backwards-compatibility only. Using this removes the defense entirely. |
+
+**Migration**: an existing `agentgate.yml` without a `context_guard` section already behaves as `monitor` — no
+new blocking behavior, nothing to change for AgentGate to keep working exactly as before. Unlike Tool Integrity,
+`agentgate init` does **not** currently generate a `context_guard` block for new projects (a stated, honest gap,
+not an oversight) — a new project also starts in `monitor` mode until an operator explicitly adds one. To adopt
+enforcement:
+
+```yaml
+context_guard:
+  mode: enforce
+  tools:
+    <name-of-a-tool-whose-result-exposes-untrusted-or-sensitive-content>:
+      adds_on_result: [untrusted_content]
+    <name-of-your-highest-risk-outbound-tool>:
+      effects: [external_communication]
+  rules:
+    - id: deny-external-after-untrusted-content
+      when:
+        context_has_any: [untrusted_content]
+        target_has_any: [external_communication]
+      action: deny
+      reason: "External communication blocked: untrusted content was accessed earlier in this session."
+```
+
+**Built-in label vocabulary** (`BUILTIN_CONTEXT_LABELS`/`BUILTIN_EFFECT_LABELS`) — a starting vocabulary, not a
+closed one; `context_guard.labels` extends it with custom, operator-declared labels (max 64), never replaces it:
+
+| Kind | Label | Meaning |
+|---|---|---|
+| Source (what a *result* may have exposed the agent to) | `untrusted_content` | The result contains content from an untrusted origin the agent could be steered by. |
+| Source | `sensitive_data_accessed` | The result exposed sensitive/confidential data. |
+| Source | `prompt_injection_suspected` | Only ever set by your own config on a tool whose result you specifically classify this way — AgentGate itself never infers this from content; there is no built-in injection detector. If you configure a tool this way, document in your own policy comments exactly what heuristic led you to that classification, since it is your assertion, not a verified fact. |
+| Effect (what a *call itself* does) | `external_communication` | The call sends data outside the local system. |
+| Effect | `destructive_write` | The call destructively modifies state. |
+| Effect | `code_execution` | The call executes code. |
+| Effect | `credential_use` | The call uses a credential. |
+| Effect | `privilege_change` | The call changes privileges. |
+| Effect | `sensitive_read` | The call reads sensitive data. |
+
+Label names must be lowercase `snake_case`, starting with a letter, max 64 characters
+(`^[a-z][a-z0-9_]{0,63}$`) — deliberately narrow so labels stay readable in CLI/UI/audit output and cannot smuggle
+unbounded or hostile text. Every label referenced anywhere in config (`tools.*.effects`, `tools.*.adds_on_result`,
+`rules.*.when.*`) is validated against the built-in set plus `context_guard.labels` at config-parse time
+(`loadGatewayConfig()`) — an unknown label fails validation outright, it does not silently become a no-op rule at
+runtime. Max 128 rules total.
+
+**`when` operators** (`ContextGuardWhenSchema`) — at least one required per rule, combined with AND when more
+than one is present:
+
+| Operator | True when |
+|---|---|
+| `context_has_all` | The active context currently has EVERY listed label. |
+| `context_has_any` | The active context currently has ANY listed label. |
+| `context_lacks_all` | The active context currently has NONE of the listed labels. |
+| `context_lacks_any` | The active context is missing AT LEAST ONE listed label (i.e. not all are present). |
+| `target_has_any` | The ATTEMPTED call's own declared `effects` include ANY listed label. |
+| `target_has_all` | The ATTEMPTED call's own declared `effects` include EVERY listed label. |
+
+**Action semantics and the stricter-merge invariant**: a contextual rule's `action` is only ever `deny` or
+`require_approval` — there is no contextual `allow`, by design (this is what makes "Context Guard can only make
+things stricter" a provable, testable property rather than something policy authors must trust by convention).
+The contextual result and the base policy decision are merged via a strictest-wins rule
+(`ALLOW < REQUIRE_APPROVAL < DENY`): a base-policy `deny` can never become a contextual `allow`/
+`require_approval`, and an already-`require_approval` base decision can never be silently downgraded to `allow`
+by a non-matching contextual rule.
+
+**Exact transition timing**: a tool's `adds_on_result` labels are added ONLY when that call actually
+`SUCCEEDED` and its result was not entirely replaced by output security (ADR-0009) — a denied, cancelled,
+expired, failed, or fully-blocked call adds no labels, because nothing the label would describe actually reached
+the agent. A redacted-but-still-delivered result *does* still add its configured labels (content beyond the
+redacted secret pattern still reached the agent) — a deliberately conservative trade-off, not an oversight. If
+every label in a call's `adds_on_result` is already active, this is a no-op: no new history event, no revision
+bump — context history stays proportional to real change.
+
+**Validation failures**: `loadGatewayConfig()` rejects, at gateway startup, the same way any other malformed
+config field is rejected: an unknown label anywhere, a duplicate custom label, a duplicate rule `id`, a `when`
+clause with zero conditions, a `reason` outside 1–500 characters, an `approval_ttl_seconds` outside 1–3600, more
+than 16 labels on one tool's `effects`/`adds_on_result`, more than 64 custom labels, or more than 128 rules.
+
+**Anti-example — MCP annotations do not grant, and cannot be used to grant, any permission here.** A downstream
+tool declaring `annotations: { readOnlyHint: true }` has **zero** effect on Context Guard evaluation — enforcement
+never reads a tool's self-declared annotations for any decision, exactly as Tool Integrity never trusts them
+either (see [Tool Integrity](#tool-integrity) above). This is deliberate: a malicious or buggy downstream server
+could otherwise self-report its way to a lower risk classification simply by claiming to be read-only. The ONLY
+way a tool's effects/adds_on_result are ever set is your own `context_guard.tools.<name>` config — never inferred
+from anything the server itself advertises.
+
+```yaml
+# WRONG assumption: "this tool says readOnlyHint: true, so it must be safe from Context Guard's perspective."
+# Context Guard never even looks at that field. If a tool's call is genuinely an external-communication effect,
+# you must declare it yourself:
+context_guard:
+  tools:
+    send_webhook:
+      effects: [external_communication]   # <- this is what actually matters, regardless of any annotation
+```
+
+**Complete example — deny path** (send_webhook denied outright once risk has accumulated):
+
+```yaml
+context_guard:
+  mode: enforce
+  tools:
+    fetch_ticket:
+      adds_on_result: [untrusted_content]
+    read_secret:
+      effects: [sensitive_read]
+      adds_on_result: [sensitive_data_accessed]
+    send_webhook:
+      effects: [external_communication]
+  rules:
+    - id: deny-external-after-risk
+      when:
+        context_has_any: [untrusted_content, sensitive_data_accessed]
+        target_has_any: [external_communication]
+      action: deny
+      reason: "External communication blocked: untrusted or sensitive content was accessed earlier in this session."
+```
+
+**Complete example — require-approval path** (same trigger, but a human is asked instead of an outright deny):
+
+```yaml
+context_guard:
+  mode: enforce
+  tools:
+    fetch_ticket:
+      adds_on_result: [untrusted_content]
+    send_webhook:
+      effects: [external_communication]
+  rules:
+    - id: approve-external-after-risk
+      when:
+        context_has_any: [untrusted_content]
+        target_has_any: [external_communication]
+      action: require_approval
+      reason: "External communication requires approval: untrusted content was accessed earlier in this session."
+      approval_ttl_seconds: 60
+```
+
+An approval created this way is bound to the exact context revision, redacted-argument digest, and (where a
+trusted Tool Integrity definition exists) exact tool fingerprint present at creation time, and is re-validated
+fresh against current state immediately before execution — see
+[`docs/ARCHITECTURE.md`](ARCHITECTURE.md#context-guard-adr-0013) for the exact mechanism.
+
+```sh
+agentgate context status  --config agentgate.yml --json
+agentgate context history <context-id> --config agentgate.yml
+agentgate context explain <context-id> --config agentgate.yml
+agentgate context reset   <context-id> --revision <n> --reason <text> --config agentgate.yml
+agentgate context verify  --config agentgate.yml
+```
+
+There is no `reset-all`, no per-label removal, no "mark safe," and no force-approve anywhere — `reset` requires
+the exact current revision and a non-empty bounded reason, and it cannot erase anything the upstream model or MCP
+client itself remembers from before the reset. See [Troubleshooting](TROUBLESHOOTING.md#a-tool-call-is-denied-or-
+requires-approval-because-of-context-guard) if a call is unexpectedly denied or gated.
+
 ## Decision: `allow`
 
 ```yaml
@@ -338,6 +530,15 @@ rules:
 - **Putting `tool_integrity` inside a policy rule, or expecting a policy `allow` rule to bypass quarantine.** Tool
   Integrity is a separate, earlier gate — a quarantined tool is blocked before policy evaluation ever runs, so no
   `allow`/`decision` in a policy rule can override it. See [Tool Integrity](#tool-integrity) above.
+- **Putting `context_guard` inside a policy rule, or expecting a policy `allow` rule to override a contextual
+  deny/require-approval.** Context Guard is gateway-level config, evaluated alongside (and merged strictest-wins
+  with) the base policy decision — not a policy rule field. See [Context Guard](#context-guard) above.
+- **Assuming a downstream tool's `annotations` (e.g. `readOnlyHint`) affect Context Guard's evaluation.** They
+  don't, ever — only your own `context_guard.tools.<name>.effects`/`.adds_on_result` config does. See the
+  anti-example under [Context Guard](#context-guard) above.
+- **Forgetting `context_guard` defaults to `monitor` (reporting only) when omitted**, and that `agentgate init`
+  does not currently generate an `enforce`-mode block for new projects — unlike `tool_integrity`, which does.
+  Explicitly add `context_guard: { mode: enforce, ... }` to get real blocking behavior.
 
 ## CLI
 
@@ -345,5 +546,9 @@ There is no `agentgate explain`/`agentgate test` subcommand in this milestone �
 shape without running the gateway, and `replay <event-id> [config]` (ADR-0010) answers a narrower, adjacent
 question: given a *real historical event*, would today's policy decide it differently? Replay is not a policy
 linter or test runner — it re-evaluates one specific stored event, never executes anything, and requires an
-existing audit database with at least one recorded event. See [`README.md`](../README.md#cli) for both commands
-and [`docs/AI_DECISIONS.md`](AI_DECISIONS.md) (ADR-0010) for what Safe Replay does and does not do.
+existing audit database with at least one recorded event. `agentgate context status|history|explain|reset|verify`
+(ADR-0013) is a separate, adjacent surface again: it reports on Context Guard's own accumulated-label state and
+history, never a policy file's shape, and `reset` is its only mutating subcommand (exact revision + reason
+required). See [`README.md`](../README.md#cli) for all three command families and
+[`docs/AI_DECISIONS.md`](AI_DECISIONS.md) (ADR-0010, ADR-0013) for what Safe Replay and Context Guard each do and
+do not do.

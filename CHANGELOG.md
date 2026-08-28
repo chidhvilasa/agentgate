@@ -4,6 +4,78 @@ All notable changes to this project are documented in this file. Format loosely 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). AgentGate has not yet published a versioned release or
 npm package — see [Project status](README.md#project-status).
 
+## [Unreleased] — Milestone 7: Context Guard cross-tool escalation defense
+
+### Added
+- **Context Guard**: attaches operator-declared, conservative risk labels to the current local execution context
+  (one per stdio connection/process) based on which tools were called and what their results were classified as,
+  then checks a later call's own declared effects against those accumulated labels before allowing it — closing
+  the cross-tool "confused deputy" gap left open by evaluating each call in isolation. Labels only ever
+  accumulate; a contextual rule can only escalate a base-policy decision (strictest-wins merge), never downgrade
+  it.
+- **`context_guard` config**: `mode` (`enforce` | `monitor`, the default when omitted | `disabled`),
+  `context_guard.labels` for custom labels beyond the built-in vocabulary, `context_guard.tools.<name>` for
+  per-tool `effects`/`adds_on_result`, and `context_guard.rules` for first-match contextual `deny`/
+  `require_approval` rules.
+- **Exact contextual approval binding and revalidation**: a `REQUIRE_APPROVAL` decision from a contextual rule
+  binds the approval to the exact context revision, a digest of the redacted arguments, and (where a trusted Tool
+  Integrity definition exists) the exact tool fingerprint at creation time — all re-validated fresh, immediately
+  before downstream execution, failing closed on any mismatch even after a human has already approved.
+- **`agentgate context status|history|explain|reset|verify [--config <path>]`**: five new CLI subcommands.
+  `status`/`history`/`explain`/`verify` are strictly read-only; `reset` is the only mutating command, requiring
+  the exact current revision and a non-empty reason, and it actively invalidates every pending contextual
+  approval bound to the context it resets.
+- **6 new Control API routes** (`GET /api/contexts`, `GET /api/contexts/:id`, `GET /api/contexts/:id/history`,
+  `GET /api/contexts/:id/explain`, `POST /api/contexts/:id/reset`, `GET /api/context-integrity`), same loopback/
+  token/Host/Origin/CORS/safe-error model as every other route; strict reset body-schema validation.
+- **`context_event` SSE frames** on the same live event stream `audit_event`/`Approval` traffic already used,
+  discriminated on the wire by an `event_type` field.
+- **Control Center "Context Guard" page**: overview stats (lifecycle counts, active-with-labels, pending
+  contextual approvals, chain integrity), a bounded/state-filterable context list (a genuinely separate,
+  keyboard-accessible stacked card layout at narrow widths, not a squeezed table), and a detail view with
+  accumulated labels, a persistent correlation-not-causation limitation note, a deny/require-approval escalation
+  panel, label origins linking to originating audit events, the full transition timeline, and the reset control
+  (exact-revision, required reason, memory-erase and pending-approval-invalidation warnings, double-submit
+  prevention, 409-stale handling). Small, additive integration touches on Overview, Timeline, Approvals, and
+  Event Detail. Hostile server-supplied/attacker-influenced content (tool names, reasons, labels) is rendered as
+  plain, inert text only — never `dangerouslySetInnerHTML`.
+- **`examples/context-poisoning/demo.mjs`**: a real gateway, a real MCP SDK client, and a real downstream fixture
+  server proving, end to end, with no LLM involved anywhere in the script: a realistic synthetic indirect-
+  prompt-injection ticket adds `untrusted_content`; a synthetic-secret read adds `sensitive_data_accessed`; two
+  attempts to send the accumulated risk externally (one fresh, one by the same cached tool name) are both denied
+  with the fixture's own external-send call counter staying exactly 0; a second, independent context/connection
+  demonstrates the full `require_approval` lifecycle (a stale-bound approval fails revalidation at counter 0, a
+  fresh approval executes at counter exactly 1, a third attempt requires its own fresh approval); the synthetic
+  secret and the raw injected-instruction text never appear in any CLI/API output or stored row. Wired into CI
+  (both the Ubuntu and Windows jobs). A deterministic fault-injection hook plus a dedicated test prove its
+  cleanup runs on a real injected mid-run failure.
+- New ADR-0013 (Context Guard — Cross-Tool Session-Risk Escalation Defense).
+
+### Fixed
+- **Control Center narrow-viewport (~420px) clipping in the new Context Guard context list**: found during real
+  browser verification (not by the component test suite, since jsdom does not evaluate CSS media queries) — the
+  desktop `<table>` layout's rightmost columns were silently hidden by `.card`'s pre-existing `overflow: hidden`
+  at narrow widths, with no way to reach them. Fixed with a genuinely separate, CSS-toggled stacked card list
+  shown only at `max-width: 640px`, with full keyboard support — every field remains visible and reachable.
+
+### Known limitations (unchanged claims, restated for this milestone)
+- Context Guard never reads, inspects, or reasons about the upstream model's prompts, completions, or memory — a
+  label is a policy assertion triggered by an observed gateway event, never proof that an injection happened or
+  that one call caused a later one.
+- One stdio connection/process is the context boundary; it may not correspond to exactly one upstream model
+  conversation.
+- `context_guard`'s `monitor` mode (the default when omitted) provides no blocking protection; `agentgate init`
+  does not currently generate an `enforce`-mode block for new projects, unlike `tool_integrity`.
+- Context does not persist across a gateway restart or reconnect under a new process — a restart-spanning attack
+  sequence is not detected.
+- TTL-based context expiry exists in the schema but is not yet actively scheduled.
+- A residual cross-request race between one call's contextual evaluation and a different, concurrently-finishing
+  call's label-append is not fully eliminated.
+- The SSE "fresh subscriber does not replay prior events" property has no dedicated low-level automated test in
+  this codebase — the underlying mechanism is unmodified, pre-existing plumbing.
+- Context Guard's own hash chain is local tamper evidence, not tamper-proof, identical in kind to the audit and
+  Tool Integrity chains.
+
 ## [Unreleased] — Milestone 6: Tool Integrity Registry and rug-pull defense
 
 ### Added
