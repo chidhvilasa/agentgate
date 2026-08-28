@@ -82,3 +82,32 @@ export function checkCallAllowed(storage: AuditStorage, serverIdentity: string, 
   };
   return { allowed: false, reason: reasonByStatus[state.status] ?? `Tool "${toolName}" is not currently trusted.` };
 }
+
+/**
+ * Returns the tool's CURRENT trusted fingerprint if, and only if, its
+ * definition is trusted right now — status `trusted` AND
+ * `current_fingerprint === trusted_fingerprint`, the exact same "is this
+ * tool actually callable" condition `checkCallAllowed()` uses above. Never
+ * a client-supplied value, never a stale/candidate/quarantined fingerprint.
+ * Returns `null` if the tool has no trusted definition at all (never
+ * scanned, quarantined, drifted, rejected, removed) or the lookup itself
+ * fails. Used by Context Guard (ADR-0013) to bind/revalidate a contextual
+ * approval to the exact currently-trusted definition — independent of
+ * `tool_integrity.mode`: the registry itself is always maintained
+ * regardless of enforcement mode, only ENFORCEMENT (`filterTrustedTools`/
+ * `checkCallAllowed` above) is mode-gated, so this reflects real registry
+ * state even when Tool Integrity itself is in `monitor`/`disabled` mode.
+ */
+export function getTrustedFingerprint(storage: AuditStorage, serverIdentity: string, toolName: string): string | null {
+  let state;
+  try {
+    state = storage.getToolIntegrityState(serverIdentity, toolName);
+  } catch {
+    return null;
+  }
+  if (!state) return null;
+  if (state.status === 'trusted' && isFingerprintTrusted(state, state.trusted_fingerprint ?? '')) {
+    return state.trusted_fingerprint;
+  }
+  return null;
+}

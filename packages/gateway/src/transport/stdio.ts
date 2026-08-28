@@ -180,7 +180,17 @@ export async function startStdioProxy(ctx: PipelineContext): Promise<void> {
     }
     try {
       if (ctx.config.context_guard.mode !== 'disabled') {
-        closeOrExpireContext(ctx.storage, ctx.contextId, 'closed');
+        // Checked BEFORE closing so the SSE emit below fires only on an
+        // ACTUAL fresh transition, never on the idempotent no-op path
+        // (closeOrExpireContext() itself doesn't return which case
+        // occurred, only the resulting state either way) — avoids
+        // publishing a duplicate/stale event if this ever runs twice.
+        const wasActive = ctx.storage.getContextState(ctx.contextId)?.status === 'active';
+        const closedState = closeOrExpireContext(ctx.storage, ctx.contextId, 'closed');
+        if (wasActive && closedState) {
+          const latestEvent = ctx.storage.listContextEvents({ contextId: ctx.contextId, limit: 1 })[0];
+          if (latestEvent) ctx.emitEvent(latestEvent);
+        }
       }
     } catch (closeErr) {
       console.error(

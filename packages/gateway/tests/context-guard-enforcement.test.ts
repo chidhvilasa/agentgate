@@ -146,13 +146,13 @@ describe('Context Guard enforcement (ADR-0013)', () => {
   describe('checkApprovalContextValid — exact binding and revalidation', () => {
     it('a non-contextual approval (context_id null) always passes, unchanged from pre-Milestone-7 behavior', () => {
       const approval = baseApproval({ context_id: null });
-      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'any-digest');
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'any-digest', null);
       expect(result.ok).toBe(true);
     });
 
     it('fails closed when the bound context no longer exists', () => {
       const approval = baseApproval({ context_id: 'never-existed', context_revision: 0, argument_digest: null });
-      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest');
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest', null);
       expect(result.ok).toBe(false);
       expect(result.reason).toMatch(/no longer exists/);
     });
@@ -161,7 +161,7 @@ describe('Context Guard enforcement (ADR-0013)', () => {
       createContext(storage, 'ctx-1', null);
       appendContextLabels(storage, 'ctx-1', ['untrusted_content'], { sourceEventId: null, toolName: 'a', reason: 'r' }); // revision -> 1
       const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null });
-      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest');
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest', null);
       expect(result.ok).toBe(false);
       expect(result.reason).toMatch(/has advanced from revision 0 to 1/);
     });
@@ -170,7 +170,7 @@ describe('Context Guard enforcement (ADR-0013)', () => {
       createContext(storage, 'ctx-1', null);
       const digest = computeArgumentDigest({ url: 'https://x' });
       const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: digest, scope: 'send_webhook' });
-      const result = checkApprovalContextValid(approval, storage, 'send_webhook', digest);
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', digest, null);
       expect(result.ok).toBe(true);
     });
 
@@ -179,7 +179,7 @@ describe('Context Guard enforcement (ADR-0013)', () => {
       const originalDigest = computeArgumentDigest({ url: 'https://original.example' });
       const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: originalDigest, scope: 'send_webhook' });
       const substitutedDigest = computeArgumentDigest({ url: 'https://attacker.example' });
-      const result = checkApprovalContextValid(approval, storage, 'send_webhook', substitutedDigest);
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', substitutedDigest, null);
       expect(result.ok).toBe(false);
       expect(result.reason).toMatch(/arguments no longer match/);
     });
@@ -187,14 +187,14 @@ describe('Context Guard enforcement (ADR-0013)', () => {
     it('a null argument_digest on the approval (not bound to a specific argument set) skips the digest check entirely', () => {
       createContext(storage, 'ctx-1', null);
       const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null, scope: 'send_webhook' });
-      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'whatever-digest');
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'whatever-digest', null);
       expect(result.ok).toBe(true);
     });
 
     it('a wrong/mismatched target tool (scope) is rejected — an approval for one tool cannot execute a different one', () => {
       createContext(storage, 'ctx-1', null);
       const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null, scope: 'send_webhook' });
-      const result = checkApprovalContextValid(approval, storage, 'read_secret', 'digest');
+      const result = checkApprovalContextValid(approval, storage, 'read_secret', 'digest', null);
       expect(result.ok).toBe(false);
       expect(result.reason).toMatch(/target tool no longer matches/);
     });
@@ -203,14 +203,14 @@ describe('Context Guard enforcement (ADR-0013)', () => {
       createContext(storage, 'ctx-1', null);
       const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null, scope: 'send_webhook' });
       closeOrExpireContext(storage, 'ctx-1', 'closed'); // revision bumps to 1 as part of closing
-      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest');
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest', null);
       expect(result.ok).toBe(false); // revision no longer matches (0 vs 1) — fails closed either way
     });
 
     it('storage failure during revalidation fails closed, never throws', () => {
       const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0 });
       const brokenStorage = { getContextState: () => { throw new Error('disk error'); } } as unknown as AuditStorage;
-      const result = checkApprovalContextValid(approval, brokenStorage, 'send_webhook', 'digest');
+      const result = checkApprovalContextValid(approval, brokenStorage, 'send_webhook', 'digest', null);
       expect(result.ok).toBe(false);
       expect(result.reason).not.toContain('disk error'); // no raw internal error leakage
     });
@@ -219,10 +219,51 @@ describe('Context Guard enforcement (ADR-0013)', () => {
       createContext(storage, 'ctx-1', null);
       const secretLikeDigest = computeArgumentDigest({ token: 'sk-live-should-never-appear-verbatim' });
       const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: secretLikeDigest, scope: 'send_webhook' });
-      const result = checkApprovalContextValid(approval, storage, 'send_webhook', computeArgumentDigest({ token: 'different' }));
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', computeArgumentDigest({ token: 'different' }), null);
       expect(result.ok).toBe(false);
       expect(result.reason).not.toContain('sk-live-should-never-appear-verbatim');
       expect(result.reason).not.toMatch(/[/\\][A-Za-z]:[/\\]|\/(home|Users)\//); // no raw filesystem path
+    });
+  });
+
+  describe('checkApprovalContextValid — tool_fingerprint binding (Tool Integrity)', () => {
+    it('a null bound fingerprint (never bound — e.g. no trusted definition existed at creation time) skips the fingerprint check, unaffected by the current trusted fingerprint', () => {
+      createContext(storage, 'ctx-1', null);
+      const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null, scope: 'send_webhook', tool_fingerprint: null });
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest', 'fp-now-trusted');
+      expect(result.ok).toBe(true);
+    });
+
+    it('an exact-matching bound fingerprint and current trusted fingerprint passes', () => {
+      createContext(storage, 'ctx-1', null);
+      const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null, scope: 'send_webhook', tool_fingerprint: 'fp-abc123' });
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest', 'fp-abc123');
+      expect(result.ok).toBe(true);
+    });
+
+    it('tool drift after approval creation (current fingerprint differs from bound) is rejected — the trusted definition changed', () => {
+      createContext(storage, 'ctx-1', null);
+      const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null, scope: 'send_webhook', tool_fingerprint: 'fp-original' });
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest', 'fp-drifted');
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/trusted definition has changed/);
+    });
+
+    it('quarantine after approval creation (current trusted fingerprint becomes null) is rejected when a fingerprint WAS bound', () => {
+      createContext(storage, 'ctx-1', null);
+      const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null, scope: 'send_webhook', tool_fingerprint: 'fp-original' });
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest', null); // getTrustedFingerprint() would now return null — quarantined/drifted/rejected/removed
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/trusted definition has changed/);
+    });
+
+    it('public rejection reason for a fingerprint mismatch never leaks the raw fingerprint values themselves', () => {
+      createContext(storage, 'ctx-1', null);
+      const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null, scope: 'send_webhook', tool_fingerprint: 'fp-unmistakably-original-marker' });
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest', 'fp-unmistakably-drifted-marker');
+      expect(result.ok).toBe(false);
+      expect(result.reason).not.toContain('fp-unmistakably-original-marker');
+      expect(result.reason).not.toContain('fp-unmistakably-drifted-marker');
     });
   });
 
@@ -230,7 +271,7 @@ describe('Context Guard enforcement (ADR-0013)', () => {
     it('contextual_rule_id is carried through on the approval object but is not independently re-verified against a live policy digest by checkApprovalContextValid() — an honest scope statement, not a silent gap: revision/tool/argument-digest are what is actually re-checked', () => {
       createContext(storage, 'ctx-1', null);
       const approval = baseApproval({ context_id: 'ctx-1', context_revision: 0, argument_digest: null, scope: 'send_webhook', contextual_rule_id: 'deny-rule' });
-      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest');
+      const result = checkApprovalContextValid(approval, storage, 'send_webhook', 'digest', null);
       expect(result.ok).toBe(true); // passes on revision/tool/digest alone, regardless of contextual_rule_id's value
     });
   });

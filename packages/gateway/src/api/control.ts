@@ -12,6 +12,15 @@ import { scanDownstreamServer } from '../tool-integrity/scan.js';
 import { applyScanToRegistry, acceptCandidate, rejectCandidate } from '../tool-integrity/registry.js';
 import { diffStoredDefinitions } from '../tool-integrity/diff.js';
 import type { ToolIntegrityState } from '../tool-integrity/types.js';
+import type { ContextEvent, ContextStatus } from '../context-guard/types.js';
+import {
+  summarizeContexts,
+  summarizeOneContext,
+  summarizeContextHistory,
+  explainContext,
+  performContextReset,
+  verifyContextChainReport,
+} from '../context-guard/cli.js';
 
 /** Per-launch local auth token — generated fresh on each start. */
 export let LOCAL_AUTH_TOKEN = '';
@@ -75,7 +84,7 @@ export function buildControlApi(opts: {
   dbPath: string;
   /** Path to the policy file to load fresh on every Safe Replay evaluation (ADR-0010). */
   policyPath: string;
-  onEvent: (handler: (event: AuditEvent | Approval) => void) => void;
+  onEvent: (handler: (event: AuditEvent | Approval | ContextEvent) => void) => void;
   /** Tool Integrity Registry (ADR-0012) — the downstream server config and configured mode, used for on-demand rescans. Optional only so existing tests that don't exercise Tool Integrity need not construct one; server.ts always supplies it in real operation. */
   toolIntegrity?: {
     server: DownstreamServer;
@@ -85,6 +94,8 @@ export function buildControlApi(opts: {
   contextGuard?: {
     contextId: string;
     mode: ContextGuardMode;
+    /** Publishes a ContextEvent to the SAME live-subscriber bus PipelineContext.emitEvent uses — reused, never a second parallel one. Used only by the reset route below, the sole Control-API-initiated Context Guard mutation. */
+    emit: (event: ContextEvent) => void;
   };
 }) {
   LOCAL_AUTH_TOKEN = randomBytes(32).toString('hex');
@@ -210,8 +221,19 @@ export function buildControlApi(opts: {
       reply.raw.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
     };
 
-    const handler = (payload: AuditEvent | Approval) => {
-      send('audit_event', payload);
+    // Milestone 7 (ADR-0013): the SAME bus/subscription carries audit-event,
+    // approval, and Context Guard transitions — discriminated here by
+    // payload shape, never a second parallel SSE stream. `event_type` is a
+    // field ONLY ContextEvent has (AuditEvent uses `status`, Approval has
+    // neither) — a safe, unambiguous discriminator. Existing consumers
+    // that only ever subscribed to `audit_event` are unaffected: they
+    // simply never receive (and don't need to handle) `context_event`.
+    const handler = (payload: AuditEvent | Approval | ContextEvent) => {
+      if ('event_type' in payload) {
+        send('context_event', payload);
+      } else {
+        send('audit_event', payload);
+      }
     };
 
     opts.onEvent(handler);
@@ -504,6 +526,121 @@ export function buildControlApi(opts: {
         return { ok: true, tool_name: match.tool_name, status: 'rejected' };
       }
     );
+  }
+
+  // ── Context Guard (ADR-0013) ────────────────────────────────────────────
+  // Cross-tool session-risk escalation defense. See docs/AI_DECISIONS.md
+  // (ADR-0013) and docs/THREAT_MODEL.md for the full model. Read-only
+  // routes never start a downstream server, discover tools, or execute
+  // anything. The reset route is the only mutation: exact revision AND a
+  // non-empty bounded reason are required, unknown fields are rejected,
+  // and it invalidates every pending contextual approval bound to the
+  // context — there is no route that clears all contexts, removes a
+  // label directly, bypasses policy, permanently approves a call, or
+  // modifies Tool Integrity trust.
+
+  if (opts.contextGuard) {
+    const cg = opts.contextGuard;
+
+    function isValidStatus(v: unknown): v is ContextStatus {
+      return v === 'active' || v === 'closed' || v === 'expired' || v === 'reset';
+    }
+
+    app.get('/api/contexts', async (request, reply) => {
+      const q = request.query as Record<string, string>;
+      if (q.state !== undefined && !isValidStatus(q.state)) {
+        return reply.code(400).send({ error: 'Invalid "state" query parameter.' });
+      }
+      const limit = q.limit !== undefined ? parseInt(q.limit, 10) : undefined;
+      if (limit !== undefined && (!Number.isFinite(limit) || limit < 1)) {
+        return reply.code(400).send({ error: 'Invalid "limit" query parameter.' });
+      }
+      return summarizeContexts(opts.storage, { state: q.state as ContextStatus | undefined, limit });
+    });
+
+    app.get<{ Params: { id: string } }>('/api/contexts/:id', async (request, reply) => {
+      const summary = summarizeOneContext(opts.storage, request.params.id);
+      if (!summary) return reply.code(404).send({ error: 'No such context.' });
+      return summary;
+    });
+
+    app.get<{ Params: { id: string } }>('/api/contexts/:id/history', async (request, reply) => {
+      if (!summarizeOneContext(opts.storage, request.params.id)) {
+        return reply.code(404).send({ error: 'No such context.' });
+      }
+      const q = request.query as Record<string, string>;
+      const limit = q.limit !== undefined ? parseInt(q.limit, 10) : undefined;
+      if (limit !== undefined && (!Number.isFinite(limit) || limit < 1)) {
+        return reply.code(400).send({ error: 'Invalid "limit" query parameter.' });
+      }
+      return summarizeContextHistory(opts.storage, request.params.id, { limit });
+    });
+
+    app.get<{ Params: { id: string } }>('/api/contexts/:id/explain', async (request, reply) => {
+      const report = explainContext(opts.storage, request.params.id);
+      if (!report.ok) return reply.code(404).send({ error: report.error });
+      return report;
+    });
+
+    /** Strictly validates a reset request body: exactly `{ revision: number, reason: string }`, rejecting any unknown field rather than silently ignoring it (mirrors parseReviewBody's/Safe Replay's own body-validation pattern above). */
+    function parseResetBody(body: unknown): { ok: true; revision: number; reason: string } | { ok: false; error: string } {
+      if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        return { ok: false, error: 'Request body must be a JSON object.' };
+      }
+      const rec = body as Record<string, unknown>;
+      const allowed = new Set(['revision', 'reason']);
+      const unexpected = Object.keys(rec).filter((k) => !allowed.has(k));
+      if (unexpected.length > 0) {
+        return { ok: false, error: `Request body contains unsupported field(s): ${unexpected.join(', ')}.` };
+      }
+      if (typeof rec.revision !== 'number' || !Number.isInteger(rec.revision) || rec.revision < 0) {
+        return { ok: false, error: 'Request body must include an exact, non-negative integer "revision".' };
+      }
+      if (typeof rec.reason !== 'string' || rec.reason.trim().length === 0) {
+        return { ok: false, error: 'Request body must include a non-empty string "reason".' };
+      }
+      if (rec.reason.length > 2000) {
+        return { ok: false, error: '"reason" is too long (max 2000 characters).' };
+      }
+      return { ok: true, revision: rec.revision, reason: rec.reason };
+    }
+
+    // In-flight de-duplication, exactly mirroring Safe Replay's own pattern
+    // above — a rapid double-submit against the SAME context resolves to
+    // one concurrency-safe compare-and-transition, not two races against
+    // resetContext()'s own exact-revision check.
+    const inFlightResets = new Map<string, Promise<ReturnType<typeof performContextReset>>>();
+
+    app.post<{ Params: { id: string }; Body: unknown }>('/api/contexts/:id/reset', async (request, reply) => {
+      const contextId = request.params.id;
+      const parsed = parseResetBody(request.body);
+      if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+
+      let pending = inFlightResets.get(contextId);
+      if (!pending) {
+        // Reuses the SAME already-open ApprovalManager instance the rest
+        // of the gateway process uses (opts.approvalManager) — never a
+        // second, parallel instance against the same storage.
+        pending = Promise.resolve(
+          performContextReset(opts.storage, opts.approvalManager, contextId, parsed.revision, parsed.reason, 'control-api')
+        );
+        inFlightResets.set(contextId, pending);
+        const cleanup = () => inFlightResets.delete(contextId);
+        void pending.then(cleanup, cleanup);
+      }
+
+      const result = await pending;
+      if (!result.ok) return reply.code(409).send({ error: result.error });
+
+      // Publish the reset transition through the SAME live-subscriber bus
+      // every other Context Guard/audit transition uses.
+      const latestEvent = opts.storage.listContextEvents({ contextId, limit: 1 })[0];
+      if (latestEvent) cg.emit(latestEvent);
+
+      return result;
+    });
+
+    app.get('/api/context-integrity', async () => verifyContextChainReport(opts.storage));
   }
 
   return app;

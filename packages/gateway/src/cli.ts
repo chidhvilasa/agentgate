@@ -38,6 +38,21 @@ function reportFatal(err: unknown): void {
   process.exitCode = 1;
 }
 
+/**
+ * Strips ANSI escape sequences and other non-printable control characters
+ * (keeping normal tab/newline/carriage-return) before printing a string to
+ * a real terminal. Used for Context Guard's `tool_name` field specifically
+ * because it is AGENT-CONTROLLED input (the literal `tools/call` `name`
+ * parameter, stdio.ts) — unlike most other printed fields, which are
+ * either AgentGate's own fixed text or bounded operator-authored config —
+ * so it is the one place hostile escape sequences could otherwise reach a
+ * human's terminal via `agentgate context status/history/explain`.
+ */
+function sanitizeForTerminal(s: string): string {
+  // eslint-disable-next-line no-control-regex -- deliberately matching C0 control chars/DEL to strip them.
+  return s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+}
+
 /** Resolves a relative path against the config file's own directory — matches loadGatewayConfig()'s resolution (see config/registry.ts) so `agentgate audit verify`/`replay` behave the same regardless of the caller's cwd. `:memory:` is SQLite's special sentinel, never resolved as a path. */
 function resolveRelativeToConfig(configPath: string, value: string): string {
   if (value === ':memory:' || path.isAbsolute(value)) return value;
@@ -661,6 +676,189 @@ See docs/POLICY_REFERENCE.md and ADR-0012 in docs/AI_DECISIONS.md for full seman
     break;
   }
 
+  case 'context': {
+    const sub = args[0] === '--help' || args[0] === '-h' ? undefined : args[0];
+    const rest0 = sub === undefined ? args : args.slice(1);
+    const configFlag = extractValueFlag(rest0, '--config');
+    const rest1 = configFlag.rest;
+    const { positional, flags } = splitFlags(rest1, ['--json', '--help', '-h']);
+    const configPath = configFlag.value ?? './agentgate.yml';
+
+    const helpText = `Usage: agentgate context <subcommand> [args] [--config <path>] [--json]
+
+Subcommands:
+  status [--state <active|closed|expired|reset>] [--limit <n>]   List contexts, most recently updated first
+  history [context-id] [--limit <n>]        Append-only transition history (all contexts if omitted)
+  explain <context-id>                      Bounded explanation: current labels, what established them,
+                                             and the latest stored contextual decision (never a fabricated one)
+  reset <context-id> --revision <n> --reason <text>   The only mutating subcommand — see below
+  verify                                    Verify the Context Guard append-only chain
+
+All subcommands default to --config ./agentgate.yml. Every read-only subcommand (status/history/explain/verify)
+never starts a downstream server, discovers tools, or executes anything.
+
+"reset" requires the EXACT full context id, the EXACT current revision, and a non-empty --reason. It appends a
+reset transition (never deletes history) and invalidates every pending contextual approval bound to that
+context. There is no --force, --all, or name-pattern reset, and no automatic reset.
+
+IMPORTANT: an execution context is conservative, AgentGate-OBSERVED gateway state — which tools were called and
+what operator policy says their results exposed the agent to. It is never proof that a model actually read or
+acted on anything, and resetting it has no effect whatsoever on what the upstream LLM/MCP client itself
+remembers. See docs/AI_DECISIONS.md (ADR-0013) and docs/THREAT_MODEL.md for the full model and its limitations.`;
+
+    if (!sub || flags.has('--help') || flags.has('-h')) {
+      console.log(helpText);
+      process.exitCode = flags.has('--help') || flags.has('-h') ? 0 : 1;
+      break;
+    }
+
+    import('./context-guard/cli.js')
+      .then((cg) => {
+        switch (sub) {
+          case 'status': {
+            const stateFlag = extractValueFlag(rest1, '--state');
+            const limitFlag = extractValueFlag(stateFlag.rest, '--limit');
+            const limit = limitFlag.value ? parseInt(limitFlag.value, 10) : undefined;
+            const report = cg.runContextStatus(configPath, { state: stateFlag.value as never, limit });
+            if (flags.has('--json')) {
+              console.log(JSON.stringify(report, null, 2));
+            } else {
+              console.log(`Contexts: ${report.contexts.length} shown of ${report.total} total${report.truncated ? ' (truncated — narrow with --state or raise --limit)' : ''}`);
+              console.log('');
+              for (const c of report.contexts) {
+                console.log(`${c.context_id.slice(0, 12)}…  ${c.status.padEnd(8)} rev=${c.revision}  labels=[${c.labels.join(', ')}]  pending_approvals=${c.pending_approval_count}`);
+                console.log(`  created: ${c.created_at}   updated: ${c.updated_at}${c.expires_at ? `   expires: ${c.expires_at}` : ''}`);
+                if (c.server_identity) console.log(`  server: ${c.server_identity}`);
+              }
+              if (report.contexts.length === 0) console.log('(no contexts recorded yet)');
+              console.log('');
+              console.log('This is conservative AgentGate-observed gateway state, not proof of causal model influence.');
+            }
+            process.exitCode = 0;
+          }
+            break;
+
+          case 'history': {
+            const limitFlag = extractValueFlag(rest1, '--limit');
+            const limit = limitFlag.value ? parseInt(limitFlag.value, 10) : undefined;
+            const { positional: pos2 } = splitFlags(limitFlag.rest, ['--json', '--help', '-h']);
+            const contextId = pos2[0];
+            const report = cg.runContextHistory(configPath, contextId, { limit });
+            if (flags.has('--json')) {
+              console.log(JSON.stringify(report, null, 2));
+            } else {
+              console.log(`Context: ${report.context_id ?? '(all contexts)'}`);
+              console.log(`Chain valid: ${report.chain_valid ? '✅ yes' : `❌ no (${report.chain_error})`}`);
+              if (report.truncated) console.log('(showing the most recent transitions only — truncated)');
+              console.log('');
+              for (const e of report.events) {
+                const labelPart = e.labels_added && e.labels_added.length > 0 ? ` +[${e.labels_added.join(', ')}]` : '';
+                console.log(`[${e.created_at}] rev ${e.revision_before ?? '—'}→${e.revision_after ?? '—'}  ${e.event_type}${e.tool_name ? ` (${sanitizeForTerminal(e.tool_name)})` : ''}${labelPart}${e.rule_id ? `  rule=${e.rule_id}` : ''}${e.action ? `  action=${e.action}` : ''}`);
+                if (e.reason) console.log(`    ${sanitizeForTerminal(e.reason)}`);
+              }
+              if (report.events.length === 0) console.log('(no transitions recorded yet)');
+            }
+            process.exitCode = report.chain_valid ? 0 : 1;
+          }
+            break;
+
+          case 'explain': {
+            const contextId = positional[0];
+            if (!contextId) {
+              console.error('Usage: agentgate context explain <context-id> [--config <path>] [--json]');
+              process.exitCode = 1;
+              break;
+            }
+            const report = cg.runContextExplain(configPath, contextId);
+            if (flags.has('--json')) {
+              console.log(JSON.stringify(report, null, 2));
+            } else if (!report.ok) {
+              console.error(`❌ ${report.error}`);
+            } else {
+              console.log(`Context:  ${report.context_id}`);
+              console.log(`Status:   ${report.status}`);
+              console.log(`Revision: ${report.revision}`);
+              console.log('');
+              console.log(`Current labels: [${(report.labels ?? []).join(', ') || '(none)'}]`);
+              for (const o of report.label_origins ?? []) {
+                console.log(`  - "${o.label}" established at ${o.at}${o.tool_name ? ` by tool "${sanitizeForTerminal(o.tool_name)}"` : ''}${o.source_event_id ? ` (audit event ${o.source_event_id})` : ''}`);
+                if (o.reason) console.log(`      ${sanitizeForTerminal(o.reason)}`);
+              }
+              console.log('');
+              if (report.latest_decision) {
+                console.log(`Latest stored contextual decision: ${report.latest_decision.action} for "${sanitizeForTerminal(report.latest_decision.tool_name)}" at ${report.latest_decision.at}`);
+                if (report.latest_decision.rule_id) console.log(`  matched rule: ${report.latest_decision.rule_id}`);
+                if (report.latest_decision.reason) console.log(`  reason: ${sanitizeForTerminal(report.latest_decision.reason)}`);
+              } else {
+                console.log('No contextual decision has been recorded for this context yet — no call has been evaluated against it.');
+              }
+              console.log('');
+              console.log(report.lifecycle_note);
+              console.log('');
+              console.log('This reflects only what AgentGate actually observed and recorded — never a prediction of what a not-yet-attempted call would do.');
+            }
+            process.exitCode = report.ok ? 0 : 1;
+          }
+            break;
+
+          case 'reset': {
+            let rest2 = rest1;
+            const revFlag = extractValueFlag(rest2, '--revision');
+            rest2 = revFlag.rest;
+            const reasonFlag = extractValueFlag(rest2, '--reason');
+            rest2 = reasonFlag.rest;
+            const { positional: pos2 } = splitFlags(rest2, ['--json', '--help', '-h']);
+            const contextId = pos2[0];
+            if (!contextId || !revFlag.value || !reasonFlag.value) {
+              console.error('Usage: agentgate context reset <context-id> --revision <n> --reason <text> [--config <path>]');
+              console.error('Both the exact current revision and a non-empty reason are required — there is no --force, --all, or automatic reset.');
+              process.exitCode = 1;
+              break;
+            }
+            const revision = parseInt(revFlag.value, 10);
+            const report = cg.runContextReset(configPath, contextId, revision, reasonFlag.value);
+            if (flags.has('--json')) {
+              console.log(JSON.stringify(report, null, 2));
+            } else if (report.ok) {
+              console.log(`✅ Context ${contextId} reset to revision ${report.new_revision} (status: ${report.status}).`);
+              if ((report.invalidated_approval_count ?? 0) > 0) {
+                console.log(`   Invalidated ${report.invalidated_approval_count} pending contextual approval(s) bound to this context.`);
+              }
+              console.log('');
+              console.log(`⚠️  ${cg.RESET_MEMORY_WARNING}`);
+            } else {
+              console.error(`❌ ${report.error}`);
+            }
+            process.exitCode = report.ok ? 0 : 1;
+          }
+            break;
+
+          case 'verify': {
+            const report = cg.runContextVerify(configPath);
+            if (flags.has('--json')) {
+              console.log(JSON.stringify(report, null, 2));
+            } else if (report.valid) {
+              console.log(`✅ Context Guard chain verified. ${report.count} event(s) intact.`);
+              console.log(`   ${report.limitation}`);
+            } else {
+              console.error(`❌ Context Guard chain verification failed!`);
+              console.error(`   Error: ${report.error}`);
+              console.error(`   Verified up to: ${report.count} event(s) before the failure.`);
+            }
+            process.exitCode = report.valid ? 0 : 1;
+          }
+            break;
+
+          default:
+            console.error(`Unknown context subcommand "${sub}".`);
+            console.log(helpText);
+            process.exitCode = 1;
+        }
+      })
+      .catch(reportFatal);
+    break;
+  }
+
   case '--version':
   case '-v': {
     try {
@@ -696,6 +894,10 @@ Running:
   agentgate tools <subcommand>               Tool Integrity Registry: scan/status/diff/trust/reject/
                                               history for downstream tool definitions (rug-pull defense).
                                               Run "agentgate tools --help" for details.
+  agentgate context <subcommand>              Context Guard: status/history/explain/reset/verify for
+                                              cross-tool session risk (conservative observed gateway
+                                              state, never causal model-memory tracking). Run
+                                              "agentgate context --help" for details.
 
   agentgate --version                        Print the installed version
   agentgate <command> --help                 Print detailed usage for a command

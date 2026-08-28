@@ -15,9 +15,12 @@ import type { ApprovalManager } from './approval.js';
 import type { GatewayConfig, DownstreamServer } from './config/registry.js';
 import { resolveServer, defaultContextGuardConfig } from './config/registry.js';
 import { sanitizeToolResult } from './output-security.js';
+import { computeServerIdentity } from './tool-integrity/identity.js';
+import { getTrustedFingerprint } from './tool-integrity/enforcement.js';
 import { evaluateContextGuard, modeEnforces, computeArgumentDigest, checkApprovalContextValid } from './context-guard/enforcement.js';
 import { appendContextLabels, recordCallEvaluation } from './context-guard/state.js';
 import { isAtLeastAsStrict } from './context-guard/rules.js';
+import type { ContextEvent } from './context-guard/types.js';
 
 export interface PipelineContext {
   storage: AuditStorage;
@@ -25,7 +28,15 @@ export interface PipelineContext {
   config: GatewayConfig;
   /** Milestone 7 (ADR-0013): the single execution context for this gateway process/upstream-connection lifetime. */
   contextId: string;
-  emitEvent: (event: AuditEvent) => void;
+  /**
+   * Publishes an audit-event transition OR a Context Guard transition
+   * (ADR-0013) to the SAME live subscriber mechanism (SSE, in server.ts) —
+   * one bus, discriminated by shape at the point of publication, never a
+   * second parallel stream. A ContextEvent is already bounded/redacted by
+   * construction (context-guard/state.ts never stores raw content), so no
+   * further sanitization is needed here.
+   */
+  emitEvent: (event: AuditEvent | ContextEvent) => void;
 }
 
 /** Extracts the primary path from tool arguments (heuristic). */
@@ -223,14 +234,22 @@ export async function runPipeline(opts: {
   // history`/`explain` and the Control Center show what Context Guard
   // WOULD have done even in monitor mode, not only what it enforced.
   if (contextGuardConfig.mode !== 'disabled') {
-    recordCallEvaluation(ctx.storage, ctx.contextId, {
+    const evaluationEvent = recordCallEvaluation(ctx.storage, ctx.contextId, {
       sourceEventId: eventId,
       toolName,
       ruleId: cgEvaluation.ruleId,
       action: contextualRuleId ? effectiveDecision.type.toLowerCase() : 'allow',
       reason: cgEvaluation.reason,
     });
+    ctx.emitEvent(evaluationEvent);
   }
+
+  // Resolved once, reused for both the approval-creation fingerprint
+  // binding below (step 5) and the actual execution (step 6) — the exact
+  // same downstream-server resolution decision either way, never
+  // re-derived differently for the two purposes.
+  const server = resolveServer(ctx.config, toolName);
+  const serverIdentity = server ? computeServerIdentity(server).identity : null;
 
   // ── 5. Route by decision ───────────────────────────────────────────────────
 
@@ -263,7 +282,13 @@ export async function runPipeline(opts: {
         ? {
             context_id: ctx.contextId,
             context_revision: contextRevisionAtEvaluation ?? 0,
-            tool_fingerprint: null,
+            // The EXACT currently-trusted Tool Integrity fingerprint for
+            // this server/tool right now — never a client-supplied value.
+            // null if the tool has no trusted definition at all (never
+            // scanned, quarantined, drifted, rejected, removed, or Tool
+            // Integrity is disabled) — a legitimate "not bound" state, not
+            // an error; see checkApprovalContextValid()'s null-skip.
+            tool_fingerprint: serverIdentity ? getTrustedFingerprint(ctx.storage, serverIdentity, toolName) : null,
             argument_digest: argumentDigest,
             contextual_rule_id: contextualRuleId ?? 'base-policy',
           }
@@ -292,10 +317,13 @@ export async function runPipeline(opts: {
 
     // Re-validate the context binding RIGHT NOW, immediately before
     // execution — the context may have accumulated more risk labels (from
-    // a concurrent call) in the window between approval creation and this
-    // human decision. A stale/mismatched binding fails closed here even
-    // though the approval itself already shows APPROVED.
-    const contextCheck = checkApprovalContextValid(resolvedApproval, ctx.storage, toolName, argumentDigest);
+    // a concurrent call), AND the tool's trusted Tool Integrity definition
+    // may have drifted/been quarantined, in the window between approval
+    // creation and this human decision. A stale/mismatched binding fails
+    // closed here even though the approval itself already shows APPROVED.
+    // The fingerprint is re-read FRESH here, never reused from creation time.
+    const currentTrustedFingerprint = serverIdentity ? getTrustedFingerprint(ctx.storage, serverIdentity, toolName) : null;
+    const contextCheck = checkApprovalContextValid(resolvedApproval, ctx.storage, toolName, argumentDigest, currentTrustedFingerprint);
     if (!contextCheck.ok) {
       ctx.storage.updateEventStatus(eventId, 'CANCELLED', {
         duration_ms: Date.now() - startTime,
@@ -307,7 +335,6 @@ export async function runPipeline(opts: {
   }
 
   // ── 6. Execute ─────────────────────────────────────────────────────────────
-  const server = resolveServer(ctx.config, toolName);
   if (!server) {
     // toolName is agent-controlled input embedded in this message — route it
     // through the same canonical sanitizer as every other persisted error.
@@ -380,11 +407,14 @@ export async function runPipeline(opts: {
   if (contextGuardConfig.mode !== 'disabled' && finalStatus === 'SUCCEEDED' && !resultBlocked) {
     const addsOnResult = contextGuardConfig.tools[toolName]?.adds_on_result ?? [];
     if (addsOnResult.length > 0) {
-      appendContextLabels(ctx.storage, ctx.contextId, addsOnResult, {
+      const labelResult = appendContextLabels(ctx.storage, ctx.contextId, addsOnResult, {
         sourceEventId: eventId,
         toolName,
         reason: `Tool "${toolName}" succeeded with a non-blocked result.`,
       });
+      // null when every label was already present (duplicate-transition
+      // idempotence, state.ts) — no new event exists to publish.
+      if (labelResult.event) ctx.emitEvent(labelResult.event);
     }
   }
 

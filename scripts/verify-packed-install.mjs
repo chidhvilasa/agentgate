@@ -81,6 +81,28 @@ async function main() {
     const smokeOut = execFileSync(binPath, ['smoke-test'], { cwd: consumerDir, encoding: 'utf-8', shell: process.platform === 'win32' });
     results.push(check('agentgate smoke-test passes from the installed package', smokeOut.includes('Smoke test passed')));
 
+    console.log('\nStep 5 — Context Guard CLI (ADR-0013) help/read-only command smoke from the installed package...');
+    const contextHelpOut = execFileSync(binPath, ['context', '--help'], { cwd: consumerDir, encoding: 'utf-8', shell: process.platform === 'win32' });
+    results.push(check('agentgate context --help prints usage and the conservative-observation wording', contextHelpOut.includes('Usage: agentgate context') && /conservative/i.test(contextHelpOut)));
+
+    // A minimal real config + empty db so `context status`/`verify` (read-only) can run against a genuine, if empty, database — never a downstream launch.
+    fs.writeFileSync(path.join(consumerDir, 'policy.yml'), 'version: 1\ndefaults:\n  decision: deny\nrules: []\n');
+    fs.writeFileSync(
+      path.join(consumerDir, 'agentgate.yml'),
+      'version: 1\ngateway_port: 4799\ncontrol_port: 4798\npolicy: ./policy.yml\ndb_path: ./context-guard-smoke.sqlite\ncontext_guard:\n  mode: enforce\nservers:\n  - id: fixture\n    transport: stdio\n    command: node\n    args: ["dummy.mjs"]\n'
+    );
+    const contextStatusOut = execFileSync(binPath, ['context', 'status', '--config', 'agentgate.yml', '--json'], {
+      cwd: consumerDir,
+      encoding: 'utf-8',
+      shell: process.platform === 'win32',
+    });
+    const contextStatusParsed = JSON.parse(contextStatusOut);
+    results.push(check('agentgate context status --json runs read-only against a fresh installed database', Array.isArray(contextStatusParsed.contexts)));
+
+    const contextVerifyOut = execFileSync(binPath, ['context', 'verify', '--config', 'agentgate.yml'], { cwd: consumerDir, encoding: 'utf-8', shell: process.platform === 'win32' });
+    results.push(check('agentgate context verify passes against a fresh installed (empty) chain', contextVerifyOut.includes('✅') || /verified/i.test(contextVerifyOut)));
+    fs.unlinkSync(path.join(consumerDir, 'context-guard-smoke.sqlite'));
+
     const allPassed = results.every(Boolean);
     console.log('');
     if (allPassed) {

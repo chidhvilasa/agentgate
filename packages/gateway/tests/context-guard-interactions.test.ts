@@ -311,22 +311,33 @@ rules:
     // event is emitted — the storage write must already be durable at
     // that instant, not merely "eventually" by the time the whole
     // pipeline call finishes (which would trivially always show the
-    // FINAL status and prove nothing about ordering).
-    const snapshotsAtEmitTime: Array<{ emittedStatus: string; storedStatusAtThatMoment: string }> = [];
-    const emitSpy = vi.fn((event: { id: string; status: string }) => {
+    // FINAL status and prove nothing about ordering). The SAME bus now
+    // carries both AuditEvent transitions (RECEIVED/DENIED — discriminate
+    // by `status`) and the Context Guard `call_evaluated` ContextEvent
+    // (discriminate by `event_type`) — see pipeline.ts step 4.5.
+    type EmittedKind = { kind: 'audit'; emittedStatus: string; storedStatusAtThatMoment: string } | { kind: 'context'; emittedEventType: string };
+    const snapshotsAtEmitTime: EmittedKind[] = [];
+    const emitSpy = vi.fn((event: { id: string; status?: string; event_type?: string }) => {
+      if ('event_type' in event && event.event_type) {
+        snapshotsAtEmitTime.push({ kind: 'context', emittedEventType: event.event_type });
+        return;
+      }
       const storedNow = storage.getEvent(event.id);
-      snapshotsAtEmitTime.push({ emittedStatus: event.status, storedStatusAtThatMoment: storedNow!.status });
+      snapshotsAtEmitTime.push({ kind: 'audit', emittedStatus: event.status!, storedStatusAtThatMoment: storedNow!.status });
     });
     ctx.emitEvent = emitSpy as unknown as typeof ctx.emitEvent;
     try {
       await runPipeline({ ctx, agent: AGENT, toolName: 'forbidden_tool', rawArgs: {}, mcpEra: 'legacy-2025', jsonrpcId: '1' });
-      expect(emitSpy).toHaveBeenCalledTimes(2); // RECEIVED, then DENIED
-      expect(snapshotsAtEmitTime.map((s) => s.emittedStatus)).toEqual(['RECEIVED', 'DENIED']);
-      // At the moment of EACH emit, storage already durably reflects that
-      // exact status — the write always precedes the notify, never the
-      // reverse, for every transition including a Context-Guard-escalated one.
+      expect(emitSpy).toHaveBeenCalledTimes(3); // RECEIVED, call_evaluated, then DENIED
+      expect(
+        snapshotsAtEmitTime.map((s) => (s.kind === 'audit' ? s.emittedStatus : `context:${s.emittedEventType}`))
+      ).toEqual(['RECEIVED', 'context:call_evaluated', 'DENIED']);
+      // At the moment of EACH audit-event emit, storage already durably
+      // reflects that exact status — the write always precedes the
+      // notify, never the reverse, for every transition including a
+      // Context-Guard-escalated one.
       for (const snap of snapshotsAtEmitTime) {
-        expect(snap.storedStatusAtThatMoment).toBe(snap.emittedStatus);
+        if (snap.kind === 'audit') expect(snap.storedStatusAtThatMoment).toBe(snap.emittedStatus);
       }
       void events;
     } finally {

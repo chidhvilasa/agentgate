@@ -67,16 +67,29 @@ export interface ApprovalContextCheck {
  * not just at creation time. The context may have accumulated MORE risk
  * labels (from a concurrent call) in the window between approval creation
  * and a human clicking "approve"; this closes that window by re-checking
- * the exact revision, tool identity, and argument digest right before
- * execution, and failing closed on any mismatch. An approval with no
- * context binding at all (context_id === null — pre-Milestone-7 or
- * non-contextual) always passes this check, unchanged from prior behavior.
+ * the exact revision, tool identity, argument digest, AND the tool's
+ * currently-trusted Tool Integrity fingerprint right before execution, and
+ * failing closed on any mismatch. An approval with no context binding at
+ * all (context_id === null — pre-Milestone-7 or non-contextual) always
+ * passes this check, unchanged from prior behavior.
+ *
+ * `expectedToolFingerprint` must be freshly computed by the caller via
+ * `getTrustedFingerprint()` (tool-integrity/enforcement.ts) immediately
+ * before this call — never reused from approval-creation time, and never
+ * client-supplied. `approval.tool_fingerprint === null` (no fingerprint
+ * was bound — e.g. the tool had no trusted definition yet at creation
+ * time, or this is a legacy approval) skips this specific check, exactly
+ * like `argument_digest === null` above: a binding that was never made
+ * cannot be violated. This is a defense-in-depth addition alongside, never
+ * a replacement for, Tool Integrity's own independent `checkCallAllowed()`
+ * gate, which re-verifies trust on every call regardless of Context Guard.
  */
 export function checkApprovalContextValid(
   approval: Approval,
   storage: AuditStorage,
   expectedToolName: string,
-  expectedArgumentDigest: string
+  expectedArgumentDigest: string,
+  expectedToolFingerprint: string | null
 ): ApprovalContextCheck {
   if (approval.context_id === null) return { ok: true }; // not a contextual approval — unchanged prior behavior.
 
@@ -97,6 +110,9 @@ export function checkApprovalContextValid(
   }
   if (approval.argument_digest !== null && approval.argument_digest !== expectedArgumentDigest) {
     return { ok: false, reason: 'The call arguments no longer match what this approval was created for.' };
+  }
+  if (approval.tool_fingerprint !== null && approval.tool_fingerprint !== expectedToolFingerprint) {
+    return { ok: false, reason: "The tool's trusted definition has changed since this approval was created — it must be re-evaluated." };
   }
   if (approval.scope !== expectedToolName) {
     return { ok: false, reason: 'The target tool no longer matches what this approval was created for.' };

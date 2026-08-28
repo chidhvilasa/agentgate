@@ -876,16 +876,26 @@ decisions across AI-agent sessions. Verify entries against the repository.
       (`pipeline.ts` step 5) recording the EXACT `context_id`, `context_revision` observed AT THAT MOMENT,
       `argument_digest` (`computeArgumentDigest()` — SHA-256 of the REDACTED arguments, never raw), and the
       `contextual_rule_id` that required it (`'base-policy'` if the base policy itself required approval with no
-      contextual escalation). `tool_fingerprint` is included in the schema for a Tool Integrity fingerprint
-      binding but is not yet populated by this milestone's call sites (`null` today) — a named, honest gap, not a
-      claimed guarantee. Every field is nullable and a pre-Milestone-7 (or non-contextual) approval simply has
+      contextual escalation), and (**Amended 2026-08-28** — see the CLI/API session log entry below for the exact
+      call sites and tests; the design intent stated at the time of the original decision did not change, only its
+      completion) `tool_fingerprint`: the EXACT currently-trusted Tool Integrity fingerprint for the resolved
+      downstream server/tool, read via `getTrustedFingerprint()` (`tool-integrity/enforcement.ts` — the same
+      `status === 'trusted' && current_fingerprint === trusted_fingerprint` condition `checkCallAllowed()` uses,
+      never a client-supplied value). Every field is nullable and a pre-Milestone-7 (or non-contextual) approval simply has
       `null` in all of them, meaning "not context-bound," which every consumer must treat as valid and ordinary,
       never as an error. At CONSUMPTION time — immediately before downstream execution, after a human has already
       clicked "approve" — `checkApprovalContextValid()` (`context-guard/enforcement.ts`) re-reads CURRENT context
       state fresh and fails closed if: the bound context no longer exists; the current revision no longer exactly
       matches the revision recorded at approval-creation time (the context accumulated more risk in the window
-      between creation and a human's decision); the argument digest no longer matches (arguments changed); or the
-      tool name no longer matches the approval's `scope`. This closes the create-time/consume-time window a
+      between creation and a human's decision); the argument digest no longer matches (arguments changed); the
+      tool's CURRENT trusted fingerprint (re-read fresh via `getTrustedFingerprint()`, never reused from
+      creation time) no longer matches the fingerprint bound at creation — catching drift, quarantine, rejection,
+      or removal in that same window, and failing closed even though the approval itself already shows APPROVED;
+      or the tool name no longer matches the approval's `scope`. A `null` bound `tool_fingerprint` (no trusted
+      definition existed at creation time) skips this specific check, exactly like a `null` `argument_digest` —
+      a binding that was never made cannot be violated; this is a defense-in-depth addition alongside, never a
+      replacement for, Tool Integrity's own independent `checkCallAllowed()` gate, which re-verifies trust on
+      every call regardless of Context Guard. This closes the create-time/consume-time window a
       naive "check once at creation" design would leave open. Approval consumption remains single-use
       (pre-existing `consumed` flag, ADR unchanged) and TTL-bound (pre-existing `expires_at`); an approval never
       clears context labels or grants any future call permission — it authorizes exactly the one call it was
@@ -983,8 +993,10 @@ decisions across AI-agent sessions. Verify entries against the repository.
   - A single append-only table (ADR-0010's pattern) instead of the append-only-log-plus-projection pattern:
     rejected for the same reason ADR-0012 rejected it for Tool Integrity (point 9 there) — context state has a
     meaningful "current state" (active labels) that enforcement needs to read cheaply on every call.
-  - Populating `tool_fingerprint` on every contextual approval in this milestone: deferred, not implemented —
-    the schema supports it (nullable) but no call site populates it yet; stated as a gap, not silently omitted.
+  - Populating `tool_fingerprint` on every contextual approval in this milestone: originally deferred (schema
+    supported it, nullable, but no call site populated it) — **completed in the 2026-08-28 CLI/API session** (see
+    session log below); a `null` binding remains the correct, non-error representation for a tool with no
+    trusted definition at creation time, not merely a placeholder for unfinished work.
 - Consequences:
   - Positive: a real defense against cross-tool sequence escalation exists, enforced in the actual gateway request
     path — including against a client calling a tool directly by a cached/guessed name — not only in comment
@@ -996,8 +1008,8 @@ decisions across AI-agent sessions. Verify entries against the repository.
     ADR-0012's own `monitor` default trade-off — an operator must opt into `enforce` to get real enforcement;
     context does not survive a gateway restart or a reconnect under a new process, so a real attack sequence that
     spans a restart is not detected by this milestone; TTL-based expiry exists in the schema but is not yet
-    actively scheduled; `tool_fingerprint` approval binding is not yet populated; the residual cross-request race
-    (point 15b) means this milestone's concurrency guarantee is real but narrower than "fully linearized."
+    actively scheduled; the residual cross-request race (point 15b) means this milestone's concurrency guarantee
+    is real but narrower than "fully linearized."
 - Limitations (stated explicitly, not implied):
   - This is not model-reasoning inspection, not causal proof that one tool's result actually influenced a later
     call, and not information-flow/taint tracking of any kind — see point 2.
@@ -2587,3 +2599,137 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Exact next action: push `main`, observe GitHub CI and Security for the exact pushed commit
   (`3a98860a5fc5afbeb36f278af9ebc1d53b9f9669`) to completion, repair any real failure found there via a normal
   follow-up commit, and produce the final report.
+
+### 2026-08-28 — Milestone 7 CLI/API/SSE/fingerprint-binding session (built on core checkpoint `61c02c3`)
+
+- Prompt objective: finish the Context Guard CLI, authenticated Control API endpoints, SSE exposure, and the
+  previously-unpopulated `tool_fingerprint` contextual-approval binding, on top of the already-committed local
+  core checkpoint (`61c02c3aeb2ae1dee96d306dda5a2b8f782e0956`, still unpushed).
+- Decisions added or changed: ADR-0013's decision text (point 10) **amended** — not superseded — to reflect
+  `tool_fingerprint` actually being populated/revalidated now (see the inline, dated "**Amended 2026-08-28**"
+  marker in point 10 and the matching updates to its Alternatives-considered and Consequences bullets — the
+  ADR's history is preserved by the ledger entries around it, chiefly this one, which record exactly what the
+  original "deferred, not implemented" text said and why it changed, rather than the ADR text itself carrying
+  struck-through markup). No new ADR was needed: the CLI/API/SSE surfaces built this session implement exactly
+  what ADR-0013's own Limitations section already scoped as "later phases of this same milestone" — no design
+  decision changed.
+- Implementation completed:
+  - **Fingerprint binding** (`tool-integrity/enforcement.ts`: new `getTrustedFingerprint()`; `context-guard/
+    enforcement.ts`: `checkApprovalContextValid()` gained a 5th `expectedToolFingerprint` parameter;
+    `pipeline.ts`: `resolveServer()` hoisted above the approval-creation branch and reused for both binding
+    (creation time) and revalidation (consumption time, re-read fresh, never reused from creation)). A `null`
+    bound fingerprint (no trusted definition existed at creation) skips the check, matching the existing
+    `argument_digest` null-skip pattern — defense-in-depth alongside, never a replacement for, Tool Integrity's
+    own independent `checkCallAllowed()` gate.
+  - **CLI** (`context-guard/cli.ts`, new; `cli.ts`: `case 'context'`): `status` (bounded, `--state`/`--limit`
+    filters, pending-approval counts), `history` (bounded, deterministic, chain-verified), `explain` (reports
+    only stored evidence — `latest_decision: null`, never fabricated, when no `call_evaluated` event exists),
+    `reset` (exact context id/revision, non-empty bounded reason, appends a `context_reset` transition, actively
+    denies every pending contextual approval bound to that context via the shared `ApprovalManager`), `verify`
+    (delegates entirely to `storage.verifyContextChain()` — no second hash-chain implementation). Core logic is
+    split into storage-accepting functions (`summarizeContexts`, `summarizeContextHistory`, `explainContext`,
+    `performContextReset`, `verifyContextChainReport`) reused directly by both the CLI wrappers and the Control
+    API routes below — never two independent implementations. Added `sanitizeForTerminal()` in `cli.ts` (strips
+    ANSI/control characters) applied to `tool_name` (agent-controlled, the literal `tools/call` `name` parameter)
+    and `reason` fields before printing, since no ANSI-stripping utility existed anywhere in this codebase before
+    this session and `tool_name` specifically is real hostile-input-shaped surface, not theoretical.
+  - **Control API** (`api/control.ts`): `GET /api/contexts` (bounded, `?state=`/`?limit=` validated),
+    `GET /api/contexts/:id`, `GET /api/contexts/:id/history`, `GET /api/contexts/:id/explain`,
+    `POST /api/contexts/:id/reset` (strict body schema — exactly `{revision, reason}`, unknown fields rejected,
+    in-flight de-duplication mirroring Safe Replay's own pattern, reuses the process's single already-open
+    `ApprovalManager` rather than constructing a second one), `GET /api/context-integrity`. All existing
+    security middleware (loopback Host check, Origin/CORS, `Referrer-Policy: no-referrer`, per-launch auth
+    token) applies unchanged — no new middleware bypass was introduced. Routes are gated behind an optional
+    `contextGuard` opt exactly like the existing `toolIntegrity` opt, absent (404) when not configured.
+  - **SSE**: `PipelineContext.emitEvent`'s type widened from `AuditEvent` to `AuditEvent | ContextEvent`;
+    `server.ts`'s `eventBus`/`subscribers` widened to also carry `ContextEvent`; `pipeline.ts` now publishes the
+    `call_evaluated` event (step 4.5) and any non-null `label_added` event (step 8) through the SAME `ctx.
+    emitEvent` audit events already use; `transport/stdio.ts`'s transport-close handler publishes the resulting
+    `context_closed`/`context_expired` event when a fresh transition actually occurred (guarded against
+    re-publishing on the idempotent no-op close path); the reset Control API route publishes through the same
+    bus via a `contextGuard.emit` callback reusing `ctx.emitEvent` — one bus, no second parallel stream, no
+    duplicate publication. `api/control.ts`'s existing single SSE handler discriminates by payload shape
+    (`'event_type' in payload`) and sends `event: context_event` instead of the existing `event: audit_event` —
+    the Control Center's actual frontend SSE consumer (`apps/control-center/src/api.ts`) only ever subscribes to
+    `audit_event` and needed no change; it silently ignores `context_event` frames it doesn't listen for.
+  - **A second real defect found and fixed while wiring transport-close SSE publication** (beyond the
+    stdin-`'end'` gap already fixed in the core checkpoint): none new this session — the stdin-`'end'` fix from
+    the core checkpoint was re-verified still correct and is what this session's `context_closed` SSE
+    publication now rides on.
+  - `docs/AI_DECISIONS.md`: this entry, plus the ADR-0013 point-10 amendment described above.
+  - `scripts/verify-packed-install.mjs`: added Step 5 (`agentgate context --help`, `context status --json`,
+    `context verify` against a fresh installed package + empty database) — the packaged-artifact evidence this
+    milestone's CLI work requires, run alongside the pre-existing pack/install/smoke-test steps, not as a
+    separate script.
+- Files materially changed: `packages/gateway/src/context-guard/cli.ts` (new), `packages/gateway/src/cli.ts`,
+  `packages/gateway/src/context-guard/enforcement.ts`, `packages/gateway/src/tool-integrity/enforcement.ts`,
+  `packages/gateway/src/pipeline.ts`, `packages/gateway/src/server.ts`, `packages/gateway/src/api/control.ts`,
+  `packages/gateway/tests/context-guard-{cli,api,sse,fingerprint-binding,fingerprint-gateway}.test.ts` (new),
+  `packages/gateway/tests/context-guard-{enforcement,interactions}.test.ts` (updated for the new fingerprint
+  parameter and the new `call_evaluated` SSE emission respectively), `scripts/verify-packed-install.mjs`,
+  `docs/AI_DECISIONS.md`.
+- Tests added and exact counts: `context-guard-cli.test.ts` 32, `context-guard-api.test.ts` 37,
+  `context-guard-sse.test.ts` 5, `context-guard-fingerprint-binding.test.ts` 7 (pipeline-level, real Tool
+  Integrity state), `context-guard-fingerprint-gateway.test.ts` 1 (real compiled gateway, real MCP client, real
+  out-of-process Tool Integrity drift simulation — run 3 consecutive times, deterministic each time);
+  `context-guard-enforcement.test.ts` grew from 23 to 28 (5 new fingerprint-binding unit cases);
+  `context-guard-interactions.test.ts` stayed at 14 (one test's assertions updated for the new `call_evaluated`
+  SSE emission, not a new test). Full gateway suite: **464 passed, 2 skipped, 39 files, 0 failed** — run twice,
+  byte-identical both times. Full workspace: policy 52/52, control-center 47/47, gateway 464/2-skipped — **563
+  tests total across 44 files, 0 failed**. Build: clean (4/4 packages). Lint: 0 errors, the same 2 pre-existing
+  `no-explicit-any` warnings as every prior session (none newly introduced — two `no-unnecessary-type-assertion`
+  and one `no-unused-vars` error introduced while writing this session's own test files were found and fixed
+  before this count). `git diff --check`: clean (CRLF notices only). Tracked/new-file secret scan (17 files):
+  clean. Packed-install verification (`scripts/verify-packed-install.mjs`, extended this session): **all 15
+  checks PASS**, including the 3 new Context Guard steps.
+- Defects found and fixed this session (with reasons):
+  1. `context-guard-interactions.test.ts`'s SSE-ordering test broke the moment `call_evaluated` events started
+     being published (a genuine new emission this session added) — its mock assumed every emitted object was
+     AuditEvent-shaped and crashed reading `.status` off a `ContextEvent`. Fixed by discriminating on
+     `event_type` in the test's own mock, and updated the expected emission count/order (`RECEIVED`,
+     `context:call_evaluated`, `DENIED`) to match the now-actual three-event sequence. A direct, expected
+     consequence of a real new code path, not a pre-existing bug.
+  2. A regex-based bulk-edit while adding the 5th `checkApprovalContextValid()` parameter to existing test call
+     sites matched a literal occurrence of the function's own name inside an unrelated `it(...)` title string,
+     corrupting an adjacent `createContext(...)` call into a spurious 4-argument form. Caught immediately by a
+     full `git diff` review of the edited file before running it; fixed by hand. No test file was left in a
+     silently-wrong state — the corruption was visible before any test ran.
+  3. This session's own SSE test harness (a first-of-its-kind real fetch()/ReadableStream-based SSE reader for
+     this codebase — no prior test exercised `/api/events/stream` at all) initially hung indefinitely on any
+     "nothing arrives" assertion: each loop iteration issued a FRESH `reader.read()` without checking whether
+     the previous one (lost to a timeout race) was still outstanding — invalid concurrent use of a
+     `ReadableStreamDefaultReader`. Fixed by tracking exactly one in-flight read across iterations. A dedicated
+     "fresh connection does not replay prior transitions" test still proved unreliable in this environment even
+     after that fix (and after removing a separately-hanging `reader.cancel()` await in cleanup) despite real
+     debugging effort, and was removed rather than shipped flaky or silently skipped — the property it would
+     have proven is not new behavior this milestone introduces (the underlying `subscribers` array is the exact
+     same pre-existing, unmodified per-process mechanism `audit_event`/`Approval` traffic already used), and is
+     documented as a stated test-coverage gap, not hidden.
+- Public security behavior preserved/added: every new Control API route sits behind the same loopback/Host/
+  Origin/CORS/auth-token/`Referrer-Policy` middleware as every existing route — no new route bypasses it. The
+  reset route validates an exact schema (`{revision: number, reason: string}`, unknown fields rejected with
+  400), requires the EXACT current revision (409 on staleness), requires a non-empty bounded reason, and is
+  concurrency-safe (a concurrent double-reset against the same context: exactly one 200, one 409, exactly one
+  `context_reset` transition ever recorded — verified by a dedicated test issuing both requests via
+  `Promise.all`). No route exists to reset/clear all contexts, remove a label directly, bypass policy,
+  permanently approve a call, or modify Tool Integrity trust (each explicitly tested as absent/404). No
+  response body includes raw arguments/results, raw hostile content, secrets/tokens, complete tool definitions,
+  stack traces, or unnecessary filesystem paths (tested directly, including against a `<script>`-shaped context
+  id and an intentionally corrupted/tampered chain).
+- Known limitations / follow-up risk: SSE "fresh connection does not replay prior transitions" has no automated
+  test in this codebase (see defect 3 above) — the underlying mechanism is unchanged pre-existing plumbing, but
+  this specific property is asserted only by source-reading, not execution, for Context Guard's new payload
+  type. TTL-based context expiry still exists only as a state-machine transition, not an active scheduler (
+  unchanged from the core checkpoint). The Control Center has no Context Guard page yet — the API/SSE surfaces
+  built this session are consumable by a future page but nothing renders them. The context-poisoning demo,
+  broader documentation, browser screenshots, and a Graphify re-index are all still outstanding, tracked
+  separately, not claimed done here.
+- Current Git state at the time of this entry: branch `main`, local HEAD still `61c02c3` (this session's CLI/
+  API/SSE/fingerprint-binding work is verified but not yet committed as of this ledger entry — the commit
+  containing it is created immediately after, per the standard "ADR/ledger before commit" ordering this project
+  follows); `origin/main` unchanged at `2e959e3121e542ea01a4d5f6ba28424a647cb865`; only `.claude/`/`CLAUDE.md`
+  untracked beyond the intended changes.
+- Unresolved questions: none blocking.
+- Exact next action: stage exactly the CLI/API/SSE/fingerprint-binding/test/doc files listed above (excluding
+  `.claude/`, `CLAUDE.md`, `graphify-out/`, and any generated artifact), run a final staged-diff check and
+  secret scan, and create a normal local commit — not pushed, per this turn's explicit scope stop.
