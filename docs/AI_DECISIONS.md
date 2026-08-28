@@ -3318,3 +3318,86 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Exact next action: run the full local gate, take a release-candidate checkpoint commit, perform the genuine
   `git clone --no-local` clean-clone verification with all 14 required checks, then push and observe CI/Security
   for the final candidate commit.
+
+### 2026-08-28 — Milestone 8 clean-clone verification, push, and CI-fix session (candidate `0d9c63c` → final `6001a13`)
+
+- Local release-candidate gate at checkpoint `0d9c63c`: `pnpm install --frozen-lockfile` clean; `pnpm run build`
+  clean; `pnpm run lint` clean (0 errors, 2 pre-existing unrelated warnings); full workspace test suite — 52
+  (`policy`) + 105 (`control-center`) + 475 passed/2 skipped (`gateway`) = 632 workspace tests, plus 15 root
+  release-tooling tests = 647 total, all passing; all five demos re-run with real exit code 0 and their full
+  PASS-assertion counts unchanged (6/7/28/48/58); `scripts/verify-packed-install.mjs`,
+  `scripts/check-release-consistency.mjs`, and `scripts/generate-release-manifest.mjs` all run clean with real
+  tarball hashes/sizes and a 184-dependency license-checked SBOM; `scripts/scan-release-artifacts.mjs` found
+  nothing; `git diff --check` clean; `git status --short` clean (only `.claude/`/`CLAUDE.md`).
+- Genuine clean-clone verification: `git clone --no-local` into a fresh scratch directory at exactly `0d9c63c`.
+  Ran all 14 required checks there independently: frozen install, build, lint, full test suite (byte-identical
+  counts to the outer repo: 52+105+475/2skip+15), all five demos (byte-identical PASS counts), a dedicated
+  `agentgate smoke-test` run, the tarball content/allowlist audit, a clean external consumer install of all three
+  tarballs with zero workspace access, installed-CLI verification (`--version` → `0.1.0-beta.1`, `context --help`/
+  `status`/`verify`), SBOM/checksum/manifest generation and validation, audit-chain (8 records, smoke-test) and
+  Context-Guard-chain (`context verify`, packed-install step 7) verification, a tracked-file secret scan, the
+  release-artifact scan, `git diff --check`, and a final `git status --short` — all 14 passed, the final status
+  was completely empty (no residue from any build/test/pack/scan step). **Important refined finding**: the
+  clean-clone tarballs' SHA-256 hashes differed from the outer working directory's tarballs for identical source
+  content (e.g. protocol: `28817d43...` outer vs `4c6a577e...` clean-clone) — tarball byte-reproducibility is
+  narrower than the prior session-log entry stated: it does not hold even across a fresh clone/build with zero
+  intervening installs, only within immediately-consecutive `pnpm pack` runs of the exact same already-built
+  working directory (most likely due to embedded file mtimes differing between a freshly-cloned/rebuilt tree and
+  an already-built one). This refined understanding is recorded here rather than by editing the prior entry.
+  Scratch clone directory removed after verification.
+- Pre-push audit at `0d9c63c`: 4 commits ahead of `origin/main` (`679b46b`, `721fe62`, `0c0d51b`, `0d9c63c`), 32
+  files changed (`git diff --stat origin/main...HEAD`), no `.claude/`/`CLAUDE.md`/`graphify-out/`/database/`.env`
+  file present in the diff, no tag created, full secret/local-path scan of the aggregate diff clean.
+- Pushed `1f1a59a..0d9c63c` to `origin/main`; confirmed local HEAD == `origin/main`. Triggered CI run `33186613515`
+  and Security run `33186613616`.
+- **CI run `33186613515` result**: `build-test (ubuntu, node 20)` success, `build-test (ubuntu, node 22)` success,
+  `build-test (windows, node 22)` success, **`build-test (macos, node 22)` FAILURE** — the very first real macOS
+  CI run this project has ever had, and it found a genuine, previously-invisible platform bug:
+  `packages/gateway/tests/registry.test.ts`'s relative-config-path test failed
+  (`expected '/private/var/folders/...' to be '/var/folders/...'`) — macOS's `/var/folders/...` temp path is
+  itself a symlink to `/private/var/folders/...`, and `process.chdir()`+`process.cwd()` (which
+  `loadGatewayConfig()`'s relative-path resolution depends on) reports the OS-canonicalized form; the test's raw,
+  un-resolved `tmpDir` reference did not. AgentGate's production code was correct; only the test's comparison was
+  not symlink-aware. **Security run `33186613616` result**: `Dependency audit` success, `CodeQL` success,
+  **`Tracked-file secret scan` FAILURE** — this milestone's own new test fixture literal
+  (`AKIAABCDEFGHIJKLMNOP`, in `scripts/scan-release-artifacts.test.mjs`) was correctly flagged as unrecognized by
+  the scan's allowlist, exactly as the scan is designed to do for any new synthetic credential-shaped literal.
+- Fixed both real findings (commit `6154053`): `registry.test.ts` now compares against `fs.realpathSync(tmpDir)`
+  (a no-op on Linux/Windows); `security.yml`'s `ALLOWED` list gained the new literal, by exact value, matching
+  the established convention. Re-ran the full gateway suite locally (475 passed/2 skipped, unchanged) and the
+  exact security.yml scan logic locally (clean) before pushing. Pushed; triggered CI run `33187187187` and
+  Security run `33187187138`.
+- **CI run `33187187187` result**: the macOS symlink fix worked, but a SECOND, independent real macOS-only bug
+  surfaced immediately after: `build-test (macos, node 22)` FAILED again, this time at the
+  "Packed-package install verification" step — `tar: Option --force-local is not supported`. Root cause:
+  `--force-local` is a GNU-tar-only extension (needed on Windows to stop tar misreading a `C:\...` path's
+  drive-letter colon as a remote-tar host spec); macOS ships BSD tar (libarchive), which rejects the flag
+  outright with a usage error. This flag had been passed unconditionally in `scripts/verify-packed-install.mjs`
+  and `scripts/scan-release-artifacts.mjs` since this milestone extended/added them — invisible until the very
+  first real macOS run. **Security run `33187187138` result**: all 3 jobs success (the earlier allowlist fix
+  held).
+- Fixed (commit `6001a13`): both scripts now gate `--force-local` behind `process.platform === 'win32'` via a
+  shared `TAR_LOCAL_FLAGS` constant, with the exact cross-platform reasoning documented inline. Re-verified
+  locally on Windows (`verify-packed-install.mjs` full pass with real hashes; `scan-release-artifacts.mjs` full
+  pass; `pnpm run lint` clean; root release-tooling tests 15/15 passing) before pushing. Pushed; triggered CI run
+  `33187807678` and Security run `33187807655`.
+- **Final result — both green for commit `6001a13`**:
+  [CI run `33187807678`](https://github.com/chidhvilasa/agentgate/actions/runs/33187807678) — **conclusion:
+  success**, all 4 jobs success (`build-test (macos, node 22)` in 1m32s, `build-test (windows, node 22)` in
+  3m50s, `build-test (ubuntu, node 22)` in 2m12s, `build-test (ubuntu, node 20)` in 2m1s — the macOS job passing
+  for the first time in this project's history, with every step including the new release-tooling checks);
+  [Security run `33187807655`](https://github.com/chidhvilasa/agentgate/actions/runs/33187807655) — **conclusion:
+  success**, all 3 jobs success (`Tracked-file secret scan` 5s, `CodeQL` 1m17s, `Dependency audit` 19s).
+- Repository hygiene at this point: `git status --short` shows only `.claude/`/`CLAUDE.md` untracked; local HEAD
+  equals `origin/main` equals `6001a13fca87c19510703768517061a41b239c6`.
+- Known limitations, honestly carried forward: `@agentgate` npm scope ownership remains unverified (no
+  authenticated npm session in this environment); the release workflow (`release.yml`) has been reviewed
+  structurally and its YAML validated, but has never actually been executed by GitHub Actions (no tag exists to
+  trigger it) — its correctness under real execution is therefore unverified beyond static review; tarball
+  byte-reproducibility holds only within consecutive `pnpm pack` runs of one already-built working directory, not
+  across a fresh clone/build (see the clean-clone finding above) — this is a materially narrower claim than
+  "reproducible build" and must be stated as such in any future report.
+- Unresolved questions: none blocking this milestone's scope.
+- Exact next action: append the final Milestone 8 closeout ledger entry recording this already-observed green
+  CI/Security state (this session, immediately after this one, as a ledger-only commit), then report the
+  milestone's final result to the operator.
