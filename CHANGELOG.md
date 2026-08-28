@@ -4,6 +4,57 @@ All notable changes to this project are documented in this file. Format loosely 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). AgentGate has not yet published a versioned release or
 npm package — see [Project status](README.md#project-status).
 
+## [Unreleased] — Milestone 8: Public beta release candidate, packaging, and verifiable supply chain
+
+**Still unreleased.** This milestone prepares a public-beta release CANDIDATE — packaging, CI, a release workflow,
+and supply-chain verification tooling. It does **not** publish anything: no npm package has been published, no
+version tag or GitHub Release has been created, and no repository setting/secret/environment has been changed. See
+[ADR-0014](docs/AI_DECISIONS.md) for the full release/distribution architecture and its explicit non-goals.
+
+### Added
+- **Package topology and metadata**: `@agentgate/protocol`, `@agentgate/policy`, and `@agentgate/gateway` are no
+  longer `private` and now carry accurate `repository`/`homepage`/`bugs`/`keywords`/`publishConfig.access:"public"`
+  metadata, a restrictive `files` allowlist, and a per-package `README.md`/`LICENSE`. `@agentgate/control-center`
+  and the monorepo root remain private by design.
+- **Lockstep beta versioning**: all three publishable packages bumped to `0.1.0-beta.1` together (ADR-0014).
+- **`scripts/check-release-consistency.mjs`**: verifies the lockstep-version invariant, publishable/private
+  correctness, and (optionally) that a git tag matches `v<version>` exactly.
+- **`scripts/generate-release-manifest.mjs`**: SHA-256 checksums, a CycloneDX 1.5 SBOM built from the real
+  resolved production dependency graph, a license inventory with an explicit allowed-license gate, and a
+  machine-readable `release-manifest.json`.
+- **`scripts/scan-release-artifacts.mjs`**: deterministic credential/local-path scan over generated release
+  artifacts.
+- **`scripts/verify-packed-install.mjs` extended**: prints a SHA-256/size manifest per tarball, rejects forbidden
+  packed paths, and asserts no packed `package.json` contains a `workspace:`/`file:`/`link:`/`portal:` dependency
+  specifier.
+- **A macOS CI job** (`.github/workflows/ci.yml`): build, lint, full test suite (exercising the `better-sqlite3`
+  native module), packed-install verification, and the release-consistency check.
+- **`.github/workflows/release.yml`** (prepared, not executable this milestone): npm trusted publishing via GitHub
+  OIDC, gated by an explicit manual `workflow_dispatch` input plus a protected `npm-publish` GitHub Environment the
+  repository owner must separately create; a version-tag push alone only ever runs verification and a
+  `npm publish --dry-run`.
+
+### Changed
+- **Context Guard's init-time default**: `agentgate init` now generates an explicit `context_guard: { mode:
+  enforce }` block (empty `tools`/`rules` — enforces nothing until configured) for new projects, instead of
+  omitting the section entirely. This closes a public-beta blocker: previously every new install silently started
+  in the schema's non-blocking `monitor` default. **Compatibility**: additive to newly-generated files only — the
+  schema default for an *omitted* `context_guard` section is unchanged, so an already-deployed `agentgate.yml`
+  from before this milestone continues to behave exactly as before.
+- **Contextual-approval `tool_fingerprint` binding** (`checkApprovalContextValid()`): now fails closed on ANY
+  transition between approval creation and consumption — including a tool going from "no trusted definition"
+  (`null`) to "now trusted" (or vice versa) — not only a value-to-different-value drift as before. Closes a
+  stale-approval-reuse gap where an approval created for an unreviewed tool could still be consumed after that
+  tool became newly (or differently) trusted during the pending window, under a definition the approving human
+  never saw. **Compatibility**: strictly tightens an existing fail-closed check; the previously-covered
+  non-null-mismatch case is unaffected (re-verified against the full existing fingerprint-binding test suites).
+
+### Fixed
+- Added the previously-missing dedicated test proving a fresh Context Guard SSE subscriber never receives
+  historically-published `context_event` frames (a prior attempt at this test was removed in Milestone 7 as
+  unreliable; this milestone's version proves the same property deterministically, without waiting out a
+  negative timeout).
+
 ## [Unreleased] — Milestone 7: Context Guard cross-tool escalation defense
 
 ### Added

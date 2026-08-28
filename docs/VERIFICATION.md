@@ -195,3 +195,35 @@ root against this milestone's final candidate commit.
 **Status:** see the dated Milestone 7 final verification and publication session-log entries in
 `docs/AI_DECISIONS.md` for the exact test counts, gate results, clean-clone result, and commands run, phase by
 phase; the final candidate commit's exact counts are recorded there, not invented in advance here.
+
+---
+
+# Milestone 8 Verification — Public Beta Release Candidate and Verifiable Supply Chain (ADR-0014)
+
+Each row names an exact test file/case or reproducible command. All commands below were run from the repository
+root against this milestone's final candidate commit. **No npm publish, version tag, or GitHub Release was created
+by this milestone** — every claim below is about a prepared, verified release CANDIDATE, never a completed
+publication; see ADR-0014 in `docs/AI_DECISIONS.md` and the dated Milestone 8 session-log entries there for the
+exact final counts/hashes/commit, not invented in advance here.
+
+| Claim | Evidence |
+|---|---|
+| `agentgate init` generates an explicit, non-monitor `context_guard: { mode: enforce }` block for new projects (closing the beta-blocker: new installs no longer silently start in the non-blocking `monitor` default) | `packages/gateway/tests/onboarding-init.test.ts` → *"generates an explicit, high-security tool_integrity AND context_guard mode for new projects"* |
+| A contextual approval's `tool_fingerprint` binding fails closed on ANY transition (null-to-value, value-to-null, value-to-different-value) between approval creation and consumption, not only a value-to-different-value drift | `packages/gateway/tests/context-guard-enforcement.test.ts` (two new adversarial cases); full existing fingerprint-binding suites (`context-guard-fingerprint-binding.test.ts`, `context-guard-fingerprint-gateway.test.ts`) re-run and pass unchanged |
+| A fresh Context Guard SSE subscriber never receives historically-published `context_event` frames, proven deterministically (no negative-timeout wait) | `packages/gateway/tests/context-guard-sse.test.ts` → *"never replays historical context transitions to a fresh subscriber..."* |
+| Every publishable package (`@agentgate/protocol`, `@agentgate/policy`, `@agentgate/gateway`) is not `private`, carries accurate `repository`/`homepage`/`bugs`/`keywords`/`publishConfig.access:"public"`, and a restrictive `files` allowlist | `scripts/check-release-consistency.mjs` (also unit-tested in `scripts/check-release-consistency.test.mjs`, 7 cases) |
+| Packed tarballs contain no forbidden path (`src/`, `tests/`, `.env`, `.git/`, `node_modules/`, `*.sqlite*`, `*.map`, `.npmrc`, `.claude/`, `CLAUDE.md`) and every packed `package.json` is free of `workspace:`/`file:`/`link:`/`portal:` dependency specifiers | `scripts/verify-packed-install.mjs` — extended this milestone with a per-package content-allowlist check and a packed-manifest dependency-specifier check, run against real `pnpm pack` output |
+| A clean, external consumer project (zero workspace access) can `npm install` all three tarballs together and run the real installed `agentgate` CLI (`--version`, `smoke-test`, `context --help`/`status`/`verify`) | `scripts/verify-packed-install.mjs` full run |
+| The three publishable packages share one lockstep version, and a git tag exactly matching `v<version>` is required by the tag-consistency check (a mismatched tag fails) | `scripts/check-release-consistency.test.mjs` (7 cases, including a real tag-mismatch failure case) |
+| A macOS CI job actually builds, lints, runs the full test suite (exercising the `better-sqlite3` native module), and runs the packed-install/release-consistency checks | `.github/workflows/ci.yml` `build-test-macos` job — see the linked GitHub Actions run for this milestone's final commit in the Milestone 8 session-log entry for its actual conclusion |
+| The release workflow cannot publish on an ordinary push to `main`, a pull request, or a bare tag push alone — a real `npm publish` requires an explicit manual `workflow_dispatch` input AND the `npm-publish` protected GitHub Environment's approval | `.github/workflows/release.yml` — structural `if:` condition on the `publish` job; reviewed directly, not executed (no tag exists to trigger it) |
+| The release workflow asserts npm CLI >=11.5.1 and Node >=22.14.0 before any publish attempt, uses no dependency caching in the publish jobs, and never publishes via a stored long-lived token (OIDC `id-token: write` only) | `.github/workflows/release.yml` — reviewed directly (`publish-dry-run`/`publish` jobs) |
+| A real SHA-256 checksum manifest, a CycloneDX 1.5 SBOM built from the actual resolved production dependency graph, and a machine-readable release manifest are generated from real tarballs, with every dependency's license checked against an explicit allowlist and no local filesystem path/username in any generated file | `node scripts/generate-release-manifest.mjs` — see the dated Milestone 8 session-log entry for the exact dependency count/hashes from this milestone's final run |
+| Generated release artifacts (and, separately, tracked source files) are scanned for credential-shaped strings and local filesystem paths, deterministically | `scripts/scan-release-artifacts.mjs` (unit-tested in `scripts/scan-release-artifacts.test.mjs`, 8 cases: clean pass, real AKIA-shaped detection, allowed-placeholder non-detection, Windows-path detection, Unix-path detection, GitHub-token detection, missing-directory no-op, subdirectory recursion) |
+| The prior six demos have no regression | `node examples/{secret-exfiltration,downstream-secret-result,policy-drift-replay,tool-rug-pull,context-poisoning}/demo.mjs` re-run and passing after this milestone's changes |
+| Clean-clone verification at the exact final candidate commit, including the packed-consumer install and generated-artifact scans | See the dated Milestone 8 final verification session-log entry in `docs/AI_DECISIONS.md` for the exact commands and results |
+
+**Status:** see the dated Milestone 8 session-log entries in `docs/AI_DECISIONS.md` for the exact test counts, gate
+results, clean-clone result, tarball hashes, and commands run, phase by phase; the final candidate commit's exact
+counts are recorded there, not invented in advance here. This section describes a verified release CANDIDATE — no
+package has been published, no tag or GitHub Release created, as stated throughout ADR-0014.

@@ -455,15 +455,67 @@ queries specifically) was found, cross-checked, and confirmed not to reflect any
 extracted graph data — only in how `path`'s loose label-matching resolves two similarly-named file paths. No
 source change was made based on a graph result alone in either case.
 
+## Milestone 8 incremental update (2026-08-28) — Public beta release candidate and verifiable supply chain
+
+**Command run**: `graphify update .` (direct CLI, AST-only, no LLM/API key). Result: graph rebuilt to **1628
+nodes, 2534 edges, 113 communities** (up from 1514 nodes/2409 edges/104 communities at the end of Milestone 7).
+The re-index newly covers `scripts/*.mjs` release tooling added this milestone (previously-existing `scripts/`
+files, e.g. `verify-packed-install.mjs`, were already indexed; the four new/extended scripts are now included
+too), confirming Graphify's AST extraction is not limited to `packages/`/`apps/` — any `.ts`/`.tsx`/`.mjs` file
+in the repository is in scope.
+
+**Scope decision, stated explicitly, same as Milestone 7**: only the AST (code) pass was re-run; the changed
+Markdown documentation (README.md, CHANGELOG.md, docs/AI_DECISIONS.md, docs/VERIFICATION.md,
+docs/POLICY_REFERENCE.md, docs/DEVELOPMENT.md) was not separately re-extracted via an LLM/subagent pass, since
+this milestone's verification queries are entirely about code relationships the AST pass already covers.
+
+**Six independently-verified queries** (each cross-checked against source read directly in this same session,
+not queried first and then rationalized):
+
+1. `graphify explain "checkApprovalContextValid"` — reported `pipeline.ts` L20 import and `runPipeline()` L326
+   call site. Confirmed byte-accurate: the actual call at `pipeline.ts:326` passes
+   `(resolvedApproval, ctx.storage, toolName, argumentDigest, currentTrustedFingerprint)`, matching this
+   milestone's fail-closed fingerprint fix exactly.
+2. `graphify explain "buildConfigTemplate"` — reported the function at `init.ts` L86 and its call site inside
+   `runInit()` at L162. Confirmed by direct read: `init.ts:162` is exactly
+   `{ relativePath: CONFIG_FILE_NAME, content: buildConfigTemplate() }` — the line number correctly reflects the
+   ~14-line shift from this milestone's `context_guard` block insertion, proving the re-index picked up the
+   edit, not a stale cached position.
+3. `graphify explain "checkReleaseConsistency"` — reported `scripts/check-release-consistency.mjs` L47 (function)
+   and L51 (a call to `readPkg()`). Confirmed by direct `grep -n`: exact match on both line numbers.
+4. `graphify explain "buildSbom"` — reported `scripts/generate-release-manifest.mjs` L112 (function) and L190
+   (`main()`'s call site). Confirmed by direct `grep -n`: exact match on both line numbers.
+5. `graphify explain "scanReleaseArtifacts"` — reported `scripts/scan-release-artifacts.mjs` L73 (function), an
+   internal call to `scanDirRecursive()` at L76, and an import from the new test file at L8. Confirmed by direct
+   `grep -n`: exact match on all three line numbers.
+6. `graphify path "checkApprovalContextValid" "getTrustedFingerprint" --undirected` — reported a 2-hop path
+   through `pipeline.ts` (both functions imported by the same file). Confirmed by direct read of `pipeline.ts`:
+   it does import and use both `checkApprovalContextValid` (context-guard/enforcement.ts) and
+   `getTrustedFingerprint` (tool-integrity/enforcement.ts) together at the exact call site this milestone's fix
+   touches (an initial `--directed` query found no path, correctly reflecting that neither function calls the
+   other directly — only `--undirected` surfaces the shared-importer relationship, which is the accurate
+   structure, not a bug).
+
+**Net assessment**: six of six queries this milestone returned results independently confirmed byte-accurate
+against source, including one case (query 2) that specifically demonstrates the re-index correctly tracked a
+mid-file line-number shift from an edit made earlier in this same session — evidence the graph reflects current,
+not stale, file content. **No new false positive was found this milestone** (unlike Milestones 6–7, which each
+surfaced one); this is reported as a genuine result, not manufactured to match the pattern of prior entries. This
+does not mean Graphify's previously-documented limitation classes (object-literal/inline-callback call
+attribution; ambiguous similarly-named-file `path` resolution; no cross-workspace-package import resolution) no
+longer exist — they were simply not triggered by this milestone's specific queries, which targeted named function
+symbols in single files rather than the patterns known to trigger those limitations.
+
 ## Conclusion
 
 Graphify is genuinely functional against AgentGate: it builds a graph from this repository in seconds with no
 API key (511 nodes at Milestone 1 → 702 at the end of Milestone 2 → 813 after Milestone 3 → 903 after Milestone
-4 → 1017 after Milestone 5 → 1218 after Milestone 6 → 1514 after Milestone 7's AST-only re-index), its god-node
-and surprising-connection analysis independently rediscovers the real architectural hubs, targeted queries
-consistently return directly useful and source-accurate vocabulary for orientation, `path` produces correct
-traces for anything actually connected by a relative-import edge in source, and incremental `update` calls after
-further code changes (now exercised seven times across six milestones) reliably reflect those changes. Its
+4 → 1017 after Milestone 5 → 1218 after Milestone 6 → 1514 after Milestone 7 → 1628 after Milestone 8's AST-only
+re-indexes), its god-node and surprising-connection analysis independently rediscovers the real architectural
+hubs, targeted queries consistently return directly useful and source-accurate vocabulary for orientation, `path`
+produces correct traces for anything actually connected by a relative-import edge in source, and incremental
+`update` calls after further code changes (now exercised eight times across seven milestones) reliably reflect
+those changes. Its
 limitations, confirmed across Milestones 4–7: it cannot trace a relationship with no static source-level edge at
 all (a frontend/backend HTTP boundary, confirmed again); its `imports_from`/`contains` edges are file-level, not
 per-named-export, which can produce a misleading transitive "path" between a file and a symbol the importing file

@@ -39,11 +39,15 @@ Run it yourself: `node examples/secret-exfiltration/demo.mjs` (see [Demo and ver
 
 ## Project status
 
-**Early development / research-quality MVP.** AgentGate implements a real policy engine, a real MCP stdio proxy, a
+**Public beta.** AgentGate implements a real policy engine, a real MCP stdio proxy, a
 real tamper-evident audit store, a real Control Center UI, a real Safe Replay policy-drift analyzer, a real Tool
 Integrity Registry, a real Context Guard cross-tool escalation defense, and a real onboarding CLI (`init`/
-`config validate`/`doctor`/`integrate`/`smoke-test`) — all covered by executable tests (623 as of this milestone,
-2 intentionally platform-skipped) and end-to-end demos/scripts (see [`docs/VERIFICATION.md`](docs/VERIFICATION.md)).
+`config validate`/`doctor`/`integrate`/`smoke-test`) — all covered by executable tests (632 workspace tests + 15
+dedicated release-tooling tests as of this milestone, 2 intentionally platform-skipped) and end-to-end demos/scripts
+(see [`docs/VERIFICATION.md`](docs/VERIFICATION.md)). "Beta" here means the security properties below are real,
+tested, and adversarially demoed, but the project has not yet had independent external security review, the
+API/CLI/config surface may still change before a stable `1.0`, and — as of this milestone — **no package has been
+published to any registry** (see [Installation](#installation)).
 It is **not** production-hardened: there is no authentication beyond a per-launch local token, no multi-user
 support, and MCP protocol support is currently **legacy 2025-era stdio only** (see
 [Supported integrations](#supported-integrations)). Read [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before
@@ -53,9 +57,9 @@ relying on it for anything sensitive.
 
 | Platform | Node | Coverage |
 |---|---|---|
-| Ubuntu (Linux) | 20, 22 | Full CI: build, lint, full test suite, all demos, packed-install verification |
+| Ubuntu (Linux) | 20, 22 | Full CI: build, lint, full test suite, all demos, packed-install verification, release-consistency check |
 | Windows | 22 | Full CI, same steps — native `better-sqlite3` smoke test; 2 POSIX-only lifecycle tests skip here (see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)) |
-| macOS | — | **Not covered by CI in this milestone** — untested by this project; likely to work (no macOS-specific code paths exist) but unverified, stated plainly rather than implied |
+| macOS | 22 | A high-value CI subset: build, lint, full test suite (exercises the `better-sqlite3` native module), packed-install verification, release-consistency check. The five attack/defense demos are not separately re-run here — no macOS-specific code path exists, and they already run to completion on Ubuntu and Windows above |
 
 ## Five-minute quickstart
 
@@ -219,7 +223,10 @@ agentgate <command> --help            # Print detailed usage for any command
 
 ## Installation
 
-Two installation methods are actually verified — proven with a real, automated, CI-enforced check
+**No AgentGate package has been published to the npm registry yet** — this beta ships as source and as packed
+tarballs only. `npm install @agentgate/gateway` will work **once published** (see
+[Release channels and future registry install](#release-channels-and-future-registry-install) below); until then,
+use one of the two methods below, both proven with a real, automated, CI-enforced check
 (`scripts/verify-packed-install.mjs`), not assumed:
 
 1. **From source** (recommended; always works): `git clone` + `pnpm install --frozen-lockfile` +
@@ -238,10 +245,66 @@ Two installation methods are actually verified — proven with a real, automated
    `@agentgate/policy`/`@agentgate/protocol` to a bare version number that has never been published to any
    registry; installing all three together lets npm resolve the sibling packages from the other tarballs given
    in the same command. This is **not** the same as `npm install agentgate` from the public npm registry, which
-   this project does not publish to or claim.
+   this project does not publish to or claim — and note the unscoped `agentgate` name on npm already belongs to
+   an unrelated third-party project; AgentGate only ever uses the `@agentgate/*` scope.
 
-Not yet supported: a published npm package, a Homebrew/system package, or a standalone binary. See
+Not yet supported: a published npm package (see above), a Homebrew/system package, or a standalone binary. See
 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md#installability) for the full audit.
+
+### Prerequisites
+
+| Requirement | Version | Why |
+|---|---|---|
+| Node.js | >=20 (20 or 22 actively tested; see the platform matrix above) | `engines.node` in every package; `better-sqlite3` needs a matching prebuilt/compilable native binary |
+| [pnpm](https://pnpm.io) | pinned via `packageManager` in `package.json` (source install only) | workspace install/build; not needed for the tarball-install method above |
+| git | any recent version | cloning the source |
+
+### Release channels and future registry install
+
+This beta publishes prerelease versions under a `beta` tag pattern (`0.1.0-beta.1`, `0.1.0-beta.2`, …) — see
+[ADR-0014](docs/AI_DECISIONS.md) for the full versioning policy. **Once published** (a distinct, later, explicitly
+owner-approved step — see the Milestone 8 section of [`docs/VERIFICATION.md`](docs/VERIFICATION.md) for exactly
+what that step involves and has and has not happened so far), installation will be:
+
+```sh
+npm install -g @agentgate/gateway   # not yet published — this command does not work today
+```
+
+`@agentgate/protocol` and `@agentgate/policy` are also independently installable (for building your own tooling
+against AgentGate's types/policy engine); most users only need `@agentgate/gateway`, which depends on the other two.
+
+### Verifying a downloaded release (checksums, SBOM, attestation)
+
+Once packages/tarballs are actually published, each release is accompanied by (generated locally today via
+`node scripts/generate-release-manifest.mjs`, see [`docs/VERIFICATION.md`](docs/VERIFICATION.md) for the exact
+generated-evidence from this milestone):
+
+- **`checksums.sha256`** — verify a downloaded tarball with `sha256sum -c checksums.sha256` (or
+  `certutil -hashfile <file> SHA256` on Windows and compare by hand).
+- **`sbom.cyclonedx.json`** — a CycloneDX 1.5 Software Bill of Materials built from the real resolved production
+  dependency graph (`pnpm licenses list --prod`), not a template.
+- **`release-manifest.json`** — commit, package versions, tarball filenames/hashes/sizes, and the Node/npm/pnpm
+  versions used to build.
+- **GitHub artifact attestations** (once the release workflow has actually run and published — see
+  [ADR-0014](docs/AI_DECISIONS.md) and [`docs/VERIFICATION.md`](docs/VERIFICATION.md)): verify with
+  `gh attestation verify <file> -R chidhvilasa/agentgate`. This proves the artifact was built by this specific
+  GitHub Actions workflow run at this specific commit — **build/origin linkage, not a guarantee the code is free of
+  vulnerabilities or malicious behavior**, and a genuinely different trust path from npm's own trusted-publishing
+  provenance (which attests the *published package*, not these locally-generated files) — both are worth checking
+  independently, neither substitutes for the other.
+
+### Upgrading, downgrading, and uninstalling
+
+- **Upgrade**: re-run the install method above with a newer tarball/version. `agentgate.yml`/`agentgate.policy.yml`
+  are plain files you own — nothing is migrated automatically, and no config format has broken compatibility yet
+  (see the [Changelog](CHANGELOG.md) for any future breaking change, which will always be called out explicitly
+  with a migration note, per [ADR-0014](docs/AI_DECISIONS.md)).
+- **Downgrade**: install an older tarball/version the same way; the SQLite audit database's schema has been
+  additive-only so far (no destructive migrations exist in this codebase yet) but downgrading is not routinely
+  tested — back up `agentgate.sqlite*` first if it matters to you.
+- **Uninstall**: see "Uninstalling / removing generated files" in the quickstart above — everything AgentGate
+  writes lives inside the directory you pointed `init`/`start` at; there is no system-wide install, service, or
+  registry entry to remove.
 
 ## Client integrations
 
