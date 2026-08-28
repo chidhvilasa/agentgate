@@ -22,6 +22,14 @@ export class ApprovalManager extends EventEmitter {
     proposed_action_display: string;
     policy_reason: string;
     scope: string;
+    /** Context Guard binding (ADR-0013) — omit entirely for a non-contextual approval (every field defaults to null). */
+    contextBinding?: {
+      context_id: string;
+      context_revision: number;
+      tool_fingerprint: string | null;
+      argument_digest: string;
+      contextual_rule_id: string;
+    };
   }): Approval {
     const expires_at = new Date(Date.now() + opts.ttl_seconds * 1000).toISOString();
     const approval = this.storage.insertApproval({
@@ -34,6 +42,11 @@ export class ApprovalManager extends EventEmitter {
       scope: opts.scope,
       resolved_at: null,
       resolved_by: null,
+      context_id: opts.contextBinding?.context_id ?? null,
+      context_revision: opts.contextBinding?.context_revision ?? null,
+      tool_fingerprint: opts.contextBinding?.tool_fingerprint ?? null,
+      argument_digest: opts.contextBinding?.argument_digest ?? null,
+      contextual_rule_id: opts.contextBinding?.contextual_rule_id ?? null,
     });
     this.emit('created', approval);
     return approval;

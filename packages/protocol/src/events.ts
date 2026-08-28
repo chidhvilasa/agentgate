@@ -53,7 +53,8 @@ export type ReasonCode =
   | 'APPROVAL_USED'          // Approval already consumed (single-use)
   | 'APPROVAL_DENIED'        // Human explicitly denied
   | 'MALFORMED_REQUEST'      // Could not parse/normalize the tool call
-  | 'MALFORMED_POLICY';      // Policy file is invalid; deny-safe fallback
+  | 'MALFORMED_POLICY'       // Policy file is invalid; deny-safe fallback
+  | 'CONTEXT_GUARD_ESCALATION'; // Milestone 7 (ADR-0013): a contextual rule escalated the base policy decision
 
 export interface PolicyDecision {
   type: PolicyDecisionType;
@@ -187,6 +188,27 @@ export interface Approval {
   created_at: string;
   resolved_at: string | null;
   resolved_by: 'human' | null;
+
+  // ─── Context Guard binding (Milestone 7, ADR-0013) — all optional/nullable.
+  // A pre-Milestone-7 approval, or one created while Context Guard is
+  // disabled/monitor-mode, simply has null in every field below, meaning
+  // "not context-bound" — every consumer must treat that as a normal,
+  // valid, non-contextual approval, not an error. When these ARE set, they
+  // bind this approval to the EXACT execution-context revision, tool
+  // identity/fingerprint, and redacted-argument digest that were true at
+  // the moment the approval was created — consumption re-checks all of them
+  // and fails closed on any mismatch (see context-guard/approvals.ts).
+
+  /** The execution context this approval is bound to, if contextual. */
+  context_id: string | null;
+  /** The context's revision at the moment this approval was created — a later revision invalidates this approval. */
+  context_revision: number | null;
+  /** The downstream tool's trusted Tool Integrity fingerprint at approval-creation time, where known. */
+  tool_fingerprint: string | null;
+  /** SHA-256 of the redacted arguments this approval was created for — never the raw arguments themselves. */
+  argument_digest: string | null;
+  /** The contextual rule id that required this approval, if any. */
+  contextual_rule_id: string | null;
 }
 
 // ─── Safe Replay Lineage (ADR-0010) ─────────────────────────────────────────

@@ -13,13 +13,18 @@ import type { AgentIdentity, AuditEvent, ToolCall } from '@agentgate/protocol';
 import type { AuditStorage } from './storage.js';
 import type { ApprovalManager } from './approval.js';
 import type { GatewayConfig, DownstreamServer } from './config/registry.js';
-import { resolveServer } from './config/registry.js';
+import { resolveServer, defaultContextGuardConfig } from './config/registry.js';
 import { sanitizeToolResult } from './output-security.js';
+import { evaluateContextGuard, modeEnforces, computeArgumentDigest, checkApprovalContextValid } from './context-guard/enforcement.js';
+import { appendContextLabels, recordCallEvaluation } from './context-guard/state.js';
+import { isAtLeastAsStrict } from './context-guard/rules.js';
 
 export interface PipelineContext {
   storage: AuditStorage;
   approvalManager: ApprovalManager;
   config: GatewayConfig;
+  /** Milestone 7 (ADR-0013): the single execution context for this gateway process/upstream-connection lifetime. */
+  contextId: string;
   emitEvent: (event: AuditEvent) => void;
 }
 
@@ -168,30 +173,105 @@ export async function runPipeline(opts: {
 
   const { decision, approval_ttl_seconds } = evaluate(policy, input);
 
+  // ── 4.5. Context Guard: evaluate the attempted call against the ACTIVE
+  //         execution context (ADR-0013), taking the STRICTER of the base
+  //         policy decision and any matching contextual rule. This runs
+  //         for every call that reaches this point — including one invoked
+  //         directly by a cached tool name — because this is the single
+  //         function every tools/call request passes through after the
+  //         Tool Integrity gate; there is no other path to execution.
+  //         Always evaluated and recorded (even in `monitor` mode, so it
+  //         can be displayed/audited), but only actually APPLIED to the
+  //         effective decision when the mode enforces.
+  // Normalize through the canonical schema default rather than trusting
+  // ctx.config.context_guard to be present: loadGatewayConfig() always
+  // schema-parses it in, but a GatewayConfig-shaped object built by hand
+  // (a test fixture, or any other caller bypassing the real parser) can
+  // legitimately omit it. Falling back to the same default the schema
+  // itself would apply (`monitor` mode) preserves documented behavior for
+  // an omitted field instead of crashing on it.
+  const contextGuardConfig = ctx.config.context_guard ?? defaultContextGuardConfig();
+  const cgEvaluation = evaluateContextGuard(ctx.storage, contextGuardConfig, ctx.contextId, toolName);
+  const cgEnforcing = modeEnforces(contextGuardConfig.mode);
+
+  let effectiveDecision = decision;
+  let contextualRuleId: string | null = null;
+  let contextRevisionAtEvaluation: number | null = null;
+  if (contextGuardConfig.mode !== 'disabled') {
+    contextRevisionAtEvaluation = ctx.storage.getContextState(ctx.contextId)?.revision ?? null;
+  }
+
+  if (cgEnforcing && cgEvaluation.action !== 'allow') {
+    const cgActionType = cgEvaluation.action === 'deny' ? 'DENY' : 'REQUIRE_APPROVAL';
+    // Only override if the contextual action is at least as strict as the
+    // base policy's own decision — this is what guarantees Context Guard
+    // can only ESCALATE, never silently loosen a base-policy DENY into a
+    // contextual REQUIRE_APPROVAL.
+    if (isAtLeastAsStrict(cgActionType, decision.type)) {
+      contextualRuleId = cgEvaluation.ruleId;
+      effectiveDecision = {
+        type: cgActionType,
+        reason_code: 'CONTEXT_GUARD_ESCALATION',
+        explanation: cgEvaluation.reason ?? 'Blocked by a Context Guard contextual rule.',
+        matched_rule_id: cgEvaluation.ruleId ? `context:${cgEvaluation.ruleId}` : null,
+      };
+    }
+  }
+
+  // Record the contextual decision for history/explain, regardless of
+  // mode (unless disabled) — this is what lets `agentgate context
+  // history`/`explain` and the Control Center show what Context Guard
+  // WOULD have done even in monitor mode, not only what it enforced.
+  if (contextGuardConfig.mode !== 'disabled') {
+    recordCallEvaluation(ctx.storage, ctx.contextId, {
+      sourceEventId: eventId,
+      toolName,
+      ruleId: cgEvaluation.ruleId,
+      action: contextualRuleId ? effectiveDecision.type.toLowerCase() : 'allow',
+      reason: cgEvaluation.reason,
+    });
+  }
+
   // ── 5. Route by decision ───────────────────────────────────────────────────
 
-  if (decision.type === 'DENY') {
-    ctx.storage.updateEventStatus(eventId, 'DENIED', { decision });
+  if (effectiveDecision.type === 'DENY') {
+    ctx.storage.updateEventStatus(eventId, 'DENIED', { decision: effectiveDecision });
     event = ctx.storage.getEvent(eventId)!;
     ctx.emitEvent(event);
     return { event, result: null };
   }
 
-  if (decision.type === 'REQUIRE_APPROVAL') {
-    ctx.storage.updateEventStatus(eventId, 'PENDING_APPROVAL', { decision });
+  const argumentDigest = computeArgumentDigest(auditArgs);
+
+  if (effectiveDecision.type === 'REQUIRE_APPROVAL') {
+    ctx.storage.updateEventStatus(eventId, 'PENDING_APPROVAL', { decision: effectiveDecision });
     event = ctx.storage.getEvent(eventId)!;
     ctx.emitEvent(event);
 
+    const ttlSeconds = contextualRuleId && cgEvaluation.approvalTtlSeconds ? cgEvaluation.approvalTtlSeconds : approval_ttl_seconds;
     ctx.approvalManager.create({
       event_id: eventId,
-      ttl_seconds: approval_ttl_seconds,
+      ttl_seconds: ttlSeconds,
       proposed_action_display: `${toolName}(${JSON.stringify(auditArgs)})`,
-      policy_reason: decision.explanation,
+      policy_reason: effectiveDecision.explanation,
       scope: toolName,
+      // Milestone 7 (ADR-0013): bind this approval to the EXACT context
+      // revision/tool/argument-digest observed right now — re-validated
+      // again at consumption time below, closing the window between
+      // approval creation and a human's decision.
+      contextBinding: contextGuardConfig.mode !== 'disabled'
+        ? {
+            context_id: ctx.contextId,
+            context_revision: contextRevisionAtEvaluation ?? 0,
+            tool_fingerprint: null,
+            argument_digest: argumentDigest,
+            contextual_rule_id: contextualRuleId ?? 'base-policy',
+          }
+        : undefined,
     });
 
     // Wait for human decision (poll with timeout)
-    const deadline = Date.now() + approval_ttl_seconds * 1000;
+    const deadline = Date.now() + ttlSeconds * 1000;
     let resolvedApproval = ctx.storage.getApprovalByEventId(eventId);
 
     while (Date.now() < deadline) {
@@ -203,6 +283,21 @@ export async function runPipeline(opts: {
     if (!resolvedApproval || resolvedApproval.status !== 'APPROVED') {
       const finalStatus = resolvedApproval?.status === 'DENIED' ? 'CANCELLED' : 'EXPIRED';
       ctx.storage.updateEventStatus(eventId, finalStatus, {
+        duration_ms: Date.now() - startTime,
+      });
+      event = ctx.storage.getEvent(eventId)!;
+      ctx.emitEvent(event);
+      return { event, result: null };
+    }
+
+    // Re-validate the context binding RIGHT NOW, immediately before
+    // execution — the context may have accumulated more risk labels (from
+    // a concurrent call) in the window between approval creation and this
+    // human decision. A stale/mismatched binding fails closed here even
+    // though the approval itself already shows APPROVED.
+    const contextCheck = checkApprovalContextValid(resolvedApproval, ctx.storage, toolName, argumentDigest);
+    if (!contextCheck.ok) {
+      ctx.storage.updateEventStatus(eventId, 'CANCELLED', {
         duration_ms: Date.now() - startTime,
       });
       event = ctx.storage.getEvent(eventId)!;
@@ -221,7 +316,7 @@ export async function runPipeline(opts: {
       { source: 'internal' }
     );
     ctx.storage.updateEventStatus(eventId, 'FAILED', {
-      decision,
+      decision: effectiveDecision,
       execution_error: noServerError.message,
       duration_ms: Date.now() - startTime,
       error_redacted: noServerError.redacted,
@@ -231,12 +326,12 @@ export async function runPipeline(opts: {
     return { event, result: null };
   }
 
-  ctx.storage.updateEventStatus(eventId, 'EXECUTING', { decision });
+  ctx.storage.updateEventStatus(eventId, 'EXECUTING', { decision: effectiveDecision });
   event = ctx.storage.getEvent(eventId)!;
   ctx.emitEvent(event);
 
   // For ALLOW_WITH_TRANSFORM: use redacted args for downstream execution
-  const executionArgs = decision.type === 'ALLOW_WITH_TRANSFORM' ? auditArgs : normalizedArgs;
+  const executionArgs = effectiveDecision.type === 'ALLOW_WITH_TRANSFORM' ? auditArgs : normalizedArgs;
   const { result, error, errorRedacted } = await executeDownstream(server, toolName, executionArgs);
 
   // ── 7. Sanitize the downstream result before it ever crosses back to the
@@ -268,5 +363,30 @@ export async function runPipeline(opts: {
 
   event = ctx.storage.getEvent(eventId)!;
   ctx.emitEvent(event);
+
+  // ── 8. Append context labels based on the OBSERVED outcome (ADR-0013) ──────
+  // Deterministic rule: `adds_on_result` labels are added ONLY when the
+  // call actually SUCCEEDED and its result was not entirely blocked by
+  // output security — a denied/cancelled/expired call never reached the
+  // downstream server at all, a FAILED call didn't return a result, and a
+  // BLOCKED result means nothing the label would describe actually
+  // reached the agent. This is deliberately conservative: it undercounts
+  // some real risk (e.g. it does not label on a REDACTED-but-still-
+  // delivered result differently from a fully clean one — the label
+  // applies either way, since content beyond the redacted secret pattern
+  // still reached the agent) rather than ever inventing labels for
+  // content nobody actually received. Only the LABEL NAMES (operator
+  // policy vocabulary) are ever stored — never the raw result content.
+  if (contextGuardConfig.mode !== 'disabled' && finalStatus === 'SUCCEEDED' && !resultBlocked) {
+    const addsOnResult = contextGuardConfig.tools[toolName]?.adds_on_result ?? [];
+    if (addsOnResult.length > 0) {
+      appendContextLabels(ctx.storage, ctx.contextId, addsOnResult, {
+        sourceEventId: eventId,
+        toolName,
+        reason: `Tool "${toolName}" succeeded with a non-blocked result.`,
+      });
+    }
+  }
+
   return { event, result: error ? null : forwardResult };
 }

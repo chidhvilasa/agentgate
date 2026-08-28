@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import crypto from 'node:crypto';
 import { AuditStorage } from './storage.js';
 import { ApprovalManager } from './approval.js';
 import { buildControlApi, LOCAL_AUTH_TOKEN } from './api/control.js';
@@ -7,6 +8,8 @@ import { loadGatewayConfig } from './config/registry.js';
 import { sanitizeErrorMessage } from '@agentgate/policy';
 import type { AuditEvent, Approval } from '@agentgate/protocol';
 import type { PipelineContext } from './pipeline.js';
+import { computeServerIdentity } from './tool-integrity/identity.js';
+import { createContext, closeOrExpireContext } from './context-guard/state.js';
 
 export { LOCAL_AUTH_TOKEN };
 
@@ -18,10 +21,23 @@ export async function startGateway(configPath: string): Promise<void> {
   const approvalManager = new ApprovalManager(storage);
   const eventBus = new EventEmitter();
 
+  // Milestone 7 (ADR-0013): one execution context per gateway process/
+  // upstream-connection lifetime — the preferred, truthful boundary this
+  // architecture can actually support today (see ADR-0013 "exact execution
+  // context boundary"). Created unconditionally (even in `disabled` mode,
+  // which is cheap and keeps the CLI/API/UI's "no context" case identical
+  // to "not yet created" only when the DB itself predates this milestone).
+  const contextId = crypto.randomUUID();
+  const contextServerIdentity = config.servers[0] ? computeServerIdentity(config.servers[0]).identity : null;
+  if (config.context_guard.mode !== 'disabled') {
+    createContext(storage, contextId, contextServerIdentity);
+  }
+
   const ctx: PipelineContext = {
     storage,
     approvalManager,
     config,
+    contextId,
     emitEvent: (event: AuditEvent) => eventBus.emit('event', event),
   };
 
@@ -45,6 +61,9 @@ export async function startGateway(configPath: string): Promise<void> {
     // startStdioProxy()'s own "first server" scope for Milestone 1-era
     // single-server support.
     toolIntegrity: config.servers[0] ? { server: config.servers[0], mode: config.tool_integrity.mode } : undefined,
+    // Milestone 7 (ADR-0013): scoped to this process's single execution
+    // context, matching startGateway()'s own single-context model above.
+    contextGuard: { contextId, mode: config.context_guard.mode },
   });
 
   await controlApp.listen({ port: config.control_port, host: '127.0.0.1' });
@@ -73,6 +92,13 @@ export async function startGateway(configPath: string): Promise<void> {
       .catch((err) => console.error('[agentgate] Error closing Control API:', sanitizeErrorMessage(err, { source: 'internal' }).message))
       .finally(() => {
         approvalManager.destroy();
+        try {
+          if (config.context_guard.mode !== 'disabled') {
+            closeOrExpireContext(storage, contextId, 'closed');
+          }
+        } catch (err) {
+          console.error('[agentgate] Error closing execution context:', sanitizeErrorMessage(err, { source: 'internal' }).message);
+        }
         try {
           storage.close();
         } catch (err) {

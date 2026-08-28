@@ -82,11 +82,15 @@ export async function runSmokeTest(): Promise<SmokeTestReport> {
       // (see ADR-0012) and keeping the smoke test's existing behavior
       // unchanged.
       tool_integrity: { mode: 'monitor' },
+      // Milestone 7: monitor mode — same reasoning as tool_integrity above;
+      // the smoke test proves the base policy engine and audit trail work,
+      // not Context Guard, and monitor mode never blocks (see ADR-0013).
+      context_guard: { mode: 'monitor', labels: [], tools: {}, rules: [] },
     };
 
     storage = new AuditStorage(dbPath);
     approvalManager = new ApprovalManager(storage);
-    const ctx: PipelineContext = { storage, approvalManager, config, emitEvent: () => {} };
+    const ctx: PipelineContext = { storage, approvalManager, config, contextId: 'smoke-test-context', emitEvent: () => {} };
 
     // Step 1: a harmless call that policy allows.
     const allowed = await runPipeline({

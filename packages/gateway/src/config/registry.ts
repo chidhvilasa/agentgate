@@ -102,6 +102,157 @@ const ToolIntegritySchema = z.object({
 });
 export type ToolIntegrityConfig = z.infer<typeof ToolIntegritySchema>;
 
+// ─── Context Guard (Milestone 7, ADR-0013) ─────────────────────────────────────
+
+/**
+ * Cross-tool escalation defense. A tool's SUCCESSFUL, non-blocked result can
+ * mark the active local execution context with operator-owned risk labels
+ * (`adds_on_result`); a later call's declared `effects` are checked against
+ * the context's ACCUMULATED labels by `rules`. This is a local, conservative
+ * policy-state label — never proof that one tool result actually caused a
+ * later call, and never a substitute for real information-flow tracking. See
+ * ADR-0013 in docs/AI_DECISIONS.md and docs/THREAT_MODEL.md for the full
+ * model and its explicit limitations.
+ *
+ * - `enforce`  : contextual rules can DENY or REQUIRE_APPROVAL a call before
+ *                it ever reaches policy execution. Recommended, high-security
+ *                mode.
+ * - `monitor`  : context labels are still accumulated and contextual rules
+ *                are still evaluated and recorded, but the result never
+ *                blocks or escalates a call — reporting only, never described
+ *                as protection. This is the default when `context_guard` is
+ *                omitted entirely, for backwards compatibility with configs
+ *                written before this milestone (see ADR-0013 for why).
+ * - `disabled` : no context is created, no labels are tracked, no contextual
+ *                rule is ever evaluated; identical to every AgentGate version
+ *                before this milestone.
+ */
+const ContextGuardModeSchema = z.enum(['enforce', 'monitor', 'disabled']);
+export type ContextGuardMode = z.infer<typeof ContextGuardModeSchema>;
+
+/** Label name: lowercase snake_case, bounded length — deliberately narrow so labels stay readable in CLI/UI/audit output and can't be used to smuggle unbounded/hostile text. */
+const LABEL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const labelNameSchema = z.string().regex(LABEL_NAME_PATTERN, 'Label names must be lowercase snake_case, starting with a letter, max 64 characters.');
+const MAX_LABELS_PER_TOOL = 16;
+const MAX_CUSTOM_LABELS = 64;
+const MAX_RULES = 128;
+
+/** Built-in source/context labels (what the RESULT of a call may have exposed the agent to) — see docs/POLICY_REFERENCE.md for the authoritative, documented meaning of each. Operator-declared custom labels extend this set; they never replace it. */
+export const BUILTIN_CONTEXT_LABELS = [
+  'untrusted_content',
+  'sensitive_data_accessed',
+  'prompt_injection_suspected',
+] as const;
+
+/** Built-in target/effect labels (what a CALL ITSELF does, checked against accumulated context labels before the call is allowed). */
+export const BUILTIN_EFFECT_LABELS = [
+  'external_communication',
+  'destructive_write',
+  'code_execution',
+  'credential_use',
+  'privilege_change',
+  'sensitive_read',
+] as const;
+
+const ContextGuardToolSchema = z.object({
+  /** Effect labels this tool's CALL carries — checked against the active context's accumulated labels by `target_has_any`/`target_has_all` before the call is allowed. Never mutates context state by itself. */
+  effects: z.array(labelNameSchema).max(MAX_LABELS_PER_TOOL).default([]),
+  /** Labels added to the active execution context after this tool's call SUCCEEDS with a non-blocked result — see ADR-0013 for the exact, deterministic per-outcome rule (never on deny/error/blocked-result). */
+  adds_on_result: z.array(labelNameSchema).max(MAX_LABELS_PER_TOOL).default([]),
+});
+
+const ContextGuardWhenSchema = z
+  .object({
+    /** True only if the active context currently has EVERY listed label. */
+    context_has_all: z.array(labelNameSchema).optional(),
+    /** True if the active context currently has ANY listed label. */
+    context_has_any: z.array(labelNameSchema).optional(),
+    /** True only if the active context currently has NONE of the listed labels. */
+    context_lacks_all: z.array(labelNameSchema).optional(),
+    /** True if the active context is currently missing AT LEAST ONE listed label (i.e. not all are present). */
+    context_lacks_any: z.array(labelNameSchema).optional(),
+    /** True if the ATTEMPTED call's own declared `effects` include ANY listed label. */
+    target_has_any: z.array(labelNameSchema).optional(),
+    /** True only if the ATTEMPTED call's own declared `effects` include EVERY listed label. */
+    target_has_all: z.array(labelNameSchema).optional(),
+  })
+  .strict()
+  .refine(
+    (w) => Object.values(w).some((v) => v !== undefined),
+    { message: 'A contextual rule "when" clause must specify at least one condition.' }
+  );
+
+const ContextGuardRuleSchema = z.object({
+  id: z.string().min(1).max(128),
+  when: ContextGuardWhenSchema,
+  /** Contextual rules only ever ESCALATE — there is no "allow" action here by design (see ADR-0013's monotonicity invariant); the strictest of the base policy decision and any matching contextual rule's action is always what is enforced. */
+  action: z.enum(['deny', 'require_approval']),
+  reason: z.string().min(1).max(500),
+  /** Only used when action is require_approval; falls back to the policy's own default TTL handling if omitted. */
+  approval_ttl_seconds: z.number().int().min(1).max(3600).optional(),
+});
+
+const ContextGuardSchema = z
+  .object({
+    mode: ContextGuardModeSchema.default('monitor'),
+    /** Operator-declared custom labels, beyond the built-in vocabulary above — every label referenced anywhere below (tools.*.effects, tools.*.adds_on_result, rules.*.when.*) must be built-in or declared here, checked below. */
+    labels: z.array(labelNameSchema).max(MAX_CUSTOM_LABELS).default([]),
+    tools: z.record(ContextGuardToolSchema).default({}),
+    rules: z.array(ContextGuardRuleSchema).max(MAX_RULES).default([]),
+  })
+  .superRefine((cfg, ctx) => {
+    const known = new Set<string>([...BUILTIN_CONTEXT_LABELS, ...BUILTIN_EFFECT_LABELS, ...cfg.labels]);
+    const dupCustom = cfg.labels.filter((l, i) => cfg.labels.indexOf(l) !== i);
+    if (dupCustom.length > 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['labels'], message: `Duplicate custom label(s): ${[...new Set(dupCustom)].join(', ')}.` });
+    }
+    const checkLabels = (labels: string[] | undefined, path: (string | number)[]) => {
+      for (const l of labels ?? []) {
+        if (!known.has(l)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: `Unknown label "${l}" — must be a built-in label or declared in context_guard.labels.` });
+        }
+      }
+    };
+    for (const [toolName, toolCfg] of Object.entries(cfg.tools)) {
+      if (toolName.trim().length === 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['tools'], message: 'Tool name keys must be non-empty.' });
+      }
+      checkLabels(toolCfg.effects, ['tools', toolName, 'effects']);
+      checkLabels(toolCfg.adds_on_result, ['tools', toolName, 'adds_on_result']);
+    }
+    const ruleIds = new Set<string>();
+    cfg.rules.forEach((rule, i) => {
+      if (ruleIds.has(rule.id)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['rules', i, 'id'], message: `Duplicate contextual rule id "${rule.id}".` });
+      }
+      ruleIds.add(rule.id);
+      checkLabels(rule.when.context_has_all, ['rules', i, 'when', 'context_has_all']);
+      checkLabels(rule.when.context_has_any, ['rules', i, 'when', 'context_has_any']);
+      checkLabels(rule.when.context_lacks_all, ['rules', i, 'when', 'context_lacks_all']);
+      checkLabels(rule.when.context_lacks_any, ['rules', i, 'when', 'context_lacks_any']);
+      checkLabels(rule.when.target_has_any, ['rules', i, 'when', 'target_has_any']);
+      checkLabels(rule.when.target_has_all, ['rules', i, 'when', 'target_has_all']);
+    });
+  });
+export type ContextGuardConfig = z.infer<typeof ContextGuardSchema>;
+export type ContextGuardRule = z.infer<typeof ContextGuardRuleSchema>;
+export type ContextGuardWhen = z.infer<typeof ContextGuardWhenSchema>;
+
+/**
+ * Canonical runtime-safe Context Guard default — the exact schema default
+ * (`monitor` mode, no custom labels/tools/rules), derived from the real
+ * schema rather than hand-copied. Safe to reuse at any boundary that must
+ * tolerate a missing `context_guard`: a `GatewayConfig`-shaped object built
+ * by hand rather than parsed through `loadGatewayConfig()` (e.g. a test
+ * fixture predating this milestone), or any other caller that cannot
+ * guarantee the field was schema-validated. Never hand-write an equivalent
+ * `{ mode: 'monitor', ... }` literal elsewhere — this is the single source
+ * of truth for what "omitted" means.
+ */
+export function defaultContextGuardConfig(): ContextGuardConfig {
+  return ContextGuardSchema.parse({});
+}
+
 // ─── Gateway Runtime Config ────────────────────────────────────────────────────
 
 const GatewayConfigSchema = z.object({
@@ -135,6 +286,9 @@ const GatewayConfigSchema = z.object({
 
   /** Tool Integrity Registry — rug-pull defense. See ADR-0012. */
   tool_integrity: ToolIntegritySchema.default({}),
+
+  /** Context Guard — cross-tool escalation defense. See ADR-0013. */
+  context_guard: ContextGuardSchema.default({}),
 });
 
 export type GatewayConfig = z.infer<typeof GatewayConfigSchema>;

@@ -737,6 +737,298 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Supersedes: NONE
 - Superseded by: NONE
 
+### ADR-0013: Context Guard — Cross-Tool Session-Risk Escalation Defense
+
+- Status: ACCEPTED
+- Date: 2026-08-28
+- Scope: security / architecture
+- Decision:
+  1. **The threat: cross-tool indirect prompt injection / confused deputy.** ADR-0003/ADR-0009/ADR-0012 already
+     treat one tool CALL's arguments, one tool RESULT's content, and one tool DEFINITION as individually untrusted.
+     The remaining gap is a SEQUENCE across multiple calls: an agent reads untrusted content from tool A (e.g. a
+     ticket body, a web page, a file) that contains an indirect prompt-injection payload instructing the agent to
+     read sensitive data with tool B and exfiltrate it with tool C — each individual call can look policy-legal in
+     isolation (A is a normal read, B is a normal read, C is a normal external send), while the SEQUENCE is the
+     actual attack. This is the MCP "confused deputy" / cross-tool escalation pattern named in OWASP MCP guidance.
+     Context Guard closes this by letting operator policy attach conservative, coarse-grained risk LABELS to a
+     local execution context based on which tools were called and what kind of result they returned, then letting
+     a later call's own declared EFFECT labels be checked against those accumulated context labels before the
+     later call is allowed.
+  2. **Explicit non-goal: this is not model-reasoning inspection or causal proof.** Context Guard never reads,
+     inspects, or reasons about the upstream LLM's prompts, completions, chain-of-thought, or any model-internal
+     state — AgentGate has no access to any of that; it only sees the MCP JSON-RPC `tools/call` requests and
+     results that actually cross the gateway. A label is a POLICY ASSERTION triggered by an observed gateway
+     event ("tool X's call succeeded with a non-blocked result, and operator policy classifies that as
+     `untrusted_content`"), never a claim that the injection actually happened, that the model "read" or "acted
+     on" anything, or that one call causally caused a later one. Two calls sharing one context is correlation by
+     connection, not proof of causation. This distinction is stated on every context-facing surface (CLI/API/UI,
+     when built) and is treated as a documentation requirement, not an implementation detail to gloss over.
+  3. **Exact execution-context boundary: one gateway process = one stdio connection = one context, today.**
+     `startGateway()` (`packages/gateway/src/server.ts`) generates one opaque `contextId` (`crypto.randomUUID()`)
+     and creates the context (`createContext()`, `context-guard/state.ts`) once, before `startStdioProxy()` is
+     ever called — before any `tools/call` can reach the handler. That one context is captured in the single
+     `PipelineContext` object (`ctx`) closed over by every `CallToolRequestSchema` handler invocation for the
+     lifetime of that one stdio connection/process. This is the most precise boundary the current architecture
+     actually supports honestly: AgentGate's documented protocol boundary (ADR-0005) is legacy-2025 stdio only,
+     one gateway process per launch, one upstream client connection per process — there is no multi-connection or
+     multi-tenant stdio server in this codebase to build a finer-grained per-connection boundary against. A
+     context is NOT a model-conversation identifier and does not attempt to be one: one stdio connection may
+     correspond to many, or to only part of, one upstream conversation, depending entirely on how the calling MCP
+     client manages its own session — this is a named, explicit limitation, not an implied guarantee.
+  4. **Context ID, revision, lifecycle, reconnect, restart, concurrency.** `context_id` is a locally-generated
+     UUID, opaque to any upstream party — never derived from or exposed to the model. `revision` is a strictly
+     monotonic integer (`context-guard/state.ts`): every transition that changes labels, or that resets/expires/
+     closes the context, increments it by exactly 1; it is never decremented and never reused. Status is one of
+     `active` / `expired` / `reset` / `closed` (`ContextStatus`, `context-guard/types.ts`). Lifecycle:
+     **created** before the first call can be evaluated (point 3); **closed** on the same connection's stdio
+     transport actually closing or erroring (`server.onclose`/`server.onerror` in `transport/stdio.ts`,
+     `closeOrExpireContext(..., 'closed')`) OR on process shutdown signal (`SIGINT`/`SIGTERM` in `server.ts`) —
+     `closeOrExpireContext()` is itself idempotent (a no-op once status is no longer `active`), so whichever of
+     those two fires first performs the real transition and the other is a safe no-op, never a double-transition
+     or a race that corrupts state; **reset** only via an explicit, reviewer-attributed, exact-revision-matched
+     administrative action (point 10). **Reconnect/restart**: a NEW gateway process launch always creates a NEW
+     `contextId` — there is no persistent "the same logical connection resumed its old context" concept in this
+     milestone; a restarted gateway starts with a genuinely fresh, empty-label context, which is the conservative,
+     correct default (see point 2's causation caveat — even if it could persist across restarts, doing so would
+     not fix the "not proof of causation" limitation and would raise its own staleness/reuse risk). **Concurrency**:
+     within one Node.js process, better-sqlite3 is synchronous and every individual state-transition function in
+     `context-guard/state.ts` (`appendContextLabels`, `recordCallEvaluation`, `resetContext`,
+     `closeOrExpireContext`) contains no `await` between its read of current state and its write — so JavaScript's
+     single-threaded execution model already guarantees no other same-process code can interleave and corrupt one
+     transition. Two DIFFERENT concurrent `tools/call` requests each independently read CURRENT context state
+     fresh at their own evaluation point (never a cached/shared in-memory value), so neither can silently act on
+     state staler than what the database held at the moment it actually read — see point 12 for the residual
+     cross-request race this does NOT eliminate.
+  5. **Policy-owned source/effect labels — never a fixed, hardcoded taxonomy.** `context_guard.labels` in
+     `GatewayConfigSchema` (`packages/gateway/src/config/registry.ts`) lets an operator declare custom labels
+     beyond the built-in vocabulary (`BUILTIN_CONTEXT_LABELS`: `untrusted_content`, `sensitive_data_accessed`,
+     `prompt_injection_suspected`; `BUILTIN_EFFECT_LABELS`: `external_communication`, `destructive_write`,
+     `code_execution`, `credential_use`, `privilege_change`, `sensitive_read`). Per-tool `context_guard.tools.<name>`
+     declares `effects` (what this tool's CALL itself does, checked against the active context's labels before
+     allowing) and `adds_on_result` (what labels a SUCCESSFUL, non-blocked result adds to the context afterward).
+     Every label reference anywhere in config (`tools.*.effects`, `tools.*.adds_on_result`, `rules.*.when.*`) is
+     validated against the built-in set plus declared custom labels at config-parse time (`ContextGuardSchema`'s
+     `superRefine`) — an unknown label fails config validation, not silently becomes a no-op at runtime.
+  6. **Why MCP annotations remain untrusted and can never lower risk.** Tool `annotations` (`readOnlyHint`,
+     `destructiveHint`, etc.) are server-supplied metadata under the MCP spec's own wording — the same reasoning
+     ADR-0012 point 5 already applies to Tool Integrity's trust decisions applies here identically: a downstream
+     server could freely advertise `readOnlyHint: true` on a tool that is not actually read-only, and Context
+     Guard's enforcement code never reads or consults `annotations` for ANY decision — effect/source labels are
+     exclusively OPERATOR-declared config (point 5), computed independently of whatever the server claims about
+     itself. A malicious or buggy server cannot self-report its way to a lower risk classification.
+  7. **Monotonic state: labels only ever accumulate; no automatic downgrade.** `appendContextLabels()`
+     (`context-guard/state.ts`) computes the UNION of existing and new labels — labels are never removed except by
+     an explicit, reviewer-attributed `resetContext()` (point 10), and even a reset does not delete history, only
+     clears the ACTIVE label set going forward while `context_events` keeps every prior `label_added` row forever.
+     If every label in one call's `adds_on_result` is already present, this is a documented no-op (no new event,
+     no revision bump) — context history stays proportional to REAL change, not to every call that happens to
+     re-observe an already-known label.
+  8. **Exact transition timing per outcome.** `runPipeline()`'s label-append step (`pipeline.ts`, step 8) fires
+     ONLY when `finalStatus === 'SUCCEEDED' && !resultBlocked` — i.e. the call actually reached the downstream
+     server, returned without a transport/execution error, AND its result was not entirely replaced by output
+     security (ADR-0009). A DENIED, CANCELLED, or EXPIRED call never reached downstream at all, so it adds no
+     labels. A FAILED (downstream execution threw) call returned no usable result, so it adds no labels. A
+     result-BLOCKED call means nothing the label would describe actually reached the agent, so it adds no labels
+     either — this is deliberately conservative: a REDACTED-but-still-delivered result DOES still add its
+     configured labels (content beyond the redacted secret pattern still reached the agent), which is the one
+     place this milestone accepts under-counting risk (a redacted result is treated the same as a clean one for
+     labeling purposes) rather than ever inventing a label for content nobody actually received. A
+     `call_evaluated` history event (point 11) is recorded for EVERY contextually-evaluated call regardless of
+     outcome or mode, so `monitor`-mode "what would have happened" and denied/errored calls are still visible in
+     history even though they never mutate labels.
+  9. **Evaluation order.** Traced in source and reproduced here exactly (see `packages/gateway/src/transport/
+     stdio.ts` and `packages/gateway/src/pipeline.ts`):
+     1. Request validation / argument normalization (`pipeline.ts` step 1).
+     2. **Tool Integrity quarantine gate** (`checkCallAllowed()`, `transport/stdio.ts`) — runs BEFORE
+        `runPipeline()` is even called; a call to a tool that is not currently trusted (in an enforcing mode)
+        never reaches ANY of the steps below, for every call including one by a client using a cached/direct tool
+        name that was never returned by `tools/list`.
+     3. **Base policy decision + input secret checks** — `evaluate(policy, input)` (`pipeline.ts` step 4); input
+        secret detection (`contains_secrets`) is part of this same policy-engine evaluation, not a separate gate.
+     4. **Context Guard evaluation** (`pipeline.ts` step 4.5) — `evaluateContextGuard()` reads the CURRENT context
+        labels (fresh from storage, point 4) and evaluates `context_guard.rules` (`evaluateContextualRules()`,
+        first-match, deterministic, mirroring the base policy engine's own semantics) against the attempted call's
+        declared `effects`. The result is combined with the base policy decision via `isAtLeastAsStrict()`
+        (`context-guard/rules.ts`) — Context Guard's action REPLACES the effective decision ONLY if it is at
+        least as strict (`ALLOW < REQUIRE_APPROVAL < DENY`); a base-policy DENY can never become a contextual
+        ALLOW or REQUIRE_APPROVAL, and an already-REQUIRE_APPROVAL base decision can never be silently downgraded
+        to ALLOW by a non-matching contextual rule. This is always COMPUTED and RECORDED (point 11), even in
+        `monitor` mode, but only actually APPLIED to the effective decision when `mode === 'enforce'`
+        (`modeEnforces()`).
+     5. **Exact contextual approval, if required** (`pipeline.ts` step 5) — see point 10.
+     6. **Revalidate context/approval binding immediately before execution** (`checkApprovalContextValid()`,
+        `pipeline.ts`, immediately after a human APPROVED decision is observed) — see point 10.
+     7. **Downstream call** (`executeDownstream()`, `pipeline.ts` step 6) — only reached after every gate above has
+        passed.
+     8. **Result/error safety inspection** (`sanitizeToolResult()`, ADR-0009, `pipeline.ts` step 7) — runs on the
+        raw downstream result BEFORE it is ever returned to the upstream client or referenced by anything else.
+     9. **Append context transitions** (`pipeline.ts` step 8) — deterministic, outcome-gated (point 8), always
+        AFTER the storage write of the terminal event status so the linked `source_event_id` always refers to an
+        already-persisted, already-redacted audit event.
+     10. **Audit/SSE publication** — every intermediate status transition in `runPipeline()` follows the same
+         fixed order: storage write (`updateEventStatus`) → re-fetch (`getEvent`) → SSE emit (`ctx.emitEvent`),
+         consistently, for every terminal and intermediate state, so a subscriber never observes an SSE event for
+         a state that isn't yet durably persisted.
+     This is the actual implemented order, not a design aspiration — verified by direct source reading, not
+     inferred from comments alone.
+  10. **Exact contextual approval binding and revalidation.** When Context Guard's effective decision is
+      REQUIRE_APPROVAL, `ApprovalManager.create()` (`approval.ts`) is given an optional `contextBinding`
+      (`pipeline.ts` step 5) recording the EXACT `context_id`, `context_revision` observed AT THAT MOMENT,
+      `argument_digest` (`computeArgumentDigest()` — SHA-256 of the REDACTED arguments, never raw), and the
+      `contextual_rule_id` that required it (`'base-policy'` if the base policy itself required approval with no
+      contextual escalation). `tool_fingerprint` is included in the schema for a Tool Integrity fingerprint
+      binding but is not yet populated by this milestone's call sites (`null` today) — a named, honest gap, not a
+      claimed guarantee. Every field is nullable and a pre-Milestone-7 (or non-contextual) approval simply has
+      `null` in all of them, meaning "not context-bound," which every consumer must treat as valid and ordinary,
+      never as an error. At CONSUMPTION time — immediately before downstream execution, after a human has already
+      clicked "approve" — `checkApprovalContextValid()` (`context-guard/enforcement.ts`) re-reads CURRENT context
+      state fresh and fails closed if: the bound context no longer exists; the current revision no longer exactly
+      matches the revision recorded at approval-creation time (the context accumulated more risk in the window
+      between creation and a human's decision); the argument digest no longer matches (arguments changed); or the
+      tool name no longer matches the approval's `scope`. This closes the create-time/consume-time window a
+      naive "check once at creation" design would leave open. Approval consumption remains single-use
+      (pre-existing `consumed` flag, ADR unchanged) and TTL-bound (pre-existing `expires_at`); an approval never
+      clears context labels or grants any future call permission — it authorizes exactly the one call it was
+      created for, once.
+  11. **Append-only history, mutable projection, local tamper evidence.** Same two-table pattern as ADR-0012 point
+      9 and ADR-0004: `context_events` is a hash-chained (`sha256`, canonicalized payload, same `canonicalize()`/
+      chaining primitives already used for the audit and Tool Integrity chains), append-only, sequence-numbered
+      log — every `context_created`/`label_added`/`call_evaluated`/`context_reset`/`context_expired`/
+      `context_closed` transition is recorded, never mutated or deleted. `context_state` is a MUTABLE projection
+      (one row per `context_id`) needed because every `tools/call` needs a cheap "what labels does the active
+      context have right now" lookup, which a full event-log replay on every call would make prohibitively slow.
+      `verifyContextChain()` (`storage.ts`) independently re-walks the chain exactly like
+      `verifyToolIntegrityChain()`/`verifyChain()`, detecting tampering (hash mismatch), deleted rows (sequence
+      gap), and reordered rows (broken hash link) — this is local tamper EVIDENCE, identical in kind and in
+      limitation to what ADR-0004/ADR-0012 already state: not tamper-PROOF against a privileged local
+      administrator with direct database file access. Only label NAMES (bounded, policy vocabulary),
+      safe/bounded `reason` strings, and already-redacted `source_event_id` linkage are ever stored — raw tool
+      arguments, raw tool results, and any prompt-injection text are never written into `context_events` or
+      `context_state` by any code path in `context-guard/state.ts` or the `pipeline.ts` call site that invokes it.
+  12. **Expiry/reset semantics — and resetting AgentGate cannot erase client/model memory.** `resetContext()`
+      (`context-guard/state.ts`) requires an EXACT current-revision match (the same stale-revision protection
+      pattern as Tool Integrity's exact-fingerprint accept/reject, ADR-0012 point 8) plus a reviewer identity and
+      a reason string — both mandatory, both recorded in the append-only history — and clears the ACTIVE label set
+      going forward while never deleting the prior `label_added`/`call_evaluated` history. A stale reset request
+      (formed against a revision that has since advanced) is rejected outright, never silently applied against
+      whatever the current revision happens to be, so a reset cannot be used to "wash away" risk labels the
+      requester didn't actually see at request time. **This reset is entirely local, gateway-side state** — it
+      has no ability whatsoever to erase or affect anything the upstream LLM or MCP client itself remembers from
+      before the reset (its own conversation history, cached tool results, or reasoning already produced); every
+      context-facing surface (CLI help text, API responses, UI copy, when built) is required to state this
+      explicitly rather than let a user infer that resetting AgentGate resets the agent's own memory too. `expiry`
+      (TTL-based, `closeOrExpireContext(..., 'expired')`) is implemented as a state-machine transition but is not
+      yet wired to an active timer/scheduler in this milestone — `context_state.expires_at` exists in the schema
+      for a future TTL-enforcement pass; today expiry only actually fires via an explicit call to
+      `closeOrExpireContext()`.
+  13. **Migration and backwards compatibility.** The Context Guard migration (`storage.ts` `MIGRATIONS`, version 9
+      / `MIGRATION_VERSIONS.CONTEXT_GUARD`) is appended strictly after the Tool Integrity migration, per the
+      project's existing append-only-migrations convention (ADR-0009's comment on `MIGRATIONS`, restated for this
+      milestone) — inserting it earlier would silently renumber every later migration and cause an already-
+      upgraded database to skip it entirely. It creates `context_events`/`context_state` and extends `approvals`
+      with five nullable binding columns via non-idempotent `ALTER TABLE ADD COLUMN` statements; a database that
+      already has them (re-run against an already-migrated schema) fails loudly (`duplicate column name`) rather
+      than silently, which is the correct fail-closed behavior for a migration runner, not a defect — see the
+      regression fixed earlier this milestone in `tool-integrity-storage-migration.test.ts` for why a test fixture
+      must pin an exact NAMED migration version (`MIGRATION_VERSIONS`) rather than assume "the highest recorded
+      version" identifies any one specific migration. `context_guard: ContextGuardSchema.default({})` in
+      `GatewayConfigSchema` means an omitted `context_guard` config block defaults to `mode: 'monitor'` — the
+      same backwards-compatibility trade-off ADR-0012 made for `tool_integrity.mode` (point 4 there): every test,
+      demo, and real config file written before this milestone keeps working unmodified with zero new blocking
+      behavior, and `defaultContextGuardConfig()` (`config/registry.ts`) is the single canonical, schema-derived
+      fallback used at the one runtime boundary (`pipeline.ts`) that must tolerate a `GatewayConfig`-shaped object
+      built by hand rather than parsed through `loadGatewayConfig()` — never a hand-duplicated default literal.
+  14. **Privacy/redaction.** Everything point 11 already states about what is and is not stored applies here as
+      the privacy statement: label names, rule ids, safe bounded reason strings, and redacted-event linkage only.
+      `computeArgumentDigest()` hashes already-REDACTED arguments (the same `redactArgumentsForAudit()` output
+      already used for the audit chain, ADR-0004), never raw arguments — the digest is a comparison token, not a
+      reversible record, and cannot be used to recover the original argument values.
+  15. **Residual races this milestone does not eliminate.** Two are named explicitly, not hidden: (a) the same
+      scan-to-call TOCTOU Tool Integrity already documents (ADR-0012 point 7) is unaffected and unrelated to
+      Context Guard — a downstream tool's DEFINITION can still drift between scans independent of context state;
+      (b) a genuine cross-request race remains between "Context Guard reads context state to compute its
+      evaluation" and "that same call's OWN later label-append (step 8) writes new state" for a DIFFERENT
+      concurrent call that reads in between — i.e. call X's contextual evaluation and call Y's label-append (from
+      an earlier, still-finishing call) can interleave across the `await` points inside `runPipeline()`'s
+      approval-wait loop and `executeDownstream()`, so two calls issued close together are not linearized against
+      each other by any explicit lock; the exact-revision approval-binding mechanism (point 10) is the one place
+      this project actively closes that window for the specific case that matters most (a human approving a
+      contextually-gated call), not a claim that every possible interleaving is race-free.
+- Reason: closing individual-call/result/definition trust gaps (ADR-0003/ADR-0009/ADR-0012) still leaves the
+  cross-tool SEQUENCE unguarded — the class of attack where no single call looks wrong in isolation. This is a
+  named, real MCP threat pattern (confused deputy / cross-tool escalation via indirect prompt injection), not a
+  hypothetical one, and closing it is squarely within AgentGate's stated purpose as the trust boundary between an
+  agent and the tools it can call.
+- Evidence: `packages/gateway/src/context-guard/*` (new: `state.ts`, `rules.ts`, `enforcement.ts`, `types.ts`),
+  `packages/gateway/src/{storage,server,pipeline,approval,config/registry,onboarding/smokeTest}.ts`,
+  `packages/gateway/src/transport/stdio.ts`, `packages/gateway/src/api/control.ts` (accepts, does not yet route,
+  a `contextGuard` option — Control API routes are a later milestone phase), `packages/protocol/src/events.ts`
+  (`Approval` binding fields, `CONTEXT_GUARD_ESCALATION` reason code). Test evidence and exact counts are recorded
+  in the session log entry immediately below this ADR, added after the corresponding verification actually ran —
+  never claimed here in advance.
+- Alternatives considered:
+  - A fixed, hardcoded label taxonomy instead of operator-declared labels: rejected — different operators have
+    different tools and different risk models; a closed vocabulary would force every deployment into the same
+    shape or require a code change to extend it. Built-ins exist as a documented starting vocabulary, not a limit.
+  - Trusting MCP tool `annotations` (`readOnlyHint`/`destructiveHint`) as the source/effect signal instead of
+    operator config: rejected for the same reason ADR-0012 rejected trusting them for Tool Integrity decisions —
+    server-supplied, unverifiable, and a malicious server could trivially self-report a lower risk.
+  - Persisting context across gateway restarts (e.g. keyed by a client-supplied session identifier): rejected for
+    this milestone — no such identifier is reliably available at the legacy-2025 stdio protocol boundary this
+    project supports (ADR-0005), and a restored-but-stale context reintroduces exactly the kind of unverifiable
+    persistence this design otherwise avoids; a fresh context per process launch is the conservative default.
+  - Letting a contextual rule "allow" (downgrade risk) rather than only escalate: rejected by design — the
+    monotonic escalate-only invariant (point 4/7) is the property that makes "Context Guard can only make things
+    stricter" a provable, testable claim rather than a policy authors must trust by convention.
+  - A single append-only table (ADR-0010's pattern) instead of the append-only-log-plus-projection pattern:
+    rejected for the same reason ADR-0012 rejected it for Tool Integrity (point 9 there) — context state has a
+    meaningful "current state" (active labels) that enforcement needs to read cheaply on every call.
+  - Populating `tool_fingerprint` on every contextual approval in this milestone: deferred, not implemented —
+    the schema supports it (nullable) but no call site populates it yet; stated as a gap, not silently omitted.
+- Consequences:
+  - Positive: a real defense against cross-tool sequence escalation exists, enforced in the actual gateway request
+    path — including against a client calling a tool directly by a cached/guessed name — not only in comment
+    prose; Context Guard is provably monotonic (can only escalate, never silently loosen a base-policy decision);
+    contextual approvals are bound to an exact revision/tool/argument snapshot and re-validated immediately before
+    execution, closing the create-time/consume-time window; existing users are not silently broken on upgrade
+    (`monitor` default).
+  - Negative: the default (`monitor`) mode provides no blocking protection by itself, identical in kind to
+    ADR-0012's own `monitor` default trade-off — an operator must opt into `enforce` to get real enforcement;
+    context does not survive a gateway restart or a reconnect under a new process, so a real attack sequence that
+    spans a restart is not detected by this milestone; TTL-based expiry exists in the schema but is not yet
+    actively scheduled; `tool_fingerprint` approval binding is not yet populated; the residual cross-request race
+    (point 15b) means this milestone's concurrency guarantee is real but narrower than "fully linearized."
+- Limitations (stated explicitly, not implied):
+  - This is not model-reasoning inspection, not causal proof that one tool's result actually influenced a later
+    call, and not information-flow/taint tracking of any kind — see point 2.
+  - One stdio connection/process may not equal one upstream model conversation — see point 3.
+  - Labels are conservative POLICY ASSERTIONS triggered by observed gateway events, not verified facts about what
+    a tool actually did or what content an agent actually consumed.
+  - MCP tool annotations remain untrusted server-supplied hints and are never consulted by enforcement to reduce
+    risk — see point 6.
+  - Local tamper evidence (the hash chain) is not tamper-proof against a privileged local administrator with
+    direct database file access — identical in kind to ADR-0004/ADR-0012's own stated limitation.
+  - A reset clears local AgentGate context state only; it cannot erase or affect what the upstream LLM/MCP client
+    itself remembers from before the reset — see point 12.
+  - Context does not persist across a gateway restart or reconnect under a new process — a genuinely restart-
+    spanning attack sequence is not detected.
+  - The scan-to-call TOCTOU already documented for Tool Integrity (ADR-0012 point 7) is unrelated to and
+    unaffected by Context Guard.
+  - A residual cross-request race between one call's contextual evaluation and a different, concurrently-finishing
+    call's label-append is not fully eliminated — see point 15b; the exact-revision approval-binding mechanism
+    (point 10) closes this specifically for human-approval consumption, not for every possible interleaving.
+  - This milestone does not implement, and does not claim: sandboxing of downstream tools, closing every covert
+    channel between tools, cryptographic proof of causation, support for MCP protocol versions/notifications
+    beyond AgentGate's existing legacy-2025 stdio boundary (ADR-0005), or a Context Guard CLI/full Control API/
+    Control Center surface — those are later phases of this same milestone, tracked separately, not claimed done
+    here.
+- Affected files: `packages/gateway/src/context-guard/*` (new), `packages/gateway/src/{storage,server,pipeline,
+  approval,config/registry,onboarding/smokeTest}.ts`, `packages/gateway/src/transport/stdio.ts`,
+  `packages/gateway/src/api/control.ts`, `packages/protocol/src/events.ts`, associated test files (added in the
+  session log entry below).
+- Supersedes: NONE
+- Superseded by: NONE
+
 ## Superseded Decisions
 
 

@@ -11,6 +11,8 @@ import { computeServerIdentity } from '../tool-integrity/identity.js';
 import { scanDownstreamServer } from '../tool-integrity/scan.js';
 import { applyScanToRegistry } from '../tool-integrity/registry.js';
 import { filterTrustedTools, checkCallAllowed } from '../tool-integrity/enforcement.js';
+import { closeOrExpireContext } from '../context-guard/state.js';
+import { sanitizeErrorMessage } from '@agentgate/policy';
 
 /**
  * Starts the AgentGate stdio proxy.
@@ -158,6 +160,54 @@ export async function startStdioProxy(ctx: PipelineContext): Promise<void> {
       content: [{ type: 'text', text: JSON.stringify(result) }],
     };
   });
+
+  // ── Milestone 7 (ADR-0013): finalize the execution context on transport
+  //    close/error, not only on a process-level SIGINT/SIGTERM (server.ts
+  //    already handles that case). The MCP SDK's `Protocol` base class
+  //    (which `Server` extends) invokes `onclose`/`onerror` whenever the
+  //    underlying transport itself closes or errors — e.g. the upstream
+  //    client exiting or dropping the connection without ever signaling
+  //    this process — which is a distinct event from this process being
+  //    asked to shut down. `closeOrExpireContext()` is itself idempotent
+  //    (a no-op once the context is no longer `active`), so this can never
+  //    race destructively with server.ts's own shutdown-signal handler —
+  //    whichever fires first performs the real transition, the other is a
+  //    safe no-op. Registered BEFORE connect() so a close/error during the
+  //    connection handshake itself is still caught.
+  const finalizeContextOnTransportEnd = (label: string) => (err?: unknown) => {
+    if (err !== undefined) {
+      console.error(`[agentgate] Stdio transport error: ${sanitizeErrorMessage(err, { source: 'internal' }).message}`);
+    }
+    try {
+      if (ctx.config.context_guard.mode !== 'disabled') {
+        closeOrExpireContext(ctx.storage, ctx.contextId, 'closed');
+      }
+    } catch (closeErr) {
+      console.error(
+        `[agentgate] Error closing execution context on ${label}:`,
+        sanitizeErrorMessage(closeErr, { source: 'internal' }).message
+      );
+    }
+  };
+  server.onclose = finalizeContextOnTransportEnd('transport close');
+  server.onerror = finalizeContextOnTransportEnd('transport error');
+
+  // The installed SDK's `StdioServerTransport` (verified by reading
+  // `@modelcontextprotocol/sdk/dist/esm/server/stdio.js` directly) only
+  // ever attaches `'data'`/`'error'` listeners to `process.stdin` — it
+  // never listens for `'end'`, so it never calls its own `close()` (and
+  // therefore never fires `server.onclose` above) when the upstream client
+  // closes its side of the pipe gracefully (`stdin.end()`, the FIRST thing
+  // the official client SDK's own `close()` does, well before it escalates
+  // to SIGTERM/SIGKILL after a 2s grace period). Without this listener, a
+  // graceful disconnect would leave the context `active` for up to that
+  // escalation window — or indefinitely, since a process-level SIGTERM is
+  // not reliably delivered as a catchable signal to a Windows child process
+  // at all. `process.stdin`'s `'end'` event is an OS-level pipe-close
+  // notification, not a signal — it fires reliably cross-platform. This
+  // does not duplicate the pipeline or the transport; it only closes the
+  // one gap the SDK's own transport leaves open.
+  process.stdin.on('end', finalizeContextOnTransportEnd('stdin end'));
 
   // ── Start accepting stdio from Claude Code ────────────────────────────────
   const transport = new StdioServerTransport();

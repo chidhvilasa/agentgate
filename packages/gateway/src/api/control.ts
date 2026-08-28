@@ -6,7 +6,7 @@ import type { AuditEvent, Approval, ReplayEvaluation } from '@agentgate/protocol
 import cors from '@fastify/cors';
 import { loadPolicyFile, sanitizeErrorMessage } from '@agentgate/policy';
 import { evaluateHistoricalEvent, ReplayUnsupportedEventError } from '../replay.js';
-import type { DownstreamServer, ToolIntegrityMode } from '../config/registry.js';
+import type { DownstreamServer, ToolIntegrityMode, ContextGuardMode } from '../config/registry.js';
 import { computeServerIdentity } from '../tool-integrity/identity.js';
 import { scanDownstreamServer } from '../tool-integrity/scan.js';
 import { applyScanToRegistry, acceptCandidate, rejectCandidate } from '../tool-integrity/registry.js';
@@ -80,6 +80,11 @@ export function buildControlApi(opts: {
   toolIntegrity?: {
     server: DownstreamServer;
     mode: ToolIntegrityMode;
+  };
+  /** Context Guard (ADR-0013) — this process's single execution context id and configured mode. Optional only so existing tests that don't exercise Context Guard need not construct one; server.ts always supplies it in real operation. */
+  contextGuard?: {
+    contextId: string;
+    mode: ContextGuardMode;
   };
 }) {
   LOCAL_AUTH_TOKEN = randomBytes(32).toString('hex');

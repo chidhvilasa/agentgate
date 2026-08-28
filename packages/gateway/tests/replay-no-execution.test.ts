@@ -10,6 +10,9 @@ import { AuditStorage } from '../src/storage.js';
 import { ApprovalManager } from '../src/approval.js';
 import type { AgentIdentity } from '@agentgate/protocol';
 import type { GatewayConfig } from '../src/config/registry.js';
+import { defaultContextGuardConfig } from '../src/config/registry.js';
+import { createContext } from '../src/context-guard/state.js';
+import crypto from 'node:crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_SERVER = path.join(__dirname, 'fixtures/fixture-downstream-server.mjs');
@@ -107,11 +110,18 @@ rules:
       ],
       retention: { max_days: 30, max_events: 100000 },
       output_security: { mode: 'redact', opaque_content: 'allow_uninspected', max_depth: 8, max_text_bytes: 1_000_000 },
+      context_guard: defaultContextGuardConfig(),
     };
+
+    // A real Context Guard execution context, created exactly the way
+    // server.ts creates one for a real upstream connection (ADR-0013) —
+    // runPipeline() requires one to already exist, same as production.
+    const contextId = crypto.randomUUID();
+    createContext(storage, contextId, null);
 
     // One REAL execution — this is expected to bump the counter to 1 and
     // creates the source event replay will later be evaluated against.
-    const ctx = { storage, approvalManager, config, emitEvent: () => {} };
+    const ctx = { storage, approvalManager, config, contextId, emitEvent: () => {} };
     const { event } = await runPipeline({
       ctx,
       agent: AGENT,
