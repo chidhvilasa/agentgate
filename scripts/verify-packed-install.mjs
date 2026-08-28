@@ -28,6 +28,15 @@ const PACKAGES = ['protocol', 'policy', 'gateway'];
 // pnpm/npm are .cmd shims on Windows — execFileSync needs shell:true there
 // to resolve them; POSIX doesn't need or want it.
 const SHELL = process.platform === 'win32';
+// --force-local only exists in GNU tar (Linux, and Windows' bundled bsdtar-
+// via-Git or GNU tar depending on setup) and is needed ONLY on Windows, to
+// stop tar from misreading a "C:\..." absolute path's drive-letter colon as
+// a "host:path" remote-tar spec. macOS ships BSD tar (libarchive), which
+// does not recognize this flag at all and exits with a usage error if it is
+// passed — so it must never be passed there. Linux's GNU tar accepts it but
+// never needs it (no colon-containing local paths); omitting it there too
+// keeps the flag set minimal and exactly matched to why it exists.
+const TAR_LOCAL_FLAGS = process.platform === 'win32' ? ['--force-local'] : [];
 
 // Any packed entry path containing one of these is an automatic failure —
 // none of these should ever be reachable from a package's `files`
@@ -60,7 +69,7 @@ function sha256File(filePath) {
 
 /** Extracts one file's text content from a .tgz without unpacking the whole archive. */
 function extractFileFromTarball(tarballPath, innerPath) {
-  return execFileSync('tar', ['--force-local', '-xzOf', tarballPath, innerPath], { encoding: 'utf-8' });
+  return execFileSync('tar', [...TAR_LOCAL_FLAGS, '-xzOf', tarballPath, innerPath], { encoding: 'utf-8' });
 }
 
 async function main() {
@@ -100,9 +109,7 @@ async function main() {
     console.log('\nStep 3 — verify every tarball\'s content allowlist and reject forbidden entries...');
     const listings = {};
     for (const { pkg, tarballPath } of tarballs) {
-      // --force-local avoids tar misreading a Windows "C:\..." absolute path
-      // as a "host:path" remote-tar spec (the colon after the drive letter).
-      const listing = execFileSync('tar', ['--force-local', '-tzf', tarballPath], { encoding: 'utf-8' });
+      const listing = execFileSync('tar', [...TAR_LOCAL_FLAGS, '-tzf', tarballPath], { encoding: 'utf-8' });
       listings[pkg] = listing;
       const entries = listing.trim().split('\n').filter(Boolean);
       const forbidden = entries.filter((e) => FORBIDDEN_PATH_SUBSTRINGS.some((bad) => e.includes(bad)));

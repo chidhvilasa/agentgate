@@ -15,6 +15,9 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const CREDENTIAL_PATTERN = /AKIA[0-9A-Z]{16}|sk-ant-api[0-9A-Za-z_-]{20,}|sk-[a-zA-Z0-9]{32,}|gh[pousr]_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{60,}|-----BEGIN (RSA|EC|OPENSSH|PRIVATE|DSA) KEY-----/g;
+// --force-local is GNU-tar-only and needed only on Windows (see the same
+// note in verify-packed-install.mjs) — macOS's BSD tar rejects it outright.
+const TAR_LOCAL_FLAGS = process.platform === 'win32' ? ['--force-local'] : [];
 const ALLOWED_LITERALS = [
   'AKIAIOSFODNN7EXAMPLE',
   'AKIA1234567890ABCDEF',
@@ -58,7 +61,7 @@ function scanDirRecursive(dir, findings, relBase = dir) {
     if (entry.name.endsWith('.tgz')) {
       // Inspect the tarball's own text-ish content (package.json, etc.) via its file listing and, for
       // safety, its raw bytes too — a credential embedded as binary-adjacent text would still match.
-      const listing = execFileSync('tar', ['--force-local', '-tzf', full], { encoding: 'utf-8' });
+      const listing = execFileSync('tar', [...TAR_LOCAL_FLAGS, '-tzf', full], { encoding: 'utf-8' });
       scanText(listing, `${rel} (entry listing)`, findings);
       const raw = fs.readFileSync(full, 'latin1'); // latin1 preserves byte values 1:1 for a substring/regex scan of a gzip binary
       scanText(raw, `${rel} (raw bytes)`, findings);
