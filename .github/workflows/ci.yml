@@ -69,6 +69,9 @@ jobs:
       - name: Tool Integrity rug-pull demo (ADR-0012)
         run: node examples/tool-rug-pull/demo.mjs
 
+      - name: Context Guard cross-tool prompt-injection demo (ADR-0013)
+        run: node examples/context-poisoning/demo.mjs
+
       - name: Packed-package install verification (Milestone 5)
         run: node scripts/verify-packed-install.mjs
 
@@ -127,6 +130,9 @@ jobs:
 
       - name: Tool Integrity rug-pull demo (ADR-0012)
         run: node examples/tool-rug-pull/demo.mjs
+
+      - name: Context Guard cross-tool prompt-injection demo (ADR-0013)
+        run: node examples/context-poisoning/demo.mjs
 
       - name: Packed-package install verification (Milestone 5)
         run: node scripts/verify-packed-install.mjs
