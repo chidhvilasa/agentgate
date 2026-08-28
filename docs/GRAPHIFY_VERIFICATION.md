@@ -371,20 +371,107 @@ confirmed to be instances of an already-documented limitation class (object-lite
 attribution), not new tool defects or new blind spots specific to Tool Integrity — no source change was made
 solely because Graphify reported (or failed to report) a path without independently confirming it first.
 
+## Milestone 7 incremental update (2026-08-28) — Context Guard cross-tool escalation defense
+
+**Command run**: `graphify update .` (the direct CLI, per this project's `CLAUDE.md` — AST-only, no API key, no
+LLM cost). Result: `AST extraction: 126/126 uncached files (100%)`, graph rebuilt to **1514 nodes, 2409 edges,
+104 communities** (up from 1218 nodes/1744 edges/85 communities at the end of Milestone 6), `graph.json`/
+`graph.html`/`GRAPH_REPORT.md` all regenerated. A prior curated-label backup was written to
+`graphify-out/2026-08-28/` automatically, per graphify's own community-label-drift handling.
+
+**Scope decision, stated explicitly**: this session ran the AST (code) re-index via the direct CLI, which
+requires no LLM/subagent dispatch and genuinely re-extracted every changed `.ts`/`.tsx`/`.mjs` file this
+milestone touched. It did **not** additionally dispatch subagents for semantic (LLM-based) re-extraction of the
+changed Markdown documentation files (`README.md`, `docs/ARCHITECTURE.md`, `docs/THREAT_MODEL.md`,
+`docs/POLICY_REFERENCE.md`, `docs/VERIFICATION.md`, `docs/DEVELOPMENT.md`, `docs/TROUBLESHOOTING.md`,
+`CHANGELOG.md`, `docs/AI_DECISIONS.md`) — a deliberate scope decision given the significant additional
+subagent-dispatch cost for a milestone whose verification-relevant queries below are entirely about *code*
+relationships (which the AST pass covers completely), not doc-node semantic edges. This is a real, named gap in
+this session's re-index, not a silent omission: the doc *nodes* in the graph for these 9 files still reflect
+their pre-Milestone-7 semantic extraction (their content on disk has since changed) until a future `/graphify
+--update` session dispatches subagents for them.
+
+**Orientation/verification queries run against the freshly AST-updated graph, each manually cross-checked
+against source before being trusted** (all of `runPipeline()`'s exact call-site line numbers below were
+independently confirmed by direct source reading earlier in this same session, before running any query — the
+graph's answers were checked against that reading, not the other way around):
+
+1. `graphify explain "evaluateContextGuard"` → `runPipeline() [calls] pipeline.ts:L205`, imported from
+   `context-guard/enforcement.ts:L20`. **Confirmed accurate**: `pipeline.ts` line 205 is exactly
+   `const cgEvaluation = evaluateContextGuard(ctx.storage, contextGuardConfig, ctx.contextId, toolName);` —
+   proving the graph correctly captures the Tool-Integrity-gate-then-Context-Guard-evaluation ordering point in
+   the real request path (Tool Integrity's `checkCallAllowed()` gate runs earlier, in `transport/stdio.ts`,
+   outside `runPipeline()` entirely — by design, per ADR-0013 point 9 — so no single-file graph edge captures
+   the FULL "stdio → Tool Integrity → pipeline → Context Guard" chain in one hop; this is an accurate reflection
+   of the real code structure, not a graph gap).
+2. `graphify explain "checkApprovalContextValid"` → `runPipeline() [calls] pipeline.ts:L326`. **Confirmed
+   accurate** against the exact same line read directly in source this session: the consumption-time
+   revalidation call site, immediately after a human APPROVED decision is observed.
+3. `graphify explain "appendContextLabels"` → `runPipeline() [calls] pipeline.ts:L410`. **Confirmed accurate**:
+   line 410 is exactly the label-append call inside pipeline step 8's `if (contextGuardConfig.mode !== 'disabled'
+   && finalStatus === 'SUCCEEDED' && !resultBlocked)` block — correctly capturing the downstream-result →
+   result-safety → context-label-transition path's real call site and its outcome-gating condition.
+4. `graphify explain "summarizeContexts"` → `buildControlApi() [calls] control.ts:L558`; `runContextStatus()
+   [calls] context-guard/cli.ts:L289`. **Confirmed accurate**: this is the exact shared-function pattern ADR-0013
+   documents — the same `summarizeContexts()` reused by both the CLI (`runContextStatus`) and the Control API
+   (`buildControlApi`'s `GET /api/contexts` route), never two independent implementations — visible directly in
+   the graph's own connection list without needing to separately query each caller.
+5. `graphify explain "openEventStream"` → `ContextGuard() [calls] ContextGuard.tsx:L522`; `Timeline() [calls]
+   Timeline.tsx:L35`; imported by both `ContextGuard.tsx:L3` and `Timeline.tsx:L3`. **Confirmed accurate**: the
+   new Context Guard page's SSE subscription correctly resolves to the exact same pre-existing
+   `openEventStream()` function `Timeline.tsx` already used — proving the graph captured that this milestone's
+   `context_event` frames ride the SAME stream/function as pre-existing `audit_event` traffic, not a second
+   parallel one, matching ADR-0013's own stated design.
+6. `graphify explain "bumpCallCounter"` (disambiguated to the new `examples/context-poisoning/fixtures/
+   context-poisoning-fixture-server.mjs` node specifically) → `contains` edge only (degree 2: contains +
+   one outbound call to `counterPath()`), no inbound `calls` edge from the `CallToolRequestSchema` handler that
+   actually invokes it on every real tool call. **Verified this is the SAME class of limitation already
+   documented in Milestone 6** (see above): the real call site is inside an anonymous callback passed to
+   `server.setRequestHandler(...)`, which the AST extractor does not attribute to its enclosing symbol — not a
+   new defect, not new to Context Guard's fixture specifically. The real, correct counter behavior is
+   independently proven by the passing executable tests and the demo's own counter assertions (`context-guard-
+   gateway-enforcement.test.ts`, `examples/context-poisoning/demo.mjs`), not by the graph.
+
+**New false-positive finding this milestone**: `graphify path "apps/control-center/src/api.ts"
+"packages/gateway/src/api/control.ts" --undirected` returned *"both resolved to the same node
+'apps_control_center_src_api'"* — an entity-resolution collision where two genuinely different files (the
+frontend API client and the backend Control API server) fuzzy-matched onto the same graph node because their
+labels share the substring `api`. **Confirmed as a real (if narrow) entity-resolution limitation, not a data
+error**: re-querying with the exact symbol name (`summarizeContexts`, above) resolved correctly and independently
+confirmed the real Control-Center-to-Control-API relationship via each function's own accurate connection list —
+so the underlying graph data was correct; only the loose file-path-label matching used by `path` for this
+specific ambiguous pair produced a wrong resolution. Also newly observed: `graphify path "transport/stdio.ts"
+"context-guard/enforcement.ts"` reported an ambiguous top-score source match and then "no path found" — accurate
+in outcome (stdio.ts imports `context-guard/state.ts`, not `enforcement.ts`, directly; only `pipeline.ts` imports
+`enforcement.ts` — confirmed against source), but the ambiguous-match warning itself is a symptom of the same
+loose-label-matching behavior as the collision above, not a new distinct bug class.
+
+**Net assessment**: six of six symbol-level `explain` queries this milestone returned results independently
+confirmed byte-accurate against source read directly earlier in this same session (not queried first, then
+rationalized). One already-documented limitation class (object-literal/inline-callback call attribution)
+recurred for the new demo's fixture, exactly as predicted from the Milestone 6 characterization. One
+narrow, newly-observed entity-resolution limitation (ambiguous substring-based file-path matching for `path`
+queries specifically) was found, cross-checked, and confirmed not to reflect any actual error in the underlying
+extracted graph data — only in how `path`'s loose label-matching resolves two similarly-named file paths. No
+source change was made based on a graph result alone in either case.
+
 ## Conclusion
 
 Graphify is genuinely functional against AgentGate: it builds a graph from this repository in seconds with no
 API key (511 nodes at Milestone 1 → 702 at the end of Milestone 2 → 813 after Milestone 3 → 903 after Milestone
-4 → 1017 after Milestone 5 → 1218 after Milestone 6), its god-node and surprising-connection analysis
-independently rediscovers the real architectural hubs, targeted queries consistently return directly useful and
-source-accurate vocabulary for orientation, `path` produces correct traces for anything actually connected by a
-relative-import edge in source, and incremental `update` calls after further code changes (now exercised six
-times across five milestones) reliably reflect those changes. Its limitations, confirmed across Milestones 4–6:
-it cannot trace a relationship with no static source-level edge at all (a frontend/backend HTTP boundary,
-confirmed again); its `imports_from`/`contains` edges are file-level, not per-named-export, which can produce a
-misleading transitive "path" between a file and a symbol the importing file never actually imports; it does not
-resolve cross-workspace-package (`@agentgate/policy`-style) import edges the way it resolves relative imports;
-and — newly characterized precisely in Milestone 6, though observed in earlier milestones too — it does not
+4 → 1017 after Milestone 5 → 1218 after Milestone 6 → 1514 after Milestone 7's AST-only re-index), its god-node
+and surprising-connection analysis independently rediscovers the real architectural hubs, targeted queries
+consistently return directly useful and source-accurate vocabulary for orientation, `path` produces correct
+traces for anything actually connected by a relative-import edge in source, and incremental `update` calls after
+further code changes (now exercised seven times across six milestones) reliably reflect those changes. Its
+limitations, confirmed across Milestones 4–7: it cannot trace a relationship with no static source-level edge at
+all (a frontend/backend HTTP boundary, confirmed again); its `imports_from`/`contains` edges are file-level, not
+per-named-export, which can produce a misleading transitive "path" between a file and a symbol the importing file
+never actually imports; it does not resolve cross-workspace-package (`@agentgate/policy`-style) import edges the
+way it resolves relative imports; `path`'s file-label matching can collide two similarly-named files onto the
+same node for an ambiguous pair (newly observed in Milestone 7, resolved by re-querying with an exact symbol
+name instead); and — newly characterized precisely in Milestone 6, though observed in earlier milestones too,
+and reconfirmed recurring in Milestone 7 — it does not
 attribute a call made from an object-literal arrow-function property or an anonymous inline callback body to its
 enclosing symbol, undercounting real call edges for code written in that style (which this project uses for
 both the Control Center's `api` client object and every MCP SDK `setRequestHandler(...)` callback). None of
@@ -393,4 +480,6 @@ no-LLM-required tool, and every finding in this document was checked against rea
 acted on. It remains adopted as **optional local developer tooling** (see `docs/DEVELOPMENT.md`), not a build or
 CI dependency, and specifically **not** a substitute for the executable tests that actually prove Tool
 Integrity's enforcement invariants (`tests/tool-integrity-gateway-enforcement.test.ts`,
-`examples/tool-rug-pull/demo.mjs`) or Safe Replay's no-execution invariant.
+`examples/tool-rug-pull/demo.mjs`), Safe Replay's no-execution invariant, or Context Guard's zero-contact/
+stale-approval-revalidation invariants (`tests/context-guard-gateway-enforcement.test.ts`,
+`examples/context-poisoning/demo.mjs`).
