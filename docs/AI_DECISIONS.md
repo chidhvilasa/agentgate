@@ -2931,3 +2931,120 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Exact next action: stage the Control Center/demo/test/CI/doc/screenshot files listed above (excluding
   `.claude/`, `CLAUDE.md`, `graphify-out/`, and any runtime DB/token/log), run a final staged-diff check and
   secret scan, and create local checkpoint commits — not pushed, per this turn's explicit scope stop.
+
+### 2026-08-28 — Milestone 7 final documentation, review, and verification session (candidate `efe73e3`)
+
+- Prompt objective: reconcile all public documentation with the implemented Context Guard behavior, run a
+  focused security/architecture review, re-index and verify Graphify, run the complete final adversarial gates,
+  and perform clean-clone verification at the exact candidate — building on the five already-committed local
+  checkpoints (`61c02c3`, `c8ed307`, `2bdbd99`, `b43bec6`, `5242384`, all still unpushed at the start of this
+  session).
+- Decisions added or changed: none — this session documents, reviews, and verifies ADR-0013 exactly as already
+  implemented; no ADR text changed.
+- Documentation reconciled (each read against actual source before writing, not assumed): `README.md` (Context
+  Guard feature section, observable sequence, config/CLI examples, screenshots, demo command, updated test
+  counts, Control Center page bullet, Security-model-and-limitations subsection), `docs/ARCHITECTURE.md` (full
+  Context Guard section: execution-context boundary, state/revision/labels, exact 10-step evaluation order,
+  stdio-close/SDK-stdin-end handling, exact approval binding/revalidation, reset semantics, CLI/API/SSE/Control
+  Center data flow, migration, fail-closed points, plus 3 new Mermaid diagrams and a system-diagram node),
+  `docs/THREAT_MODEL.md` (a dedicated Context Guard section covering every threat named in this session's
+  prompt — indirect injection through trusted output, confused-deputy sequence, direct/cached-name bypass,
+  approval replay/argument/revision races, reset abuse, corrupted history, hostile content across every surface,
+  concurrency, restart/reconnect, covert channels, operator misclassification, monitor-mode implications,
+  null-fingerprint compatibility, SSE reconnect assumptions — each with its actual mitigation and residual
+  limitation stated separately, never conflated), `docs/POLICY_REFERENCE.md` (exact schema, built-in label
+  vocabulary, `when`-operator table, action/merge semantics, transition timing, validation-failure list, an
+  annotations-anti-example, two complete worked examples), `docs/VERIFICATION.md` (a Milestone 7 evidence table),
+  `docs/DEVELOPMENT.md` ("Using Context Guard locally" plus five contributor how-to subsections),
+  `docs/TROUBLESHOOTING.md` (eleven new entries), `CHANGELOG.md` (a Milestone 7 entry). Committed as
+  `5d8da1b docs(context-guard): document cross-tool escalation defense`. A new test,
+  `packages/gateway/tests/docs-context-guard-examples.test.ts` (5 cases), protects the four published YAML
+  examples (README's and POLICY_REFERENCE.md's migration/deny-path/approval-path snippets) by parsing each
+  through the real `loadGatewayConfig()` production loader — added in the same commit.
+- Focused security/architecture review (Phase 7): re-read the highest-risk code paths fresh and skeptically —
+  `pipeline.ts`'s Context Guard evaluation/approval-binding/label-append call sites (lines 205, 263-334, 380-419),
+  `transport/stdio.ts`'s three-independent-trigger-converging-on-one-idempotent-close pattern — and independently
+  confirmed each against source (not merely re-trusting the prior session's own account). Checked for: bypass via
+  direct/cached-name calls (none found — Tool Integrity's gate runs before Context Guard unconditionally, in
+  `transport/stdio.ts`, outside `runPipeline()`), stricter-action merge errors (`isAtLeastAsStrict()` correctly
+  gates the override), null-fingerprint handling (a legitimate skip-only-that-check state, not a bypass), label
+  append timing relative to result safety (append happens strictly after the terminal audit write/SSE emit,
+  confirmed at the exact line), unbounded lists/strings (`MAX_STATUS_ROWS`/`MAX_HISTORY_ROWS`/`MAX_REASON_LENGTH`/
+  `LIST_LIMIT` all present and enforced, client and server side), unsafe HTML rendering (`grep` confirms zero
+  `dangerouslySetInnerHTML` in the new Control Center files). **No new concrete defect found** beyond what the
+  prior UI/demo session already found and fixed (the narrow-viewport list-clipping regression, already committed
+  in `2bdbd99`) — no additional commit was needed for this phase.
+- Graphify re-index (Phase 8): read `~/.claude/skills/graphify/SKILL.md` and `references/update.md` in full
+  before running anything. `graphify update .` (direct CLI, AST-only, no LLM/API key, per this project's
+  `CLAUDE.md`) rebuilt the graph to **1514 nodes, 2409 edges, 104 communities** (from 1218/1744/85 at the end of
+  Milestone 6). Ran six symbol-level `graphify explain`/`path` queries and manually cross-checked every result
+  against source read directly earlier in this session (not the other way around) — all six confirmed
+  byte-accurate: `evaluateContextGuard`/`checkApprovalContextValid`/`appendContextLabels` call sites in
+  `pipeline.ts` (exact lines 205/326/410), the CLI/Control-API shared `summarizeContexts()` function, and the
+  Context Guard page's reuse of the pre-existing `openEventStream()`. One recurrence of the already-documented
+  object-literal/inline-callback call-attribution limitation (the new demo fixture's `bumpCallCounter`), and one
+  newly-observed narrow entity-resolution limitation (`path` colliding two similarly-named files onto one node
+  via loose label matching — confirmed via exact-symbol re-query that the underlying graph data itself was
+  correct). Explicitly scoped out this session: semantic (LLM/subagent) re-extraction of the changed Markdown
+  docs — AST-only code re-indexing was sufficient for every verification query this milestone needed, and this
+  is stated as a named scope decision, not a silent gap. Committed as
+  `efe73e3 docs(graphify): Milestone 7 incremental re-index and verification`.
+- Final local adversarial gates (Phase 9), all run this session at the post-review candidate: frozen install
+  clean; build clean (5/5 packages); lint clean (0 errors, the same 2 pre-existing `no-explicit-any` warnings as
+  every prior session); full test suite **policy 52/52, control-center 105/105, gateway 471/2-skipped (41
+  files) — 628 tests total, 0 failed**; gateway suite run a second time, byte-identical (471 passed/2 skipped
+  both times); all five demos re-run and passing (`secret-exfiltration`, `downstream-secret-result`,
+  `policy-drift-replay`, `tool-rug-pull`, `context-poisoning`); `context-poisoning/demo.mjs` run 3 consecutive
+  times, **58 PASS / 0 FAIL every time**, exit 0 each time; `context-poisoning-demo-cleanup.test.ts` (2 cases)
+  isolated and passing; `agentgate smoke-test` passing; `scripts/verify-packed-install.mjs` **15/15 PASS**
+  (including the 3 Context Guard CLI steps); a real, live, manual `agentgate context status/history/explain/
+  reset/verify` walkthrough against a genuinely running gateway (temp config, `context_guard: enforce`) —
+  `status`/`history`/`explain`/`verify` all correct, `reset` against a `closed` context correctly failed closed
+  with exit 1 (*"Context ... is already closed."*), proving the state-restriction invariant live, not only via
+  the test suite; `agentgate audit verify` (0 records — a fresh database) confirming both the audit and replay
+  chains report cleanly; tracked-file secret scan (exact `security.yml` pattern/allowlist) clean; tracked-file
+  hygiene scan (no tracked `.sqlite`/`.log`/`.env`/archive/token files; `.claude/`, `CLAUDE.md`, `graphify-out/`
+  all confirmed untracked) clean; `git diff --check` clean (CRLF notices only); process/port/temp residue check
+  clean (no leftover gateway process, no leftover `agentgate-*` temp directory) after every run above.
+- Clean-clone verification (Phase 11): resolved the exact candidate commit (`efe73e35116aab9c7435a99fccb0c471cac
+  20bca`), created a fresh `git clone --no-local` into a scratch temp directory (never a filesystem copy), and
+  confirmed it contained none of: `.claude/`, `CLAUDE.md`, `graphify-out/`, any pre-existing `dist/`,
+  `node_modules/`, database/token/log file, or workspace link. Ran, inside the clone, from a completely fresh
+  `pnpm install --frozen-lockfile`: build (clean, 4/4), lint (clean, same 2 pre-existing warnings), the complete
+  test suite (**policy 52/52, control-center 105/105, gateway 471/2-skipped, 628 total — byte-identical to the
+  outer repo's counts**), all five demos (all PASS), the onboarding smoke test (PASS), packed-install
+  verification (**15/15 PASS**), the tracked-file secret scan (clean), `git diff --check` (clean), and a
+  post-run `git status --short` (empty — every demo/test artifact was genuinely self-cleaning even inside a
+  from-scratch clone) and process/temp residue check (clean). **Every clean-clone gate passed on the first
+  attempt — no repair iteration was needed.** The clone directory was removed after verification.
+- Browser verification and screenshots: not re-run this session — the real-gateway/real-browser verification
+  (1280×900 and 420×800, zero console errors, zero failed/4xx/5xx requests, hostile-content/reset-dialog/focus
+  assertions, all PASS) was performed and its evidence already recorded in the 2026-08-28 "Milestone 7 Control
+  Center + demo session" ledger entry above, with the resulting screenshots (`docs/assets/control-center-context-
+  guard{,-escalation,-narrow}.png`) already committed in `5242384`. This session's documentation/Graphify/review
+  work did not change any Control Center source file, so no new capture was warranted; the existing screenshots
+  remain accurate for the candidate verified here.
+- Defects found and fixed this session: none — Phase 7's focused review found no new concrete defect (see
+  above); every documentation claim added was written from direct source reading and cross-checked by either an
+  existing passing test, a new test (`docs-context-guard-examples.test.ts`), a live manual CLI walkthrough, or a
+  Graphify query independently confirmed against source, so no doc-only inaccuracy requiring correction was
+  discovered after the fact.
+- Known limitations (unchanged from the ADR/prior entries, restated here for completeness — see ADR-0013 and the
+  `docs/THREAT_MODEL.md` Context Guard section for the full, authoritative list): no model-reasoning inspection
+  or causal proof; one stdio connection/process may not equal one model conversation; `monitor` mode (the
+  default) provides no blocking protection and `agentgate init` does not yet generate an `enforce`-mode block for
+  new projects; no cross-restart context persistence; TTL expiry not yet actively scheduled; a residual
+  cross-request evaluation/label-append race is not fully eliminated; the SSE "no historical replay to a fresh
+  subscriber" property has no dedicated low-level automated test (unchanged gap, reconfirmed still accurate this
+  session); Context Guard's hash chain is local tamper evidence, not tamper-proof. This session's own added
+  limitations: Graphify's semantic (doc-content) layer was not re-extracted, only the AST (code) layer (stated
+  scope decision above); Phase 7's review was a focused, targeted re-read of the highest-risk paths, not an
+  exhaustive line-by-line audit of every file in the milestone's diff.
+- Current Git state at the time of this entry: branch `main`, local HEAD `efe73e35116aab9c7435a99fccb0c471cac20b
+  ca` (seven commits ahead of `origin/main`, all local, all still unpushed as of this entry); `origin/main`
+  unchanged at `2e959e3121e542ea01a4d5f6ba28424a647cb865`; `git status --short` shows only `.claude/`/`CLAUDE.md`
+  untracked, nothing else.
+- Unresolved questions: none blocking.
+- Exact next action: append this entry (already done, immediately above), stage it alone, run a final
+  staged-diff check and secret scan, commit with a message file, then proceed to the pre-push audit and push
+  `main` normally — per this turn's explicit scope, observing GitHub CI/Security to green afterward.
