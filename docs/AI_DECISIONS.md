@@ -3048,3 +3048,37 @@ decisions across AI-agent sessions. Verify entries against the repository.
 - Exact next action: append this entry (already done, immediately above), stage it alone, run a final
   staged-diff check and secret scan, commit with a message file, then proceed to the pre-push audit and push
   `main` normally — per this turn's explicit scope, observing GitHub CI/Security to green afterward.
+
+### 2026-08-28 — Milestone 7 push and CI/Security observation (tested commit `fb414da`)
+
+- Prompt objective: perform the final pre-push audit, push `main` normally, and observe GitHub CI/Security to
+  green for the exact pushed commit.
+- Pre-push audit: inspected every commit in `origin/main..HEAD` (8 commits: `61c02c3`, `c8ed307`, `2bdbd99`,
+  `b43bec6`, `5242384`, `5d8da1b`, `efe73e3`, `fb414da`) and the aggregate diff (`git diff --stat
+  origin/main...HEAD`: 62 files changed, 10569 insertions(+), 116 deletions(-)) — confirmed no unrelated files,
+  no `.claude/`/`CLAUDE.md`/`graphify-out/` present anywhere in the diff, no tracked database/log/`.env`/archive
+  file, no `package.json` change of any kind (all three publishable packages remain `"private": true`,
+  unchanged), no git tag created. A full secret scan (the exact `security.yml` pattern/allowlist) over the
+  complete aggregate diff was clean.
+- Pushed: `git push origin main` → `2e959e3..fb414da main -> main`. Confirmed `git rev-parse HEAD` equals
+  `git rev-parse origin/main` (`fb414dae70338e9da3b6cc39fab365ca47348636`) immediately after, via a fresh
+  `git fetch`.
+- GitHub Actions observation for the exact pushed commit (`fb414dae70338e9da3b6cc39fab365ca47348636`):
+  - **CI** — run [`33175696438`](https://github.com/chidhvilasa/agentgate/actions/runs/33175696438) —
+    **conclusion: success**. Three jobs, all `success`: `build-test (ubuntu, node 20)`,
+    `build-test (ubuntu, node 22)`, `build-test (windows, node 22)` — each ran install/build/lint/test, all five
+    demos including the new `Context Guard cross-tool prompt-injection demo (ADR-0013)` step, packed-install
+    verification, the whitespace/hygiene check, and the no-generated-artifacts check; every step in every job
+    reported `success`.
+  - **Security** — run [`33175696263`](https://github.com/chidhvilasa/agentgate/actions/runs/33175696263) —
+    **conclusion: success**. Three jobs, all `success`: `Dependency audit (high+ severity)`,
+    `CodeQL (TypeScript/JavaScript)`, `Tracked-file secret scan (deterministic, local)`.
+  - No job failed; no re-run was needed.
+- Repository hygiene at this point: `git status --short` shows only `.claude/`/`CLAUDE.md` untracked; local HEAD
+  equals `origin/main` equals `fb414da`.
+- Known limitations: unchanged from the entry immediately above — see that entry and ADR-0013/
+  `docs/THREAT_MODEL.md` for the full, authoritative list. No new limitation was introduced by pushing.
+- Unresolved questions: none blocking.
+- Exact next action: append the final Milestone 7 publication-closeout ledger entry (this session, immediately
+  after this one) recording this already-observed green CI/Security state, run the same commit-hygiene checks,
+  and push that ledger-only commit — the last action of this turn's explicit scope.
